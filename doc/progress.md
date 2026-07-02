@@ -582,3 +582,18 @@ pm run build 和 idf.py build。- 2026-05-21 02:06:48 补充：USB JSON Lines �
 - 类型补齐：小程序自带 typings 增加 `getCurrentPages`，并收窄 `app.ts` 云同步页面通知的 null 类型，保证 strict TS 检查可过。
 - 验证：`web/node_modules/.bin/tsc.cmd -p miniapp/tsconfig.json --noEmit` 通过；`python -m compileall backend/app` 通过；`idf.py build` 通过。构建仍有既有 legacy I2C driver EOL 提示和 `ota_1` recovery 小分区过小警告，非本次改动引入。真机 COM16 端到端验证（固件生成营养/菜谱→MQTT 上行→小程序同步显示；小程序生成营养/菜谱→云端→设备屏幕缓存更新）待硬件侧执行。
 - 编辑前备份：`tmp/backups/manual/20260531-164159_miniapp_kitchen_ai_sync/`。
+
+----
+完成时间：2026-07-02 21:10:00 +08:00
+
+### 开发板迁移启动：ESP32-S3 → 慧勤智远 ESP32-P4 CB V1.2
+
+确定项目从 ESP32-S3-DevKitC-1 N8R8 整体迁移到慧勤智远 ESP32-P4 CB V1.2 小系统板（ESP32-P4NRW32，32MB 片内 PSRAM + 16MB W25Q128 Flash，板载 ESP32-C6 联网），完成迁移决策、S3 存档和引导文档改写。
+
+- 用户决策：屏幕暂未定型，先用原 TR230S 屏经转接排线走板上 20pin SPI 座（仅 SPI 4-wire）测试，后续可能换 MIPI-DSI 屏；摄像头换 OV5647（MIPI-CSI，OV3660 退役）；音频优先板载驻极 MIC + ES8311 + NS4150B，保留外接 INMP441/MAX98357A 回退；ESP-IDF 继续用 6.0.1；S3 用 git 完整存档后 main 分支全面转 P4。
+- S3 存档：提交 `ea8d0e8`，分支 `s3-legacy`，标签 `s3-final-20260702`。厂商 P4 资料目录（约 2.7GB）与 `video/` 加入 `.gitignore`，仅保留本地。
+- 文档改写：`CLAUDE.md` 新增“Board migration in progress”章节（迁移决策、分工作流状态表、P4 板占用引脚汇总、硬件红线）；`AGENTS.md` 更新项目概览、主要硬件设备、架构原则、硬件安全规则、构建/串口经验和协作者提醒，全部对齐 P4 板。
+- 已识别的关键硬件风险（已写入两份文档）：① 板上 20pin SPI 座 Pin1/2=5V、Pin3/4=GND，而 TR230S FPC Pin1=GND、Pin2=5V，严禁直插，转接排线须逐脚核对；② GPIO28/29 共享 I2C 同时接 CSI 摄像头 SCCB 和 ES8311，手册要求分时复用，影响“拍照+语音”并存场景；③ P4 无片内 Wi-Fi，须走 esp_hosted + esp_wifi_remote（SDIO 到 C6）并配置 SDIO 电源管理；④ 新板 COM 口待接板确认，COM16 属旧 S3 板。
+- 涉及模块：`CLAUDE.md`、`AGENTS.md`、`.gitignore`、`doc/progress.md`、`doc/memory.md`；固件代码本次未改动。
+- 下一步：重建 `sdkconfig.defaults` 与分区表（16MB Flash）→ network 组件接 esp_hosted → 串口/USB 协议在新板打通 → 屏幕转接与点亮 → 摄像头/音频逐个移植（顺序见 CLAUDE.md 工作流表）。
+- 编辑前备份：`tmp/backups/manual/20260702-204949_p4_migration_docs/`。

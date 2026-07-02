@@ -24,19 +24,21 @@
 
 ## 项目概览
 
-这是一个基于 ESP-IDF 的 ESP32-S3 智能冰箱贴项目，作品名称为“冰箱小精灵”。项目目标是构建一个可贴附在普通冰箱上的 AIoT 厨房助手，实现屏幕交互、传感器融合、拍照识别食材、本地库存缓存、临期提醒、菜谱推荐、购物清单和 OTA 运维。
+这是一个基于 ESP-IDF 的智能冰箱贴项目，作品名称为“冰箱小精灵”。项目目标是构建一个可贴附在普通冰箱上的 AIoT 厨房助手，实现屏幕交互、传感器融合、拍照识别食材、本地库存缓存、临期提醒、菜谱推荐、购物清单和 OTA 运维。
+
+**⚠️ 2026-07-02 起项目正在从 ESP32-S3-DevKitC-1 N8R8 迁移到“慧勤智远 ESP32-P4 CB V1.2”小系统板。**
+迁移决定和分工见 `CLAUDE.md` 的 “Board migration in progress” 章节。S3 最终代码已在 git 存档：分支 `s3-legacy`、标签 `s3-final-20260702`；`main` 分支此后只做 P4。旧文档、旧注释、`doc/memory.md` 2026-05 条目里的 GPIO、COM16、INMP441/MAX98357A 接线都属于 S3 旧板经验，在新板上不能照抄，只能当“问题模式”参考。
 
 当前仓库状态：
 
-- ESP-IDF 工程目标芯片：`esp32s3`。
-- 当前工程基于 `ESP-IDF 6.0.1`，`sdkconfig` 中已写入 `CONFIG_IDF_INIT_VERSION="6.0.1"`。
+- ESP-IDF 工程目标芯片：`esp32p4`（迁移中，`idf.py set-target esp32p4` 与 sdkconfig 重建尚未完成前，仓库内可能仍残留 `esp32s3` 生成配置，动手前先核对）。
+- 当前工程基于 `ESP-IDF 6.0.1`；厂商例程基于 5.5.x，移植时按 6.0.1 API 适配，不要另装第二套工具链。
 - 当前主固件以 `C` 语言为主，使用 `ESP-IDF`、`FreeRTOS`、`CMake` 和 `Kconfig`。
 - 仓库同时包含一个本地运维前端 `web/`，使用 `TypeScript + React 19 + Vite`，用于 USB/Web Serial 调试面板。
-- 当前源码已经不再是空白工程：`main/main.c` 已有主控启动编排，`components/` 下已有 `diagnostics`、`network`、`usb_protocol`、`display_test` 等组件。
-- 已有说明书和硬件资料在 `doc/` 目录。
+- 当前源码已经不再是空白工程：`main/main.c` 已有主控启动编排，`components/` 下已有完整组件集（network、camera、audio、speaker、asr、wake_word、sensors、radar、ui、storage、usb_protocol 等），这些组件的硬件层都需要按 P4 板逐个移植。
+- 新板的用户手册、原理图和厂商例程在 `doc/慧勤智远 ESP32-P4 CB V1.2小系统板/`（约 2.7GB，已 gitignore，只存本地，禁止删除）。
 - 已新增架构文档：`doc/项目架构与工作流设计.md`。
-- 已新增 `partitions_recovery.csv` 与 `sdkconfig.defaults`，目标配置已按 `ESP32-S3-DevKitC-1 N8R8` 规划为 `8MB Flash + 8MB PSRAM + 大主固件 ota_0 + 小 recovery ota_1 + 本地数据分区`。
-- 当前 `sdkconfig` 里仍保留一些需要继续核对和收敛的生成配置；后续实现固件时要继续以 N8R8 实板约束为准，不能回退到 2MB 单 app 或无本地 recovery 的纯云端恢复思路。
+- `partitions_recovery.csv` 与 `sdkconfig.defaults` 目前仍是 S3 N8R8（8MB Flash）时代的内容，必须按 P4 板重建：`16MB Flash（W25Q128）+ 32MB 片内 PSRAM + 大主固件 ota_0 + 小 recovery ota_1 + 本地数据分区`；分区角色和命名保持不变，不能回退到单 app 或无本地 recovery 的纯云端恢复思路。
 
 ## 工程技术栈与编程约定
 
@@ -66,10 +68,14 @@
 
 ## 重要文档
 
+- `doc/慧勤智远 ESP32-P4 CB V1.2小系统板/1. 用户手册/ESP32-P4 CB V1.2_用户手册_V1.4.pdf`
+  - **当前目标板的权威硬件资料**：§1.5 引脚分配表、§2 硬件电路（含 C6 SDIO 电源管理配置、共享 I2C 说明）。改任何引脚前必读。
+- `doc/慧勤智远 ESP32-P4 CB V1.2小系统板/3. 程序源码/`
+  - 厂商例程（基础例程/WIFI例程/综合实验/LVGL，均为 zip，基于 IDF 5.5.x）；移植 P4 外设时优先解压对应例程参考，但 API 按本工程的 6.0.1 适配。整个目录约 2.7GB，已 gitignore，禁止删除。
 - `doc/冰箱小精灵_本科物联网竞赛完整方案书_V1.1.docx`
-  - 项目完整方案书，包含需求、硬件、端侧固件、云端、移动端、数据模型、测试和风险。
-- `doc/屏幕技术文档Specification_TS040HDS02CP-B1620A_V1.2(1).pdf`
-  - 屏幕技术手册。
+  - 项目完整方案书，包含需求、硬件、端侧固件、云端、移动端、数据模型、测试和风险（写于 S3 时期，硬件细节以本文件和 CLAUDE.md 的 P4 章节为准）。
+- `doc/屏幕技术文档Specification_TS040HDS02CP-B1620A_V1.2(1).pdf` 与 `doc/屏幕模组_TS040HDS02CP-B1620A_规格整理.md`
+  - 原 TR230S 屏技术手册；做转接排线时必须对照其 20pin FPC 引脚定义逐脚核对。
 - `doc/项目架构与工作流设计.md`
   - 当前推荐架构和工作流，后续实现应优先参考。
 - `doc/progress.md`
@@ -77,56 +83,51 @@
 - `components/radar/README.md`
   - 24G 人体雷达组件快速说明，优先看这里理解 UART 接线、上报模式、字段语义和当前判定链，再进入 `components/radar/fridge_radar.c`。
 - `components/speaker/README.md`
-  - MAX98357A 扬声器与云端 TTS 测试记录，包含已验证接线、SiliconFlow TTS 400 根因、音色格式、开头杂音判断和后续排查顺序；修改扬声器、TTS 或 Web 扬声器测试页前必须先读。
+  - MAX98357A 扬声器与云端 TTS 测试记录（S3 时期接线已过时，TTS 结论仍有效），包含 SiliconFlow TTS 400 根因、音色格式、开头杂音判断和后续排查顺序；修改扬声器、TTS 或 Web 扬声器测试页前必须先读。
 
 ## 主要硬件设备
 
 ### 主控
 
-- 设备：`ESP32-S3-DevKitC-1 N8R8`
-- 规划资源：8 MB Flash + 8 MB PSRAM
-- 职责：屏幕 UI、触摸、OV3660 摄像头采集、传感器融合、本地库存缓存、MQTT、OTA、状态机、诊断日志。
+- 设备：慧勤智远 `ESP32-P4 CB V1.2` 小系统板（主控芯片 `ESP32-P4NRW32`，双核 RISC-V 360MHz）
+- 板载资源：16 MB W25Q128 QSPI Flash + 32 MB 片内 PSRAM；板载 `ESP32-C6-MINI-1` 模组（SDIO 连接主控，提供 Wi-Fi 6 / BT5）；ES8311 音频编解码器 + 驻极体 MIC + NS4150B 功放；MIPI-DSI 26pin 屏座、20pin SPI 屏座、MIPI-CSI 15pin 摄像头座；TF 卡、CAN、RS485、USB-C 串口（CH343P）、USB-C JTAG、USB OTG。
+- 职责：屏幕 UI、触摸、摄像头采集、传感器融合、本地库存缓存、MQTT、OTA、状态机、诊断日志。
+- **注意：ESP32-P4 芯片本身没有 Wi-Fi**，联网必须通过板载 ESP32-C6，走 `esp_hosted` + `esp_wifi_remote` 组件（SDIO），并按用户手册配置 SDIO 电源管理。
+- 权威接线依据：`doc/慧勤智远 ESP32-P4 CB V1.2小系统板/1. 用户手册/ESP32-P4 CB V1.2_用户手册_V1.4.pdf` §1.5 引脚分配表和 §2 硬件电路；写任何引脚号之前先查这份表。
 
 ### 屏幕
 
-- 型号：`TS040HDS02CP-B1620A`
-- 尺寸：4.0 inch
-- 分辨率：720 x 720
-- 显示驱动：`TR230S`
-- 显示接口：QSPI / SPI
-- 触摸驱动：`FT6336U`
-- 触摸接口：I2C
-- 屏幕供电：VCC 5 V
-- 逻辑电平：3.3 V
-- 最大时钟：SPI 4-wire / QSPI 4SDA 均为 100 MHz
+屏幕方案**尚未最终确定**（2026-07-02 用户决定）：
 
-首版应优先使用 QSPI 4SDA，SPI 4-wire 只作为调试保底。LVGL 必须使用局部刷新和行缓冲，避免 720 x 720 全帧频繁刷新导致内存和总线压力过大。
+- 近期验证方案：沿用原 `TS040HDS02CP-B1620A`（TR230S 驱动，4.0 寸 720x720，FT6336U 触摸），通过**转接排线**接到板上 20pin SPI 屏座，只能跑 SPI 4-wire 模式（该座只有单根 MOSI/MISO，物理上走不了 QSPI 4SDA）。
+- **严禁把 TR230S 的 20pin FPC 直接插进板上 20pin SPI 座**：板座 Pin1/2 是 5V、Pin3/4 是 GND，而 TR230S FPC 的 Pin1 是 GND、Pin2 是 5V VCC，直插会把 5V 加到屏的 GND 上烧屏。转接排线必须逐脚核对并经用户确认后才能上电。
+- 后续候选方案：慧勤智远 MIPI-DSI 屏（26pin 座，支持 5.0/5.5/8.0/10.1 寸；DSI 座的复位信号被板上电阻分压到 1.8V）。
+- 屏幕供电 VCC 5V、逻辑电平 3.3V 的约束继续有效。LVGL 必须使用局部刷新和行缓冲，避免大分辨率全帧频繁刷新导致内存和总线压力过大。
 
 ### 摄像头
 
-- 设备：`OV3660` 摄像头模组。
-- 设计定位：直接接入 ESP32-S3 主控，不额外引入第二块 ESP32 摄像头主板，不使用 TF/SD 卡作为首版图片缓存。
+- 设备：`OV5647` MIPI-CSI 摄像头模组（板上 15pin CSI 座；原 OV3660 DVP 方案退役，P4 板没有 DVP 接口）。
 - 职责：食材拍照、JPEG/帧缓冲管理、HTTPS 上传任务、拍照状态和错误上报。
-- 引脚约束：OV3660 的 DVP、XCLK、PCLK、VSYNC、HREF、SCCB/I2C 等引脚必须结合实物模组、屏幕 QSPI、I2S、I2C、PSRAM 和启动绑带脚统一复核，文档和代码中不要提前写死未验证 GPIO。
+- 引脚与总线约束：CSI 数据/时钟走专用 MIPI 引脚；`CSI_RST`=GPIO26、`CSI_PWDN`=GPIO27；SCCB 走 GPIO28/GPIO29 的共享 I2C。**该 I2C 总线同时接 ES8311 音频编解码器，用户手册明确要求两者分时复用，不能同时使用**——拍照与语音并存的业务必须对这条总线做串行化（单一持有者/互斥锁），并把该约束写进相关组件头文件注释。
+- 参考例程：厂商 `basic__routines` 中的 `17_mipicamera`、`22_photograph`。
 
 ### 传感和交互外设
 
-- 光照传感器：BH1750 或光敏电阻模块，用于辅助判断开门光照突变。
-- IMU：MPU6050 或 ICM-42688，用于检测门体姿态变化和震动。
-- 人体存在毫米波雷达：首版推荐 `HLK-LD2410C/LD2410B` 或同类 24GHz/25GHz UART/GPIO 模块，用于靠近唤醒、有人保持和夜间无人判断。
-- I2S 麦克风：INMP441 或 ICS-43434，用于命令词或语音输入。
-- 蜂鸣器/小喇叭：用于定时器和提醒音。
-- 当前 MAX98357A 扬声器测试接线和 TTS 实测结论见 `components/speaker/README.md`；不要再使用 `alloy` 作为 SiliconFlow `fnlp/MOSS-TTSD-v0.5` 的音色。
+- 光照传感器：BH1750 或光敏电阻模块，用于辅助判断开门光照突变。**P4 的 ADC 通道与 S3 不同，光敏模块的 ADC 引脚必须查 P4 数据手册重新指定，不得沿用 S3 的 GPIO1。**
+- IMU：MPU6050 或 ICM-42688，用于检测门体姿态变化和震动；I2C 引脚在 P4 板上重新排（注意避开 GPIO28/29 共享总线的摄像头/编解码器冲突，必要时用 GPIO 矩阵另开一路 I2C）。
+- 人体存在毫米波雷达：HLK 24GHz UART 模块，UART 引脚在 P4 板引出 IO 中重新排。
+- 音频输入/输出（2026-07-02 用户决定）：**优先使用板载方案**——驻极体 MIC + ES8311（采集）和 ES8311 + NS4150B 功放 + Speaker 端子（播放）；ES8311 的 I2S 在 GPIO2-6，功放使能 `PA_CTRL`=GPIO11。同时**保留外接 INMP441 / MAX98357A 的能力**（走引出 IO），作为板载方案异常时的回退。
+- 原 MAX98357A 的 TTS 实测结论仍然有效：不要再使用 `alloy` 作为 SiliconFlow `fnlp/MOSS-TTSD-v0.5` 的音色，见 `components/speaker/README.md`。
 
 ## 架构原则
 
-- ESP32-S3 是交互、状态与媒体采集中心，负责确定性、低延迟、本地可用的功能。
-- OV3660 摄像头直接接入主控，主控负责拍照、帧缓冲/JPEG 管理、上传任务和状态机联动。
-- 首版 AI 能力采用设备直连 OpenAI-compatible API：ESP32-S3 通过 HTTPS 直接访问用户配置的 API Base URL、模型和 API Key。
+- ESP32-P4 是交互、状态与媒体采集中心，负责确定性、低延迟、本地可用的功能；联网能力由板载 ESP32-C6 经 SDIO + `esp_hosted`/`esp_wifi_remote` 提供，业务代码继续通过 `network` 组件的接口使用 Wi-Fi，不直接感知 C6。
+- OV5647 摄像头经 MIPI-CSI 直接接入主控，主控负责拍照、帧缓冲/JPEG 管理、上传任务和状态机联动。
+- 首版 AI 能力采用设备直连 OpenAI-compatible API：主控通过 HTTPS 直接访问用户配置的 API Base URL、模型和 API Key。
 - API Key 在开发/Demo 阶段允许保存在设备 NVS 中，串口响应和日志不得回显明文；后续如进入公开部署或量产，应评估 NVS 加密和设备端 Key 轮换。
 - 远程服务在首版中不是 AI 必需链路；如后续需要跨设备同步、远程库存管理、日志分析和 OTA 运维，应作为独立扩展，不改变 AI 直连主链路。
 - 库存、提醒和位置数据要支持本地缓存，断网时仍能展示基础信息。
-- 首版不新增 TF/SD 卡，主控不长期保存图片原图；离线时只缓存拍照任务状态、错误码和必要元数据，网络恢复后重试上传或提示用户重新拍照。
+- 首版不把 TF/SD 卡作为图片缓存主路径（P4 板虽有 TF 卡座，扩展前先评估必要性），主控不长期保存图片原图；离线时只缓存拍照任务状态、错误码和必要元数据，网络恢复后重试上传或提示用户重新拍照。
 - 人体存在毫米波雷达只作为靠近/有人上下文，不得单独作为开门判断依据；开门判断仍以光照突变和 IMU 姿态变化为主。
 
 ## 硬件安全规则，必须严格遵守
@@ -135,23 +136,27 @@
 
 执行任何硬件相关改动前，必须检查：
 
-- 电压是否匹配：屏幕 VCC 是 5 V，但 ESP32-S3 GPIO 逻辑是 3.3 V，不得把 5 V 信号直接接入 GPIO。
-- GPIO 是否安全：避免使用会影响启动或可能被 Flash/PSRAM 占用的 GPIO，例如 GPIO0、GPIO35、GPIO36、GPIO37、GPIO45、GPIO46；OV3660 DVP、毫米波雷达 UART/GPIO、屏幕 QSPI 和 I2S 麦克风必须统一排查冲突。
-- 电源能力是否足够：屏幕背光、Wi-Fi 峰值、OV3660 摄像头、毫米波雷达、麦克风和传感器同时工作时建议使用稳定 5 V/2 A 电源。
+- 电压是否匹配：屏幕 VCC 是 5 V，但 ESP32-P4 GPIO 逻辑是 3.3 V，不得把 5 V 信号直接接入 GPIO；DSI 座的复位网络在板上被分压到 1.8 V，不要绕过。
+- GPIO 是否安全：P4 板上避开启动绑带脚 `GPIO35(BOOT)`、`GPIO36`（带 10K 上拉），以及 32.768KHz 晶振占用的 `GPIO0/GPIO1`。改引脚前先查用户手册 §1.5 引脚表，确认目标脚没有被板载外设占用（ES8311 I2S 在 GPIO2-6、SPI 屏座 GPIO7-10/15-20/22/23、`PA_CTRL`=GPIO11、按键/LED GPIO12-14、USB GPIO24/25、CSI 控制 GPIO26/27、共享 I2C GPIO28/29、RS485 GPIO30-32、CAN GPIO33/34、UART0 GPIO37/38、TF 卡 GPIO39-45、`LCD_ID`=GPIO46、C6 SDIO GPIO47-54）。
+- 共享 I2C 是否冲突：GPIO28/29 同时接 CSI 摄像头 SCCB 和 ES8311，手册要求分时复用；任何同时用到摄像头和音频的改动都必须先说明总线串行化方案。
+- 电源能力是否足够：屏幕背光、C6 Wi-Fi 峰值、OV5647 摄像头、毫米波雷达、麦克风和传感器同时工作时建议使用稳定 5 V/2 A 电源；板上保险丝为 1.5 A，注意总电流余量。
 - GND 是否共地：主控、摄像头、传感器、屏幕调试时需要确认共地关系。
 - I2C 是否有合适上拉：通常 SDA/SCL 上拉到 3.3 V，不能上拉到 5 V。
 - 背光和蜂鸣器是否需要限流或驱动：不得直接让 GPIO 承担超额电流。
-- SPI/QSPI 引脚方向是否正确：尤其是屏幕 SDO0 到 SDO3、CS、SCLK、RESET、WAIT。
+- SPI 引脚方向是否正确：尤其是屏幕转接排线的 CS、SCLK、MOSI/MISO、RESET、DC。
 - 触摸芯片供电和复位是否符合手册。
-- OV3660 的供电、XCLK/PCLK 时钟、DVP 数据线、VSYNC/HREF、SCCB/I2C、复位/掉电脚和 PSRAM 帧缓冲是否满足时序与内存约束。
-- 毫米波雷达模块的 VCC、UART/GPIO 逻辑电平、波特率、安装朝向和金属遮挡是否明确；若模块可 5 V 供电，也必须确认 IO 不会输出 5 V 到 ESP32-S3。
+- OV5647 的供电、CSI 时钟/数据、`CSI_RST`/`CSI_PWDN`、SCCB 和 PSRAM 帧缓冲是否满足时序与内存约束。
+- C6 联网链路是否按手册配置了 SDIO 电源管理；未配置时 Wi-Fi 异常不要先怀疑业务代码。
+- 毫米波雷达模块的 VCC、UART/GPIO 逻辑电平、波特率、安装朝向和金属遮挡是否明确；若模块可 5 V 供电，也必须确认 IO 不会输出 5 V 到主控。
 
 禁止事项：
 
 - 禁止在未核对电压和引脚定义前给硬件上电。
-- 禁止把 5 V 输出或背光高压直接接 ESP32-S3 GPIO。
-- 禁止在不确认启动绑带脚状态的情况下把外设接到启动敏感 GPIO。
-- 禁止为了“试一下”随意提高 SPI/QSPI 时钟、OV3660 XCLK、背光占空比或 GPIO 驱动强度。
+- **禁止把 TR230S 屏的 20pin FPC 直接插入板上 20pin SPI 屏座**：两者引脚定义不同（板座 Pin1/2=5V、Pin3/4=GND；屏 FPC Pin1=GND、Pin2=5V），直插会烧屏。必须使用逐脚核对过、并经用户确认的转接排线。
+- 禁止把 5 V 输出或背光高压直接接主控 GPIO。
+- 禁止在不确认启动绑带脚状态的情况下把外设接到启动敏感 GPIO（GPIO35/GPIO36）。
+- 禁止为了“试一下”随意提高 SPI 时钟、摄像头时钟、背光占空比或 GPIO 驱动强度。
+- 禁止在同一时刻同时占用 GPIO28/29 共享 I2C 上的摄像头和 ES8311，必须分时复用。
 - 禁止把毫米波雷达的“有人存在”结果直接等同于“冰箱门已打开”。
 - 禁止忽略烧录日志中的 brownout、watchdog、heap overflow、PSRAM 初始化失败等硬件相关异常。
 
@@ -264,15 +269,15 @@ idf.py build
 ```powershell
 $env:IDF_TOOLS_PATH='D:\esp-IDF\.espressif'
 . D:\esp-IDF\.espressif\v6.0.1\esp-idf\export.ps1
-idf.py -p COM16 flash
+idf.py -p <COM口> flash
 ```
 
-已验证的硬件串口：
+目标芯片与串口：
 
-- 当前 ESP32-S3-DevKitC-1 N8R8 开发板连接在 `COM16`。
-- 后续在本项目运行时，允许 AI 直接连接 `COM16` 做构建后烧录、串口日志采集、Web Serial JSON Lines 命令调试和真实硬件回归测试。
+- 目标芯片为 `esp32p4`；首次移植时需 `idf.py set-target esp32p4` 并按新 `sdkconfig.defaults` 重建配置，不要沿用 S3 生成的 `sdkconfig`。
+- **P4 板的 COM 口号尚未确认**（旧的 `COM16` 是已退役的 S3 板）。P4 板有两个 USB-C 口：`COM` 口走 CH343P（UART0，GPIO37/38），用于烧录、monitor 和 JSON Lines 调试；另一个是 USB-C JTAG 口。首次接板时先在设备管理器确认实际 COM 号，并把结果记入 `doc/memory.md`，之后脚本才允许直连该串口。
 - 打开串口或烧录后开发板可能复位一次，这是正常现象；调试脚本应等待 Wi-Fi/SNTP 稳定后再发网络或 AI 请求。
-- 串口可能被浏览器 Web Serial、ESP-IDF monitor、VS Code Serial Monitor 或其他串口助手占用；如果打开失败，先关闭占用端口的程序，不要反复重试烧录。
+- 串口可能被浏览器 Web Serial、ESP-IDF monitor、VS Code Serial Monitor 或其他串口助手占用；如果打开失败，先关闭占用端口的程序，不要反复重试烧录。杀残留进程时只杀命令行明确包含目标 COM 口且为 `idf_monitor` / `idf.py monitor` 的进程。
 
 串口协议调试经验：
 
@@ -287,8 +292,10 @@ idf.py -p COM16 flash
 
 - 先读 `doc/项目架构与工作流设计.md`，再写代码。
 - 这是硬件项目，不是纯软件项目。任何看似简单的 GPIO、供电、时钟、背光或外设初始化都可能造成硬件风险。
-- 不要假设当前 `sdkconfig` 已经适配 N8R8；它目前仍需要修正。
-- 不要再把摄像头设计成额外独立摄像头节点；当前架构使用 OV3660 直连 ESP32-S3 主控。
+- 项目正在从 ESP32-S3 迁移到 ESP32-P4 CB V1.2：不要假设当前 `sdkconfig`、分区表或任何旧引脚号在 P4 上有效；S3 存档在 git 分支 `s3-legacy` / 标签 `s3-final-20260702`。
+- ESP32-P4 芯片本身没有 Wi-Fi，联网必须走板载 ESP32-C6（SDIO + `esp_hosted` + `esp_wifi_remote`），不要在 P4 工程里直接找 `esp_wifi` 的片内实现。
+- 摄像头是 OV5647 MIPI-CSI 直连主控；不要再引用 OV3660/DVP/`esp32-camera` 方案，也不要设计成额外独立摄像头节点。
+- GPIO28/29 共享 I2C 同时接摄像头 SCCB 和 ES8311，必须分时复用；涉及"拍照 + 语音"并存的功能先想清楚总线串行化再动手。
 - 不要把毫米波雷达单独作为开门判断依据；它只提供靠近、有人保持和夜间无人上下文。
 - 不要让 AI 识别结果直接入库，必须经过规则校验和用户确认。
 - 所有代码功能区写中文注释，特别是硬件相关代码。
