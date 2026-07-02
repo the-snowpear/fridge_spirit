@@ -96,6 +96,9 @@ export class WebSerialTransport extends BaseTransport {
       command,
       payload,
     };
+    if (command === "kitchen_ai_generate" && payload && typeof payload === "object" && "page" in payload) {
+      Object.assign(request, { page: (payload as { page?: unknown }).page });
+    }
     const line = `${JSON.stringify(request)}\n`;
 
     const promise = new Promise<DeviceResponse<TPayload>>((resolve, reject) => {
@@ -121,18 +124,24 @@ export class WebSerialTransport extends BaseTransport {
     if (command === "scan_wifi") {
       return Math.max(this.timeoutMs, 60000);
     }
+    if (command === "voice_chat_stop") {
+      return Math.max(this.timeoutMs, 150000);
+    }
+    if (command === "tts_play") {
+      return Math.max(this.timeoutMs, 120000);
+    }
     if (
       command === "set_network" ||
       command === "test_ai_chat" ||
       command === "ai_assistant_chat" ||
-      command === "voice_chat_stop" ||
       command === "mic_record_wav" ||
       command === "camera_capture" ||
       command === "camera_jpeg_diag" ||
       command === "camera_rgb565_diag" ||
       command === "camera_analyze" ||
       command === "get_ai_context_preview" ||
-      command === "test_ai_task"
+      command === "test_ai_task" ||
+      command === "kitchen_ai_generate"
     ) {
       return Math.max(this.timeoutMs, 90000);
     }

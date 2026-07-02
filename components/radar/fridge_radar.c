@@ -14,6 +14,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
@@ -1079,7 +1080,15 @@ esp_err_t fridge_radar_init(void)
         ESP_LOGW(TAG, "normal mode command failed: %s", esp_err_to_name(err));
     }
 
-    BaseType_t ok = xTaskCreate(radar_task, "radar_task", FRIDGE_RADAR_TASK_STACK, NULL, 5, NULL);
+    // 雷达任务只读 UART 并更新内存快照，不执行 Flash 写入；栈放 PSRAM 释放内部 SRAM，
+    // 不改变 UART 引脚、电平和波特率。
+    BaseType_t ok = xTaskCreateWithCaps(radar_task,
+                                        "radar_task",
+                                        FRIDGE_RADAR_TASK_STACK,
+                                        NULL,
+                                        5,
+                                        NULL,
+                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (ok != pdPASS) {
         radar_snapshot_touch_error("radar task create failed");
         return ESP_ERR_NO_MEM;

@@ -35,16 +35,15 @@ static void rename_done_cb(const char *text)
 static void cell_cb(lv_event_t *event)
 {
     uintptr_t cell = (uintptr_t)lv_event_get_user_data(event);
-    fridge_ui_model_t model = {0};
-    fridge_ui_model_get(&model);
+    uint8_t active_zone = fridge_ui_model_get_active_zone();
     if (fridge_ui_model_is_place_picking()) {
-        if (fridge_ui_model_apply_place_pick(model.active_zone, (uint8_t)cell)) {
+        if (fridge_ui_model_apply_place_pick(active_zone, (uint8_t)cell)) {
             fridge_ui_toast("位置已更新");
             fridge_ui_show_page(FRIDGE_UI_PAGE_EDIT_FOOD);
         }
         return;
     }
-    fridge_ui_model_select_cell(model.active_zone, (uint8_t)cell);
+    fridge_ui_model_select_cell(active_zone, (uint8_t)cell);
     fridge_ui_show_page(FRIDGE_UI_PAGE_EDIT_FOOD);
 }
 
@@ -57,9 +56,9 @@ static void back_cb(lv_event_t *event)
 static void rename_cb(lv_event_t *event)
 {
     (void)event;
-    fridge_ui_model_t model = {0};
-    fridge_ui_model_get(&model);
-    fridge_ui_keyboard_open_text("空间名称", model.zones[model.active_zone].name, rename_done_cb);
+    fridge_ui_zone_summary_t zone = {0};
+    (void)fridge_ui_model_get_zone_summary(fridge_ui_model_get_active_zone(), &zone);
+    fridge_ui_keyboard_open_text("空间名称", zone.name, rename_done_cb);
 }
 
 static void delete_space_cb(lv_event_t *event)
@@ -243,11 +242,13 @@ void fridge_ui_page_zone_create(lv_obj_t *parent)
 
 void fridge_ui_page_zone_update(void)
 {
-    fridge_ui_model_t model = {0};
-    fridge_ui_model_get(&model);
+    uint8_t active_zone = fridge_ui_model_get_active_zone();
+    uint8_t active_cell = fridge_ui_model_get_active_cell();
+    fridge_ui_zone_summary_t zone = {0};
+    (void)fridge_ui_model_get_zone_summary(active_zone, &zone);
     bool picking = fridge_ui_model_is_place_picking();
     fridge_ui_label_set_text_if_changed(s_kicker, picking ? "九宫格位置选择" : "九宫格位置管理");
-    fridge_ui_label_set_text_if_changed(s_title, model.zones[model.active_zone].name);
+    fridge_ui_label_set_text_if_changed(s_title, zone.name);
     if (s_place_hint) {
         if (picking) {
             lv_obj_remove_flag(s_place_hint, LV_OBJ_FLAG_HIDDEN);
@@ -259,7 +260,7 @@ void fridge_ui_page_zone_update(void)
             lv_obj_set_height(s_board, 414);
         }
     }
-    bool custom = model.active_zone >= 4 && model.active_zone < FRIDGE_UI_ZONE_COUNT && model.zones[model.active_zone].custom;
+    bool custom = active_zone >= 4 && active_zone < FRIDGE_UI_ZONE_COUNT && zone.custom;
     if (s_rename_btn) {
         if (custom) {
             lv_obj_remove_flag(s_rename_btn, LV_OBJ_FLAG_HIDDEN);
@@ -275,23 +276,27 @@ void fridge_ui_page_zone_update(void)
         }
     }
     for (uint8_t i = 0; i < FRIDGE_UI_ZONE_CELL_COUNT; i++) {
-        set_cell_selected(i, i == model.active_cell, picking);
+        set_cell_selected(i, i == active_cell, picking);
         set_cell_text(i, "空位", "可登记", "待设置");
     }
-    for (size_t i = 0; i < model.food_count; i++) {
-        const fridge_ui_food_t *food = &model.foods[i];
-        if (food->zone == model.active_zone && food->cell < FRIDGE_UI_ZONE_CELL_COUNT) {
+    size_t food_count = fridge_ui_model_get_food_count();
+    for (size_t i = 0; i < food_count; i++) {
+        fridge_ui_food_t food = {0};
+        if (!fridge_ui_model_get_food(i, &food)) {
+            continue;
+        }
+        if (food.zone == active_zone && food.cell < FRIDGE_UI_ZONE_CELL_COUNT) {
             char expire[24] = {0};
             if (picking) {
                 strlcpy(expire, "点此放入", sizeof(expire));
-            } else if (food->days_left <= 0) {
+            } else if (food.days_left <= 0) {
                 strlcpy(expire, "今天", sizeof(expire));
-            } else if (food->days_left == 1) {
+            } else if (food.days_left == 1) {
                 strlcpy(expire, "明天", sizeof(expire));
             } else {
-                snprintf(expire, sizeof(expire), "%d 天后", food->days_left);
+                snprintf(expire, sizeof(expire), "%d 天后", food.days_left);
             }
-            set_cell_text(food->cell, food->name, food->quantity, expire);
+            set_cell_text(food.cell, food.name, food.quantity, expire);
         }
     }
 }

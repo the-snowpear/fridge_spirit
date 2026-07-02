@@ -1,4 +1,4 @@
-<!-- 更多页：2×2 大卡片，对齐 ui-reference 的 .more-grid -->
+<!-- 更多页：扩展功能入口，与固件更多页保持能力一致 -->
 <view class="page more-page rise">
   <view class="hello-bar">
     <view class="col">

@@ -61,20 +61,30 @@ class SyncDevicePushRequest(CamelModel):
     request_device_inventory 为 true 时会先要求设备上报本地库存快照，便于手动同步时把设备侧改动带回云端。
     accept_clean_device_snapshot 仅用于初次设备种子同步：允许后端接收 dirty=false 的设备快照。
     push_cloud_snapshot=false 时只请求设备上报，不立刻下发云端快照，避免初次同步时旧云端数据抢先覆盖设备。
+    wait_for_ack=false 为默认轻量路径：HTTP 只确认命令已投递/排队，不阻塞等待固件写盘完成。
     """
 
     domains: list[str] = Field(default_factory=list)
     request_device_inventory: bool = True
     accept_clean_device_snapshot: bool = False
     push_cloud_snapshot: bool = True
+    wait_for_ack: bool = False
 
 
 class SyncDevicePushData(CamelModel):
-    """POST /sync/device-push 返回数据。"""
+    """POST /sync/device-push 返回数据。
+
+    - command_count：尝试发布的命令总数。
+    - queued_count：成功 publish 到 MQTT 的命令数（不代表设备已执行）。
+    - acked_count：收到设备 completed ACK 且执行成功的命令数（真正落地）。
+    - skipped_offline：因设备当前离线而跳过的命令数（依赖设备重连补发）。
+    """
 
     device_count: int
     command_count: int
     queued_count: int
+    acked_count: int = 0
+    skipped_offline: int = 0
     domains: list[str] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
 
@@ -105,6 +115,16 @@ class RecipeCacheData(CamelModel):
     updated_at: datetime | None = None
 
 
+class NutritionCacheData(CamelModel):
+    """云端备份的营养助手缓存文档。"""
+
+    schema_version: int = 1
+    source: str | None = None
+    generated_at: int | None = None
+    nutrition: JsonDict = Field(default_factory=dict)
+    updated_at: datetime | None = None
+
+
 class AiHistorySnapshot(CamelModel):
     """云端 AI 历史快照。"""
 
@@ -123,6 +143,7 @@ class SyncSnapshotData(CamelModel):
     reminders: list[ReminderSchema] = Field(default_factory=list)
     shopping_list: ShoppingListData = Field(default_factory=ShoppingListData)
     recipe_cache: RecipeCacheData = Field(default_factory=RecipeCacheData)
+    nutrition_cache: NutritionCacheData = Field(default_factory=NutritionCacheData)
     settings: JsonDict = Field(default_factory=dict)
     ai_history: AiHistorySnapshot | None = None
 

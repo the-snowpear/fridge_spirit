@@ -14,13 +14,14 @@
 #include "esp_check.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_heap_caps.h"
 #include "fridge_speaker.h"
 #include "fridge_storage.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
-#define KITCHEN_TOOLS_TASK_STACK 6144
+#define KITCHEN_TOOLS_TASK_STACK 4096
 #define KITCHEN_TOOLS_TASK_PRIORITY 3
 #define KITCHEN_TOOLS_POLL_MS 500
 #define KITCHEN_TOOLS_EPOCH_READY_THRESHOLD 1735689600LL
@@ -430,7 +431,20 @@ esp_err_t fridge_kitchen_tools_init(void)
         xSemaphoreGive(s_lock);
     }
 
-    BaseType_t ok = xTaskCreate(kitchen_tools_task, "kitchen_tools", KITCHEN_TOOLS_TASK_STACK, NULL, KITCHEN_TOOLS_TASK_PRIORITY, &s_task);
+    // 主循环会在闹钟触发时持久化 last_trigger_day 到 Flash；任务栈必须在内部 SRAM，
+    // 避免 Flash 访问关闭 cache 时访问 PSRAM 栈导致断言复位。
+    BaseType_t ok = xTaskCreate(kitchen_tools_task,
+                                "kitchen_tools",
+                                KITCHEN_TOOLS_TASK_STACK,
+                                NULL,
+                                KITCHEN_TOOLS_TASK_PRIORITY,
+                                &s_task);
+    if (ok != pdPASS) {
+        ESP_LOGW(TAG,
+                 "create kitchen tools internal stack failed, stack=%lu, largest_internal=%u bytes",
+                 (unsigned long)KITCHEN_TOOLS_TASK_STACK,
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    }
     ESP_RETURN_ON_FALSE(ok == pdPASS, ESP_ERR_NO_MEM, TAG, "create kitchen tools task failed");
     ESP_LOGI(TAG, "kitchen tools initialized, alarms=%u", (unsigned)s_alarm_count);
     return ESP_OK;

@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "esp_err.h"
 #include "esp_log.h"
@@ -60,8 +61,61 @@ static const char *active_cell_display(uint8_t cell)
     return cell < FRIDGE_UI_ZONE_CELL_COUNT ? CELL_DISPLAY_NAMES[cell] : "中 · 中";
 }
 
+// 判断到期文本是否为 YYYY-MM-DD 绝对日期，并解析成 struct tm。
+// 后端 expire_date 是 ISO 日期（如 2026-06-07），而本地新建食材用的是“今天/明天/N天后”相对文本。
+// 二者会混在同一个 expire 字段里，必须分别处理。
+static bool parse_iso_date(const char *text, struct tm *out)
+{
+    if (!text || !out) {
+        return false;
+    }
+    int year = 0;
+    int month = 0;
+    int day = 0;
+    // 严格匹配 4-2-2 数字日期，避免把“2天后”这类相对文本误判成日期。
+    if (sscanf(text, "%4d-%2d-%2d", &year, &month, &day) != 3) {
+        return false;
+    }
+    if (year < 1970 || month < 1 || month > 12 || day < 1 || day > 31) {
+        return false;
+    }
+    memset(out, 0, sizeof(*out));
+    out->tm_year = year - 1900;
+    out->tm_mon = month - 1;
+    out->tm_mday = day;
+    out->tm_hour = 12;  // 取当天正午，避免跨时区/夏令时把整天差算偏
+    out->tm_isdst = -1;
+    return true;
+}
+
+// 把到期时间归一化成剩余天数 days_left。
+// 支持三种来源：绝对日期 YYYY-MM-DD（按当前 SNTP 时间求差天数）、相对文本“今天/明天”、纯数字“N天后”。
+// 修复点：旧实现对所有非“今天/明天”文本直接 atoi，遇到 2026-06-07 会得到 2026 天，导致默认 7 天显示成 2026 天后。
 static void normalize_expire_days(void)
 {
+    struct tm expire_tm;
+    if (parse_iso_date(s_editing.expire, &expire_tm)) {
+        time_t now = time(NULL);
+        time_t expire_at = mktime(&expire_tm);
+        if (expire_at != (time_t)-1) {
+            // 设备未完成 SNTP 对时（now 仍停留在 1970 附近）时，绝对日期算不出有意义的天数，保持原值不破坏。
+            if (now > 24 * 60 * 60) {
+                double diff_sec = difftime(expire_at, now);
+                long diff_days = (long)(diff_sec / (24.0 * 60.0 * 60.0));
+                if (diff_sec > 0 && diff_days == 0) {
+                    diff_days = 1;  // 不足一天但尚未过期，按明天处理，避免显示成今天
+                }
+                if (diff_days < 0) {
+                    diff_days = 0;
+                } else if (diff_days > 9999) {
+                    diff_days = 9999;
+                }
+                s_editing.days_left = (int)diff_days;
+            }
+        }
+        return;
+    }
+
     int days = atoi(s_editing.expire);
     if (strstr(s_editing.expire, "今天")) {
         s_editing.days_left = 0;
@@ -88,60 +142,55 @@ static void set_field(edit_field_view_t *field, const char *value)
     if (!field || !field->value) {
         return;
     }
-    fridge_ui_label_set_text_if_changed(field->value, value && value[0] ? value : "未填写");
+    const char *text = value && value[0] ? value : "未填写";
+    fridge_ui_label_set_text_if_changed(field->value, text);
+    // 食材名称可能来自 AI 识别或手动输入，遇到大字号字库缺字时切到 AI 对话同款小字库，避免显示方框。
+    lv_obj_set_style_text_font(field->value, fridge_ui_font_for_text(fridge_ui_font_body(), text), 0);
 }
 
 static void set_location_value(void)
 {
     char place[64] = {0};
     const char *zone_name = "";
-    fridge_ui_model_t model = {0};
-    fridge_ui_model_get(&model);
+    fridge_ui_zone_summary_t zone = {0};
     if (s_editing.zone < FRIDGE_UI_ZONE_COUNT) {
-        zone_name = model.zones[s_editing.zone].name;
+        (void)fridge_ui_model_get_zone_summary(s_editing.zone, &zone);
+        zone_name = zone.name;
     }
     snprintf(place, sizeof(place), "%s %s", zone_name[0] ? zone_name : "冰箱区域", active_cell_display(s_editing.cell));
     strlcpy(s_editing.location, place, sizeof(s_editing.location));
     set_field(&s_location, place);
 }
 
-static const char *default_note_text(char *buf, size_t buf_size)
-{
-    if (!buf || buf_size == 0) {
-        return "";
-    }
-    if (s_editing.name[0] == '\0') {
-        strlcpy(buf, "可登记新食材。", buf_size);
-        return buf;
-    }
-    snprintf(buf, buf_size, "来自%s，%s。",
-             s_editing.location[0] ? s_editing.location : "当前位置",
-             s_editing.quantity[0] ? s_editing.quantity : "待确认");
-    return buf;
-}
-
 static void refresh_fields(void)
 {
-    char note_buf[96] = {0};
-    const char *note = s_note_text[0] ? s_note_text : default_note_text(note_buf, sizeof(note_buf));
     set_field(&s_name, s_editing.name);
     set_field(&s_quantity, s_editing.quantity);
     set_field(&s_expire, s_editing.expire);
     set_location_value();
     set_field(&s_stored, s_stored_text);
-    set_field(&s_note, note);
+    set_field(&s_note, s_note_text);
     fridge_ui_label_set_text_if_changed(s_manual_preview, s_note_text[0] ? s_note_text : "未输入补充信息，可点击手动补充登记信息，或使用语音补充数量、位置和备注。");
+}
+
+static void sync_editing_draft(void)
+{
+    // 键盘弹窗确认后，当前编辑页仍会被 UI 轮询刷新；把临时草稿同步到模型层，
+    // 避免刷新时从旧 editing_food 读回旧值。这里只更新草稿，不写 Flash、不触发 MQTT。
+    fridge_ui_model_set_editing_draft(&s_editing);
 }
 
 static void edit_name_done(const char *text)
 {
     strlcpy(s_editing.name, text ? text : "", sizeof(s_editing.name));
+    sync_editing_draft();
     refresh_fields();
 }
 
 static void edit_quantity_done(const char *text)
 {
     strlcpy(s_editing.quantity, text ? text : "", sizeof(s_editing.quantity));
+    sync_editing_draft();
     refresh_fields();
 }
 
@@ -149,12 +198,15 @@ static void edit_expire_done(const char *text)
 {
     strlcpy(s_editing.expire, text ? text : "", sizeof(s_editing.expire));
     normalize_expire_days();
+    sync_editing_draft();
     refresh_fields();
 }
 
 static void edit_stored_done(const char *text)
 {
     strlcpy(s_stored_text, text ? text : "", sizeof(s_stored_text));
+    strlcpy(s_editing.stored_at, s_stored_text, sizeof(s_editing.stored_at));
+    sync_editing_draft();
     refresh_fields();
 }
 
@@ -163,6 +215,21 @@ static void edit_note_done(const char *text)
     strlcpy(s_note_text, text ? text : "", sizeof(s_note_text));
     refresh_fields();
     fridge_ui_label_set_text_if_changed(s_voice_status, "已追加到备注。");
+}
+
+static bool is_legacy_auto_note(const char *note)
+{
+    // 旧版本会自动生成“来自某区域，某数量。”备注；它不是用户输入，修复污染数据时直接隐藏。
+    if (!note || note[0] == '\0') {
+        return false;
+    }
+    const char *suffix = "。";
+    size_t note_len = strlen(note);
+    size_t suffix_len = strlen(suffix);
+    return note_len >= suffix_len &&
+           strstr(note, "来自") &&
+           strstr(note, "，") &&
+           strcmp(note + note_len - suffix_len, suffix) == 0;
 }
 
 static void restore_wake_if_needed(void)
@@ -404,6 +471,7 @@ static void save_cb(lv_event_t *event)
     }
     normalize_expire_days();
     set_location_value();
+    strlcpy(s_editing.stored_at, s_stored_text, sizeof(s_editing.stored_at));
     fridge_ui_model_update_editing_food(&s_editing);
     close_voice_sheet();
     fridge_ui_toast("已保存");
@@ -622,14 +690,14 @@ void fridge_ui_page_edit_food_create(lv_obj_t *parent)
 
 void fridge_ui_page_edit_food_update(void)
 {
-    fridge_ui_model_t model = {0};
-    fridge_ui_model_get(&model);
-    s_editing = model.editing_food;
+    (void)fridge_ui_model_get_editing_food(&s_editing, NULL);
     if (s_last_zone != s_editing.zone || s_last_cell != s_editing.cell) {
         s_last_zone = s_editing.zone;
         s_last_cell = s_editing.cell;
         s_note_text[0] = '\0';
-        s_stored_text[0] = '\0';
+        strlcpy(s_stored_text, s_editing.stored_at, sizeof(s_stored_text));
+    } else if (is_legacy_auto_note(s_note_text)) {
+        s_note_text[0] = '\0';
     }
     if (s_stored_text[0] == '\0') {
         make_default_stored_text(s_stored_text, sizeof(s_stored_text), s_editing.zone, s_editing.cell);

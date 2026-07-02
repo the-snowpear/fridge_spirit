@@ -51,6 +51,13 @@ typedef struct {
 // 初始化光敏 ADC 采样任务。
 esp_err_t fridge_sensors_init(void);
 
+// 独占 GPIO4/GPIO5 共享 I2C0 总线。
+// 注意：该总线同时挂 MPU6050、FT6336U 和 OV3660 SCCB；摄像头初始化会连续写寄存器，期间必须避免其他任务插队。
+esp_err_t fridge_sensors_i2c_lock(uint32_t timeout_ms);
+
+// 释放 GPIO4/GPIO5 共享 I2C0 总线；必须与 fridge_sensors_i2c_lock() 成对调用。
+void fridge_sensors_i2c_unlock(void);
+
 // 读取最近一次采样快照；该函数不访问硬件，适合 USB/Web Serial 高频轮询。
 esp_err_t fridge_sensors_get_snapshot(fridge_sensor_snapshot_t *out);
 

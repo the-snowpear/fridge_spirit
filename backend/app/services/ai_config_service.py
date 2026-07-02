@@ -80,6 +80,33 @@ def _normalize_value(raw: dict[str, Any] | None) -> dict[str, Any]:
     return {k: v for k, v in raw.items() if k in _ALLOWED_VALUE_KEYS}
 
 
+def _device_payload_has_seed_config(device_payload: dict[str, Any]) -> bool:
+    """判断设备 retained 配置是否足够作为服务端空表的初始种子。"""
+    seed_keys = {
+        "apiBaseUrl",
+        "api_key",
+        "apiKey",
+        "chatModel",
+        "model",
+        "systemPrompt",
+        "system_prompt",
+        "timeoutMs",
+        "profileName",
+        "asrApiBaseUrl",
+        "asrModel",
+        "asrApiKey",
+        "asr_api_key",
+        "asrTimeoutMs",
+        "ttsApiBaseUrl",
+        "ttsModel",
+        "ttsVoice",
+        "ttsApiKey",
+        "tts_api_key",
+        "ttsTimeoutMs",
+    }
+    return any(bool(device_payload.get(key)) for key in seed_keys)
+
+
 async def _load_row(db: AsyncSession, home_id: UUID) -> SystemConfig | None:
     result = await db.execute(
         select(SystemConfig).where(
@@ -298,13 +325,13 @@ async def merge_from_device(
 
     row = await _load_row(db, home_id)
     if row is None:
-        return True
-    backend_ts_ms = (
-        int(row.config_updated_at.timestamp() * 1000)
-    )
+        backend_ts_ms = 0
+    else:
+        backend_ts_ms = int(row.config_updated_at.timestamp() * 1000)
 
     # ---- 设备时间戳更大：用设备的覆盖 backend ----
-    if device_ts_ms > backend_ts_ms:
+    # 服务端空表时，旧设备配置即使没有 timestamp 也可作为比赛演示的初始种子。
+    if device_ts_ms > backend_ts_ms or (row is None and _device_payload_has_seed_config(device_payload)):
         def pick(camel: str, snake: str) -> Any:
             if camel in device_payload:
                 return device_payload[camel]
@@ -320,6 +347,15 @@ async def merge_from_device(
             system_prompt=pick("systemPrompt", "system_prompt"),
             timeout_ms=pick("timeoutMs", "timeout_ms"),
             profile_name=pick("profileName", "profile_name"),
+            asr_api_base_url=pick("asrApiBaseUrl", "asr_api_base_url"),
+            asr_model=pick("asrModel", "asr_model"),
+            asr_api_key=pick("asrApiKey", "asr_api_key"),
+            asr_timeout_ms=pick("asrTimeoutMs", "asr_timeout_ms"),
+            tts_api_base_url=pick("ttsApiBaseUrl", "tts_api_base_url"),
+            tts_model=pick("ttsModel", "tts_model"),
+            tts_voice=pick("ttsVoice", "tts_voice"),
+            tts_api_key=pick("ttsApiKey", "tts_api_key"),
+            tts_timeout_ms=pick("ttsTimeoutMs", "tts_timeout_ms"),
         )
         device_dt = datetime.fromtimestamp(device_ts_ms / 1000.0, tz=timezone.utc)
         await upsert_ai_config(
@@ -354,11 +390,18 @@ async def should_accept_device_config(
     except (TypeError, ValueError):
         device_ts_ms = 0
 
+    force_import = bool(
+        device_payload.get("forceImport")
+        or device_payload.get("force_import")
+        or device_payload.get("acceptCleanSnapshot")
+    )
     row = await _load_row(db, home_id)
     backend_ts_ms = (
         int(row.config_updated_at.timestamp() * 1000) if row is not None else 0
     )
-    return device_ts_ms > backend_ts_ms
+    return force_import or device_ts_ms > backend_ts_ms or (
+        row is None and _device_payload_has_seed_config(device_payload)
+    )
 
 
 __all__ = [

@@ -30,5 +30,5 @@ idf_component_register(
         "widgets/dock.c"
         "widgets/keyboard.c"
     INCLUDE_DIRS "include"
-    REQUIRES display touch sensors radar state_machine network storage mqtt_protocol audio asr ai_client ai_context ai_actions camera speaker kitchen_tools wake_word freertos heap log nvs_flash cjson lvgl
+    REQUIRES display touch sensors radar state_machine network storage mqtt_protocol audio asr ai_client ai_context ai_actions camera speaker kitchen_tools kitchen_ai wake_word freertos heap log nvs_flash cjson lvgl
 )

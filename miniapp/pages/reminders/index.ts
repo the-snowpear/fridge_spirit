@@ -59,6 +59,11 @@ Page({
     this.load().finally(() => wx.stopPullDownRefresh());
   },
 
+  onCloudSyncApplied() {
+    if (this.data.loading) return;
+    void this.load();
+  },
+
   async load() {
     if (this.data.loading) return;
     this.setData({ loading: true, errorText: "" });
@@ -95,14 +100,10 @@ Page({
     const id = event.currentTarget.dataset.id as string;
     this.markConfirming(id, true);
     try {
-      const updated = await confirmReminder(id, status);
-      enqueueSyncOp("reminder", "set_status", {
-        reminder: updated,
-        reminderId: id,
-        status,
-      });
+      await confirmReminder(id, status);
+      // 在线 REST 已写库 + 记同步事件 + 推设备，不再入队，避免重复投影。
       void syncNow().catch(() => {
-        // 提醒操作已提交；同步失败时保留队列。
+        // 提醒操作已提交；同步失败不影响本次确认结果。
       });
       this.setData({ items: this.data.items.filter((x) => x.id !== id) });
       wx.showToast({
@@ -110,6 +111,7 @@ Page({
         icon: "success",
       });
     } catch (err) {
+      // 离线/REST 失败才入队，等待恢复后补写。
       enqueueSyncOp("reminder", "set_status_pending", {
         reminderId: id,
         status,

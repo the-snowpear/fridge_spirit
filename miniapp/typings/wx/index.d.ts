@@ -3,6 +3,7 @@ declare const App: WechatMiniprogram.App.Constructor;
 declare const Page: WechatMiniprogram.Page.Constructor;
 declare const Component: WechatMiniprogram.Component.Constructor;
 declare const getApp: WechatMiniprogram.GetApp;
+declare const getCurrentPages: WechatMiniprogram.GetCurrentPages;
 
 declare namespace WechatMiniprogram {
   interface IAnyObject {
@@ -150,4 +151,6 @@ declare namespace WechatMiniprogram {
   type GetApp = <T extends object = any>() => T & {
     globalData: any;
   };
+
+  type GetCurrentPages = () => Array<Page.Instance & IAnyObject>;
 }

@@ -5,18 +5,19 @@
 
 static lv_obj_t *s_result;
 static lv_obj_t *s_meta;
+static lv_obj_t *s_doubt;
 static lv_obj_t *s_note;
 static lv_obj_t *s_confirm;
 static lv_obj_t *s_edit;
 
 static fridge_ui_camera_result_t current_result(void)
 {
-    fridge_ui_model_t model = {0};
-    fridge_ui_model_get(&model);
-    return model.camera_result;
+    fridge_ui_camera_result_t result = {0};
+    (void)fridge_ui_model_get_camera_result(&result);
+    return result;
 }
 
-static void confirm_cb(lv_event_t *event)
+static void register_cb(lv_event_t *event)
 {
     (void)event;
     fridge_ui_camera_result_t result = current_result();
@@ -24,23 +25,16 @@ static void confirm_cb(lv_event_t *event)
         fridge_ui_toast("还没有可确认的识别结果");
         return;
     }
-    fridge_ui_model_add_camera_food(result.name, result.quantity, result.zone, result.cell);
-    fridge_ui_toast("已登记，继续拍摄");
-    fridge_ui_show_page(FRIDGE_UI_PAGE_CAMERA);
+    fridge_ui_model_prepare_camera_food_draft(result.name, result.quantity, result.zone, result.cell);
+    fridge_ui_toast("请确认后保存");
+    fridge_ui_show_page(FRIDGE_UI_PAGE_EDIT_FOOD);
 }
 
-static void edit_cb(lv_event_t *event)
+static void cancel_cb(lv_event_t *event)
 {
     (void)event;
-    fridge_ui_camera_result_t result = current_result();
-    if (!result.valid || !result.ok) {
-        fridge_ui_toast("请先重新拍照识别");
-        fridge_ui_show_page(FRIDGE_UI_PAGE_CAMERA);
-        return;
-    }
-    fridge_ui_model_add_camera_food(result.name, result.quantity, result.zone, result.cell);
-    fridge_ui_model_select_cell(result.zone, result.cell);
-    fridge_ui_show_page(FRIDGE_UI_PAGE_EDIT_FOOD);
+    fridge_ui_toast("已取消登记");
+    fridge_ui_show_page(FRIDGE_UI_PAGE_CAMERA);
 }
 
 void fridge_ui_page_camera_result_create(lv_obj_t *parent)
@@ -53,7 +47,7 @@ void fridge_ui_page_camera_result_create(lv_obj_t *parent)
     lv_obj_align(kicker, LV_ALIGN_TOP_LEFT, 36, 8);
 
     lv_obj_t *title = lv_label_create(parent);
-    lv_label_set_text(title, "确认食材信息");
+    lv_label_set_text(title, "确认物体信息");
     lv_obj_set_style_text_font(title, fridge_ui_font_title(), 0);
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, 36, 36);
 
@@ -67,15 +61,22 @@ void fridge_ui_page_camera_result_create(lv_obj_t *parent)
 
     s_result = lv_label_create(card);
     lv_obj_set_style_text_color(s_result, theme->accent, 0);
-    lv_obj_set_style_text_font(s_result, fridge_ui_font_title(), 0);
+    lv_obj_set_style_text_font(s_result, fridge_ui_font_ai_body(), 0);
     lv_obj_set_width(s_result, 580);
     lv_obj_align(s_result, LV_ALIGN_TOP_LEFT, 22, 20);
 
     s_meta = lv_label_create(card);
     lv_obj_set_style_text_color(s_meta, theme->text, 0);
-    lv_obj_set_style_text_font(s_meta, fridge_ui_font_body(), 0);
+    lv_obj_set_style_text_font(s_meta, fridge_ui_font_ai_body(), 0);
     lv_obj_set_width(s_meta, 580);
-    lv_obj_align(s_meta, LV_ALIGN_TOP_LEFT, 22, 86);
+    lv_obj_align(s_meta, LV_ALIGN_TOP_LEFT, 22, 72);
+
+    s_doubt = lv_label_create(card);
+    lv_obj_set_style_text_color(s_doubt, theme->muted, 0);
+    lv_obj_set_style_text_font(s_doubt, fridge_ui_font_ai_body(), 0);
+    lv_label_set_long_mode(s_doubt, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(s_doubt, 580);
+    lv_obj_align(s_doubt, LV_ALIGN_TOP_LEFT, 22, 150);
 
     s_note = lv_label_create(parent);
     lv_label_set_text(s_note, "AI 结果只作为候选，确认后才会写入库存");
@@ -86,22 +87,29 @@ void fridge_ui_page_camera_result_create(lv_obj_t *parent)
     s_confirm = lv_button_create(parent);
     lv_obj_set_size(s_confirm, 260, 64);
     lv_obj_align(s_confirm, LV_ALIGN_BOTTOM_RIGHT, -48, -18);
-    lv_obj_set_style_bg_color(s_confirm, theme->accent, 0);
+    lv_obj_set_style_bg_color(s_confirm, theme->accent_2, 0);
     lv_obj_set_style_bg_color(s_confirm, theme->surface_soft, LV_STATE_DISABLED);
+    lv_obj_set_style_shadow_width(s_confirm, 14, 0);
+    lv_obj_set_style_shadow_opa(s_confirm, LV_OPA_20, 0);
+    lv_obj_set_style_shadow_color(s_confirm, lv_color_hex(0xD95745), 0);
+    lv_obj_set_style_shadow_offset_y(s_confirm, 5, 0);
     lv_obj_set_style_radius(s_confirm, 8, 0);
-    lv_obj_add_event_cb(s_confirm, confirm_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(s_confirm, cancel_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *confirm_label = lv_label_create(s_confirm);
-    lv_label_set_text(confirm_label, "确认放入");
+    lv_label_set_text(confirm_label, "取消");
     lv_obj_center(confirm_label);
 
     s_edit = lv_button_create(parent);
-    lv_obj_set_size(s_edit, 190, 64);
+    lv_obj_set_size(s_edit, 220, 64);
     lv_obj_align(s_edit, LV_ALIGN_BOTTOM_LEFT, 48, -18);
-    lv_obj_set_style_bg_color(s_edit, theme->surface_soft, 0);
+    lv_obj_set_style_bg_color(s_edit, theme->accent, 0);
+    lv_obj_set_style_bg_color(s_edit, theme->surface_soft, LV_STATE_DISABLED);
     lv_obj_set_style_radius(s_edit, 8, 0);
-    lv_obj_add_event_cb(s_edit, edit_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(s_edit, register_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *edit_label = lv_label_create(s_edit);
-    lv_label_set_text(edit_label, "修改");
+    lv_label_set_text(edit_label, "确认登记");
+    lv_obj_set_style_text_color(edit_label, lv_color_white(), 0);
+    lv_obj_set_style_text_opa(edit_label, LV_OPA_50, LV_STATE_DISABLED);
     lv_obj_center(edit_label);
 }
 
@@ -111,29 +119,34 @@ void fridge_ui_page_camera_result_update(void)
     bool can_confirm = result.valid && result.ok;
     if (!result.valid) {
         fridge_ui_label_set_text_if_changed(s_result, "还没有识别结果");
-        fridge_ui_label_set_text_if_changed(s_meta, "请返回拍照登记页，对准食材后点击快门。");
+        fridge_ui_label_set_text_if_changed(s_meta, "请返回拍照登记页，对准主体物体后点击快门。");
+        fridge_ui_label_set_text_if_changed(s_doubt, "");
     } else if (result.analyzing) {
         fridge_ui_label_set_text_if_changed(s_result, "正在识别...");
         fridge_ui_label_set_text_if_changed(s_meta, result.meta[0] ? result.meta : "正在上传照片给 AI。");
+        fridge_ui_label_set_text_if_changed(s_doubt, "");
     } else if (!result.ok) {
         fridge_ui_label_set_text_if_changed(s_result, "识别失败");
         fridge_ui_label_set_text_if_changed(s_meta, result.error[0] ? result.error : "请检查网络、API Key 或摄像头接线后重试。");
+        fridge_ui_label_set_text_if_changed(s_doubt, "");
     } else {
         fridge_ui_label_set_text_fmt_if_changed(s_result, "%s · %s", result.name, result.quantity);
         fridge_ui_label_set_text_fmt_if_changed(s_meta,
-                                                "%s\n图像 %dx%d · JPEG %u 字节 · AI %lu ms",
-                                                result.meta[0] ? result.meta : "请确认食材和数量。",
+                                                "%s\nHTTP %d · %s\n图像 %dx%d · JPEG %u 字节 · AI %lu ms",
+                                                result.meta[0] ? result.meta : "请确认名称和数量。",
+                                                result.http_status,
+                                                result.ai_model[0] ? result.ai_model : "AI 模型",
                                                 result.width,
                                                 result.height,
                                                 (unsigned)result.jpeg_bytes,
                                                 (unsigned long)result.latency_ms);
+        fridge_ui_label_set_text_if_changed(s_doubt, result.doubt);
     }
 
     if (can_confirm) {
-        lv_obj_remove_state(s_confirm, LV_STATE_DISABLED);
         lv_obj_remove_state(s_edit, LV_STATE_DISABLED);
     } else {
-        lv_obj_add_state(s_confirm, LV_STATE_DISABLED);
         lv_obj_add_state(s_edit, LV_STATE_DISABLED);
     }
+    lv_obj_remove_state(s_confirm, LV_STATE_DISABLED);
 }

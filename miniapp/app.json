@@ -8,6 +8,7 @@
     "pages/inventory/index",
     "pages/inventory-detail/index",
     "pages/recipe/index",
+    "pages/nutrition/index",
     "pages/shopping/index",
     "pages/reminders/index",
     "pages/offline/index",

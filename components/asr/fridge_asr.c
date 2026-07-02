@@ -68,6 +68,22 @@ static bool starts_with(const char *text, const char *prefix)
     return text && prefix && strncmp(text, prefix, strlen(prefix)) == 0;
 }
 
+static void *asr_large_calloc(size_t count, size_t size)
+{
+    if (count == 0 || size == 0 || count > SIZE_MAX / size) {
+        return NULL;
+    }
+    size_t total = count * size;
+    void *ptr = heap_caps_malloc(total, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!ptr) {
+        ptr = heap_caps_malloc(total, MALLOC_CAP_8BIT);
+    }
+    if (ptr) {
+        memset(ptr, 0, total);
+    }
+    return ptr;
+}
+
 static esp_err_t open_asr_nvs(nvs_open_mode_t mode, nvs_handle_t *handle)
 {
     ESP_RETURN_ON_FALSE(handle, ESP_ERR_INVALID_ARG, TAG, "NVS handle is NULL");
@@ -448,9 +464,16 @@ esp_err_t fridge_asr_get_sync_payload(char *out, size_t out_size)
     return ESP_OK;
 }
 
-esp_err_t fridge_asr_transcribe_latest_recording(fridge_asr_result_t *out)
+esp_err_t fridge_asr_load_active_config(fridge_asr_config_update_t *out)
 {
-    ESP_RETURN_ON_FALSE(out, ESP_ERR_INVALID_ARG, TAG, "out is NULL");
+    ESP_RETURN_ON_FALSE(out, ESP_ERR_INVALID_ARG, TAG, "ASR config output is NULL");
+    return load_config(out);
+}
+
+esp_err_t fridge_asr_transcribe_latest_recording_with_config(const fridge_asr_config_update_t *config,
+                                                             fridge_asr_result_t *out)
+{
+    ESP_RETURN_ON_FALSE(config && out, ESP_ERR_INVALID_ARG, TAG, "invalid ASR transcribe args");
     memset(out, 0, sizeof(*out));
     int64_t start_us = esp_timer_get_time();
 
@@ -462,23 +485,18 @@ esp_err_t fridge_asr_transcribe_latest_recording(fridge_asr_result_t *out)
         return ESP_ERR_INVALID_STATE;
     }
     if (!net.internet_ready) {
-        esp_err_t sync_err = fridge_network_sync_time();
-        fridge_network_get_status(&net);
-        if (sync_err != ESP_OK || !net.internet_ready) {
-            strlcpy(out->error, "network time/internet is not ready", sizeof(out->error));
-            set_last_error(out->error);
-            return ESP_ERR_INVALID_STATE;
-        }
+        // PSRAM 栈 worker 不能进入 SNTP/Flash/cache 风险路径；调用方应先在内部栈完成校时。
+        strlcpy(out->error, "network time/internet is not ready", sizeof(out->error));
+        set_last_error(out->error);
+        return ESP_ERR_INVALID_STATE;
     }
 
-    fridge_asr_config_update_t config = {0};
-    ESP_RETURN_ON_ERROR(load_config(&config), TAG, "load ASR config failed");
-    if (config.api_base_url[0] == '\0' || !starts_with(config.api_base_url, "https://")) {
+    if (config->api_base_url[0] == '\0' || !starts_with(config->api_base_url, "https://")) {
         strlcpy(out->error, "ASR URL must use https://", sizeof(out->error));
         set_last_error(out->error);
         return ESP_ERR_INVALID_STATE;
     }
-    if (config.api_key[0] == '\0') {
+    if (config->api_key[0] == '\0') {
         strlcpy(out->error, "missing ASR API Key", sizeof(out->error));
         set_last_error(out->error);
         return ESP_ERR_INVALID_STATE;
@@ -496,14 +514,15 @@ esp_err_t fridge_asr_transcribe_latest_recording(fridge_asr_result_t *out)
     out->audio_bytes = pcm_bytes + WAV_HEADER_BYTES;
 
     size_t body_len = 0;
-    char *body = build_multipart_body(&config, pcm, pcm_bytes, &body_len);
+    char *body = build_multipart_body(config, pcm, pcm_bytes, &body_len);
     if (!body) {
         strlcpy(out->error, "build ASR multipart body failed", sizeof(out->error));
         set_last_error(out->error);
         return ESP_ERR_NO_MEM;
     }
 
-    char *response_body = calloc(1, ASR_RESPONSE_CAP);
+    // ASR 响应虽小，但语音链路同时跑 TLS/HTTP，优先放 PSRAM 减少内部 SRAM 碎片。
+    char *response_body = asr_large_calloc(1, ASR_RESPONSE_CAP);
     if (!response_body) {
         free(body);
         return ESP_ERR_NO_MEM;
@@ -516,9 +535,9 @@ esp_err_t fridge_asr_transcribe_latest_recording(fridge_asr_result_t *out)
     };
 
     esp_http_client_config_t http_config = {
-        .url = config.api_base_url,
+        .url = config->api_base_url,
         .method = HTTP_METHOD_POST,
-        .timeout_ms = (int)clamp_timeout_ms(config.timeout_ms),
+        .timeout_ms = (int)clamp_timeout_ms(config->timeout_ms),
         .crt_bundle_attach = esp_crt_bundle_attach,
         .event_handler = asr_http_event_handler,
         .user_data = &rx,
@@ -533,7 +552,7 @@ esp_err_t fridge_asr_transcribe_latest_recording(fridge_asr_result_t *out)
     }
 
     char auth_header[FRIDGE_ASR_MAX_API_KEY_LEN + 16] = {0};
-    snprintf(auth_header, sizeof(auth_header), "Bearer %s", config.api_key);
+    snprintf(auth_header, sizeof(auth_header), "Bearer %s", config->api_key);
     esp_http_client_set_header(client, "Accept", "application/json");
     esp_http_client_set_header(client, "Accept-Encoding", "identity");
     esp_http_client_set_header(client, "Content-Type", "multipart/form-data; boundary=----fridge-spirit-asr-boundary");
@@ -543,7 +562,7 @@ esp_err_t fridge_asr_transcribe_latest_recording(fridge_asr_result_t *out)
     err = esp_http_client_perform(client);
     out->http_status = esp_http_client_get_status_code(client);
     out->latency_ms = (uint32_t)((esp_timer_get_time() - start_us) / 1000);
-    strlcpy(out->model, config.model, sizeof(out->model));
+    strlcpy(out->model, config->model, sizeof(out->model));
     esp_http_client_cleanup(client);
     free(body);
 
@@ -582,4 +601,20 @@ esp_err_t fridge_asr_transcribe_latest_recording(fridge_asr_result_t *out)
     set_last_error("");
     free(response_body);
     return ESP_OK;
+}
+
+esp_err_t fridge_asr_transcribe_latest_recording(fridge_asr_result_t *out)
+{
+    ESP_RETURN_ON_FALSE(out, ESP_ERR_INVALID_ARG, TAG, "out is NULL");
+    memset(out, 0, sizeof(*out));
+
+    fridge_asr_config_update_t config = {0};
+    ESP_RETURN_ON_ERROR(load_config(&config), TAG, "load ASR config failed");
+
+    fridge_network_status_t net = {0};
+    fridge_network_get_status(&net);
+    if (!net.internet_ready) {
+        (void)fridge_network_sync_time();
+    }
+    return fridge_asr_transcribe_latest_recording_with_config(&config, out);
 }

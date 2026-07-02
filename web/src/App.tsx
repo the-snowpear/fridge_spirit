@@ -50,9 +50,10 @@ import type {
   DeviceMessage,
   DeviceStatus,
   DiagnosticSnapshot,
+  KitchenAIPage,
+  KitchenAIStatus,
   LogLevel,
   MemorySummary,
-  MicRecordWavResponse,
   MQTTConfig,
   NetworkConfig,
   PinInfo,
@@ -104,6 +105,7 @@ const defaultAiConfig: AIConfig = {
   model: "gpt-4o-mini",
   systemPrompt: "你是冰箱小精灵的开发测试助手，请用简短中文回答。",
   timeoutMs: 30000,
+  apiFormat: 0,
   hasApiKey: false,
   apiKeyPreview: "",
   lastError: "",
@@ -151,20 +153,6 @@ const AI_SYSTEM_PROMPT_MAX_BYTES = 8192;
 const utf8Encoder = new TextEncoder();
 const utf8ByteLength = (value: string) => utf8Encoder.encode(value).length;
 
-function base64ToBlob(base64: string, mimeType: string) {
-  const binary = window.atob(base64);
-  const chunks: BlobPart[] = [];
-  for (let offset = 0; offset < binary.length; offset += 8192) {
-    const slice = binary.slice(offset, offset + 8192);
-    const bytes = new Uint8Array(slice.length);
-    for (let index = 0; index < slice.length; index += 1) {
-      bytes[index] = slice.charCodeAt(index);
-    }
-    chunks.push(bytes);
-  }
-  return new Blob(chunks, { type: mimeType });
-}
-
 function normalizeTtsVoiceForRequest(model: string, voice: string) {
   const trimmedModel = model.trim();
   const trimmedVoice = voice.trim();
@@ -188,6 +176,13 @@ const projectAiTaskLabels: Record<ProjectAITaskType, string> = {
   reminder_explain: "临期提醒解释",
   voice_intent_parse: "语音意图解析",
   kitchen_tool_control: "厨房工具控制",
+};
+
+const kitchenAiPageLabels: Record<KitchenAIPage, string> = {
+  recipe: "菜谱 JSON",
+  nutrition: "营养 JSON",
+  shopping: "购物清单 JSON",
+  all: "全部 JSON",
 };
 
 const defaultProjectAiRequest: ProjectAITaskRequest = {
@@ -217,11 +212,43 @@ const formatHistoryTime = (createdAt: number) => {
   }).format(new Date(createdAt * 1000));
 };
 
+const formatUnixTime = (seconds: number) => {
+  if (!seconds) {
+    return "--";
+  }
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).format(new Date(seconds * 1000));
+};
+
+const formatDayKey = (dayKey: number) => {
+  if (!dayKey) {
+    return "--";
+  }
+  const text = String(dayKey);
+  return text.length === 8 ? `${text.slice(0, 4)}-${text.slice(4, 6)}-${text.slice(6, 8)}` : text;
+};
+
+const normalizeChatContent = (content: string) =>
+  content.replace(/\\n/g, "\n").replace(/\\r/g, "\r").replace(/\\t/g, "\t");
+
+interface AIReplyDebug {
+  at: string;
+  immediateReply: string;
+  historyReply: string;
+  historySource: "device_history" | "missing";
+  same: boolean;
+}
+
 const deviceHistoryToChatMessages = (history: DeviceChatHistory): AIChatMessage[] =>
   history.messages.map((message, index) => ({
     id: message.id || `device-history-${message.createdAt}-${index}`,
     role: message.role === "assistant" ? "assistant" : "user",
-    content: message.content,
+    content: normalizeChatContent(message.content),
     at: formatHistoryTime(message.createdAt),
     status: "ok",
   }));
@@ -306,6 +333,7 @@ function App() {
   const [radarBusy, setRadarBusy] = useState(false);
   const [aiChatDraft, setAiChatDraft] = useState("");
   const [aiMessages, setAiMessages] = useState<AIChatMessage[]>([]);
+  const [aiReplyDebug, setAiReplyDebug] = useState<AIReplyDebug | null>(null);
   const [aiBusy, setAiBusy] = useState(false);
   const [projectAiRequest, setProjectAiRequest] = useState<ProjectAITaskRequest>(defaultProjectAiRequest);
   const [aiContextPreview, setAiContextPreview] = useState<AIContextPreview | null>(null);
@@ -321,6 +349,8 @@ function App() {
     recent_summary: ["用户希望优先处理临期食材"],
   }, null, 2));
   const [projectAiBusy, setProjectAiBusy] = useState(false);
+  const [kitchenAiStatus, setKitchenAiStatus] = useState<KitchenAIStatus | null>(null);
+  const [kitchenAiBusyPage, setKitchenAiBusyPage] = useState<KitchenAIPage | null>(null);
   const [wifiNetworks, setWifiNetworks] = useState<WifiNetwork[]>([]);
   const [wifiScanState, setWifiScanState] = useState<"idle" | "scanning" | "done" | "error">("idle");
   const [networkBusy, setNetworkBusy] = useState(false);
@@ -450,6 +480,7 @@ function App() {
     setProjectAiRequest(defaultProjectAiRequest);
     setAiContextPreview(null);
     setDeviceChatHistory(null);
+    setAiReplyDebug(null);
     setMemorySummary(null);
     setMemoryDraft(JSON.stringify({
       schema_version: 1,
@@ -461,6 +492,8 @@ function App() {
       recent_summary: ["用户希望优先处理临期食材"],
     }, null, 2));
     setProjectAiBusy(false);
+    setKitchenAiStatus(null);
+    setKitchenAiBusyPage(null);
     setWifiNetworks([]);
     setWifiScanState("idle");
     setNetworkBusy(false);
@@ -574,6 +607,7 @@ function App() {
       await optionalRead<TTSConfig>("get_tts_config", "TTS API config", (payload) => {
         setTtsConfig((current) => (ttsConfigDirtyRef.current && current ? { ...payload, ...current } : payload));
       });
+      await optionalRead<KitchenAIStatus>("get_kitchen_ai_status", "厨房 AI 状态", setKitchenAiStatus);
       await optionalRead<WakeStatus>("wake_status", "唤醒词状态", setWakeStatus);
 
       if (shouldReadStatic) {
@@ -924,6 +958,7 @@ function App() {
         model: current.model.trim(),
         systemPrompt,
         timeoutMs: current.timeoutMs,
+        apiFormat: current.apiFormat ?? 0,
       });
       aiConfigDirtyRef.current = false;
       setAiConfig(response.payload);
@@ -1191,12 +1226,14 @@ function App() {
       commandInFlightRef.current = true;
       const request = {
         ...projectAiRequest,
+        taskType: "chat_assist" as const,
         message,
         userText: message,
       };
       const preview = await transport.sendCommand<AIContextPreview>("get_ai_context_preview", request);
       setAiContextPreview(preview.payload);
       const response = await transport.sendCommand<AIAssistantChatResponse>("ai_assistant_chat", request);
+      const immediateReply = normalizeChatContent(response.payload.reply);
       const historyResponse = await transport.sendCommand<DeviceChatHistory>("get_chat_history").catch(() => null);
       if (historyResponse) {
         setDeviceChatHistory(historyResponse.payload);
@@ -1208,7 +1245,7 @@ function App() {
             item.id === pendingId
               ? {
                   ...item,
-                  content: response.payload.reply,
+                  content: immediateReply,
                   status: "ok",
                   latencyMs: response.payload.latencyMs,
                 }
@@ -1216,6 +1253,18 @@ function App() {
           ),
         );
       }
+      const historyAssistant = historyResponse?.payload.messages
+        .slice()
+        .reverse()
+        .find((item) => item.role === "assistant");
+      const historyReply = historyAssistant ? normalizeChatContent(historyAssistant.content) : "";
+      setAiReplyDebug({
+        at: nowTime(),
+        immediateReply,
+        historyReply,
+        historySource: historyAssistant ? "device_history" : "missing",
+        same: historyAssistant ? immediateReply === historyReply : false,
+      });
       appendLog(
         "info",
         `AI 助手已完成 ${projectAiTaskLabels[response.payload.taskType]}，模型 ${response.payload.model}，耗时 ${response.payload.latencyMs} ms，注入历史 ${response.payload.historyCount} 条。`,
@@ -1448,27 +1497,8 @@ function App() {
       setVoiceStatus(response.payload);
       pushMicSample(response.payload);
       setMicTestMode("idle");
-      try {
-        const wavResponse = await transport.sendCommand<MicRecordWavResponse>("mic_record_wav");
-        const blob = base64ToBlob(wavResponse.payload.wavBase64, "audio/wav");
-        const url = URL.createObjectURL(blob);
-        clearMicPlayback();
-        micPlaybackUrlRef.current = url;
-        setMicPlayback({
-          url,
-          durationMs: wavResponse.payload.durationMs,
-          pcmBytes: wavResponse.payload.pcmBytes,
-          wavBytes: wavResponse.payload.wavBytes,
-          sampleRate: wavResponse.payload.sampleRate,
-          channels: wavResponse.payload.channels,
-          bitsPerSample: wavResponse.payload.bitsPerSample,
-          createdAt: nowTime(),
-        });
-        appendLog("info", `麦克风录音已取回，可在面板播放：${wavResponse.payload.wavBytes} B WAV。`, "asr");
-      } catch (wavError) {
-        appendLog("warn", `录音已停止，但 WAV 取回失败：${toErrorMessage(wavError)}`, "asr");
-      }
-      appendLog("info", "麦克风硬件录音测试已停止，未触发 ASR/AI。", "asr");
+      clearMicPlayback();
+      appendLog("info", "麦克风硬件录音测试已停止，已保留诊断指标，未触发 ASR/AI。", "asr");
     } catch (error) {
       appendLog("error", String(error), "asr");
     } finally {
@@ -1870,6 +1900,52 @@ function App() {
     }
   };
 
+  const refreshKitchenAiStatus = useCallback(async () => {
+    const transport = transportRef.current;
+    if (!transport || connection !== "connected") {
+      appendLog("warn", "请先连接 Mock 或 USB 设备，再读取厨房 AI 状态。", "kitchen_ai");
+      return;
+    }
+    try {
+      commandInFlightRef.current = true;
+      const response = await transport.sendCommand<KitchenAIStatus>("get_kitchen_ai_status");
+      setKitchenAiStatus(response.payload);
+      appendLog("info", `厨房 AI 状态已刷新：${response.payload.state} / ${response.payload.lastPage}。`, "kitchen_ai");
+    } catch (error) {
+      appendLog("error", toErrorMessage(error), "kitchen_ai");
+    } finally {
+      commandInFlightRef.current = false;
+    }
+  }, [appendLog, connection]);
+
+  const generateKitchenAiPage = useCallback(async (page: KitchenAIPage) => {
+    const transport = transportRef.current;
+    if (!transport || connection !== "connected") {
+      appendLog("warn", "请先连接 Mock 或 USB 设备，再触发厨房 AI JSON 生成。", "kitchen_ai");
+      return;
+    }
+    try {
+      commandInFlightRef.current = true;
+      setKitchenAiBusyPage(page);
+      const response = await transport.sendCommand<KitchenAIStatus>("kitchen_ai_generate", { page });
+      setKitchenAiStatus(response.payload);
+      appendLog("info", `已投递厨房 AI ${kitchenAiPageLabels[page]} 生成请求，状态：${response.payload.state}。`, "kitchen_ai");
+      for (let index = 0; index < 6; index += 1) {
+        await sleep(1000);
+        const statusResponse = await transport.sendCommand<KitchenAIStatus>("get_kitchen_ai_status");
+        setKitchenAiStatus(statusResponse.payload);
+        if (!statusResponse.payload.running) {
+          break;
+        }
+      }
+    } catch (error) {
+      appendLog("error", toErrorMessage(error), "kitchen_ai");
+    } finally {
+      commandInFlightRef.current = false;
+      setKitchenAiBusyPage(null);
+    }
+  }, [appendLog, connection]);
+
   const refreshMemorySummary = async () => {
     const transport = transportRef.current;
     if (!transport || connection !== "connected") {
@@ -1970,8 +2046,9 @@ function App() {
     if (connection === "connected" && activeSection === "ai") {
       refreshAiProfiles().catch((error) => appendLog("warn", `AI API 配置列表读取失败：${toErrorMessage(error)}`, "web"));
       refreshDeviceChatHistory().catch((error) => appendLog("warn", `设备会话历史读取失败：${toErrorMessage(error)}`, "web"));
+      refreshKitchenAiStatus().catch((error) => appendLog("warn", `厨房 AI 状态读取失败：${toErrorMessage(error)}`, "web"));
     }
-  }, [activeSection, appendLog, connection, refreshAiProfiles, refreshDeviceChatHistory]);
+  }, [activeSection, appendLog, connection, refreshAiProfiles, refreshDeviceChatHistory, refreshKitchenAiStatus]);
 
   useEffect(() => {
     if (connection === "connected" && activeSection === "camera") {
@@ -2265,6 +2342,7 @@ function App() {
             voiceBusy={voiceBusy}
             micTestMode={micTestMode}
             messages={aiMessages}
+            replyDebug={aiReplyDebug}
             draft={aiChatDraft}
             setDraft={setAiChatDraft}
             busy={aiBusy}
@@ -2272,6 +2350,8 @@ function App() {
             setProjectRequest={setProjectAiRequest}
             contextPreview={aiContextPreview}
             projectBusy={projectAiBusy}
+            kitchenAiStatus={kitchenAiStatus}
+            kitchenAiBusyPage={kitchenAiBusyPage}
             deviceChatHistory={deviceChatHistory}
             memorySummary={memorySummary}
             memoryDraft={memoryDraft}
@@ -2288,6 +2368,8 @@ function App() {
             clearMessages={clearAiMessages}
             previewContext={previewProjectAiContext}
             runMockTask={runProjectAiTask}
+            refreshKitchenAiStatus={refreshKitchenAiStatus}
+            generateKitchenAiPage={generateKitchenAiPage}
             refreshDeviceHistory={refreshDeviceChatHistory}
             clearDeviceHistory={clearDeviceChatHistory}
             refreshMemory={refreshMemorySummary}
@@ -2792,6 +2874,7 @@ function AiPanel({
   voiceBusy,
   micTestMode,
   messages,
+  replyDebug,
   draft,
   setDraft,
   busy,
@@ -2799,6 +2882,8 @@ function AiPanel({
   setProjectRequest,
   contextPreview,
   projectBusy,
+  kitchenAiStatus,
+  kitchenAiBusyPage,
   deviceChatHistory,
   memorySummary,
   memoryDraft,
@@ -2815,6 +2900,8 @@ function AiPanel({
   clearMessages,
   previewContext,
   runMockTask,
+  refreshKitchenAiStatus,
+  generateKitchenAiPage,
   refreshDeviceHistory,
   clearDeviceHistory,
   refreshMemory,
@@ -2835,6 +2922,7 @@ function AiPanel({
   voiceBusy: boolean;
   micTestMode: "idle" | "hardware" | "asr";
   messages: AIChatMessage[];
+  replyDebug: AIReplyDebug | null;
   draft: string;
   setDraft: (value: string) => void;
   busy: boolean;
@@ -2842,6 +2930,8 @@ function AiPanel({
   setProjectRequest: (request: ProjectAITaskRequest) => void;
   contextPreview: AIContextPreview | null;
   projectBusy: boolean;
+  kitchenAiStatus: KitchenAIStatus | null;
+  kitchenAiBusyPage: KitchenAIPage | null;
   deviceChatHistory: DeviceChatHistory | null;
   memorySummary: MemorySummary | null;
   memoryDraft: string;
@@ -2858,6 +2948,8 @@ function AiPanel({
   clearMessages: () => void;
   previewContext: () => Promise<void>;
   runMockTask: () => Promise<void>;
+  refreshKitchenAiStatus: () => Promise<void>;
+  generateKitchenAiPage: (page: KitchenAIPage) => Promise<void>;
   refreshDeviceHistory: () => Promise<void>;
   clearDeviceHistory: () => Promise<void>;
   refreshMemory: () => Promise<void>;
@@ -2883,6 +2975,17 @@ function AiPanel({
   const memoryBytes = utf8ByteLength(memoryDraft);
   const voiceRecording = voiceStatus?.state === "recording";
   const voiceFromHardwareTest = voiceRecording && micTestMode === "hardware";
+  const debugPreview = (value: string) => value.length > 260 ? `${value.slice(0, 260)}...` : value;
+  const kitchenAiState: "ok" | "warn" | "danger" | "offline" =
+    kitchenAiStatus?.state === "error"
+      ? "danger"
+      : kitchenAiStatus?.running || kitchenAiStatus?.state === "running"
+        ? "warn"
+        : kitchenAiStatus?.lastOk
+          ? "ok"
+          : kitchenAiStatus
+            ? "offline"
+            : "offline";
 
   return (
     <div className="section-flow">
@@ -2927,7 +3030,7 @@ function AiPanel({
             <div className="ai-chat-stream">
               {messages.map((message) => (
                 <div className={`ai-message ${message.role} ${message.status ?? "ok"}`} key={message.id}>
-                  <span>{message.role === "user" ? "?" : "AI"}</span>
+                  <span>{message.role === "user" ? "你" : "AI"}</span>
                   <p>{message.content}</p>
                   <small>{message.at}{message.latencyMs ? ` / ${message.latencyMs} ms` : ""}</small>
                 </div>
@@ -2940,6 +3043,29 @@ function AiPanel({
                 </div>
               )}
             </div>
+            {replyDebug && (
+              <div className="compact-card ai-reply-debug">
+                <div className="ai-chat-head compact-head">
+                  <h3>回复截断诊断</h3>
+                  <StatusPill state={replyDebug.same ? "ok" : "warn"}>
+                    {replyDebug.same ? "一致" : "不一致"}
+                  </StatusPill>
+                </div>
+                <p className="muted-copy">
+                  {replyDebug.at} / 即时 {utf8ByteLength(replyDebug.immediateReply)} bytes / 历史 {replyDebug.historySource === "device_history" ? `${utf8ByteLength(replyDebug.historyReply)} bytes` : "未返回"}
+                </p>
+                <div className="debug-compare-grid">
+                  <div>
+                    <strong>即时回复</strong>
+                    <pre>{debugPreview(replyDebug.immediateReply) || "(空)"}</pre>
+                  </div>
+                  <div>
+                    <strong>设备历史末条</strong>
+                    <pre>{debugPreview(replyDebug.historyReply) || "(空)"}</pre>
+                  </div>
+                </div>
+              </div>
+            )}
             <div className="ai-chat-input">
               <textarea
                 value={draft}
@@ -3034,6 +3160,56 @@ function AiPanel({
             </div>
           </form>
 
+          <div className="project-ai-card">
+            <div className="ai-chat-head compact-head">
+              <h3>厨房 AI JSON 测试</h3>
+              <StatusPill state={kitchenAiState}>
+                {kitchenAiBusyPage ? `生成 ${kitchenAiPageLabels[kitchenAiBusyPage]}` : kitchenAiStatus?.state ?? "未读取"}
+              </StatusPill>
+            </div>
+            <div className="button-row">
+              {(Object.keys(kitchenAiPageLabels) as KitchenAIPage[]).map((page) => (
+                <button
+                  className={page === "all" ? "action-button" : "action-button secondary"}
+                  type="button"
+                  disabled={!connected || Boolean(kitchenAiBusyPage) || kitchenAiStatus?.running}
+                  key={page}
+                  onClick={() => void generateKitchenAiPage(page)}
+                >
+                  <Play size={17} />
+                  {kitchenAiPageLabels[page]}
+                </button>
+              ))}
+              <button className="icon-button" type="button" disabled={!connected || Boolean(kitchenAiBusyPage)} onClick={() => void refreshKitchenAiStatus()} title="刷新厨房 AI 状态">
+                <RotateCw size={17} className={kitchenAiBusyPage || kitchenAiStatus?.running ? "spin" : ""} />
+              </button>
+            </div>
+            <div className="sensor-grid">
+              <GaugeBlock label="运行状态" value={kitchenAiStatus?.running ? "运行中" : kitchenAiStatus?.state ?? "--"} state={kitchenAiState} />
+              <GaugeBlock label="当前页面" value={kitchenAiStatus?.currentPage ?? "--"} state={kitchenAiStatus?.running ? "warn" : "offline"} />
+              <GaugeBlock label="最近页面" value={kitchenAiStatus?.lastPage ?? "--"} state={kitchenAiStatus?.lastOk ? "ok" : "offline"} />
+              <GaugeBlock label="触发来源" value={kitchenAiStatus?.lastTrigger ?? "--"} state="ok" />
+              <GaugeBlock label="HTTP" value={kitchenAiStatus ? `${kitchenAiStatus.httpStatus}` : "--"} state={kitchenAiStatus?.httpStatus === 200 ? "ok" : kitchenAiStatus?.httpStatus ? "danger" : "offline"} />
+              <GaugeBlock label="耗时" value={kitchenAiStatus ? `${kitchenAiStatus.latencyMs} ms` : "--"} state={kitchenAiStatus?.latencyMs ? "ok" : "offline"} />
+            </div>
+            <KeyValue title="厨房 AI 状态字段" rows={[
+              ["lastOk", kitchenAiStatus ? String(kitchenAiStatus.lastOk) : "--"],
+              ["lastGeneratedAt", kitchenAiStatus ? formatUnixTime(kitchenAiStatus.lastGeneratedAt) : "--"],
+              ["lastAutoDay", kitchenAiStatus ? formatDayKey(kitchenAiStatus.lastAutoDay) : "--"],
+              ["lastReplyLen", kitchenAiStatus?.lastReplyLen !== undefined ? `${kitchenAiStatus.lastReplyLen} bytes` : "--"],
+              ["lastError", kitchenAiStatus?.lastError || "--"],
+            ]} />
+            <div className="ai-chat-head compact-head">
+              <h3>AI 原始返回</h3>
+              <span className="form-hint">来自开发板最近一次模型回复预览，最多约 1KB。</span>
+            </div>
+            <pre className="json-preview tall">{kitchenAiStatus?.lastReplyPreview || "点击生成后，这里显示模型原始 JSON 文本；诊断状态在下方。"}</pre>
+            <div className="ai-chat-head compact-head">
+              <h3>诊断状态</h3>
+            </div>
+            <pre className="json-preview">{JSON.stringify(kitchenAiStatus ?? { note: "点击刷新或生成按钮后，这里会显示 get_kitchen_ai_status 返回字段。" }, null, 2)}</pre>
+          </div>
+
           <form className="ai-config-main" onSubmit={saveAiConfig}>
             <div className="ai-chat-head compact-head">
               <h3>AI 设置</h3>
@@ -3062,7 +3238,7 @@ function AiPanel({
                       type="button"
                     >
                       <span>{profile.profileName || `配置 ${profileId}`}</span>
-                      <small>{profile.hasApiKey ? profile.apiKeyPreview || "已保存 Key" : "无 Key"} / {profile.model || "--"}</small>
+                      <small>{profile.apiFormat === 1 ? "Google" : "OpenAI"} / {profile.hasApiKey ? profile.apiKeyPreview || "已保存 Key" : "无 Key"} / {profile.model || "--"}</small>
                     </button>
                   );
                 })}
@@ -3074,12 +3250,40 @@ function AiPanel({
                 <input value={current.profileName ?? "默认配置"} maxLength={32} onChange={(event) => update({ profileName: event.target.value })} />
               </label>
               <label>
+                <span>接口格式</span>
+                <select
+                  value={current.apiFormat ?? 0}
+                  onChange={(event) => {
+                    const nextFormat = Number(event.target.value);
+                    const patch: Partial<AIConfig> = { apiFormat: nextFormat };
+                    // 切到 Google 且 Base URL 仍是 OpenAI 默认时，自动建议 Gemini 端点，减少手填出错。
+                    const trimmed = current.apiBaseUrl.trim();
+                    if (nextFormat === 1 && (trimmed === "" || trimmed === "https://api.openai.com/v1")) {
+                      patch.apiBaseUrl = "https://generativelanguage.googleapis.com/v1beta";
+                    }
+                    if (nextFormat === 0 && trimmed === "https://generativelanguage.googleapis.com/v1beta") {
+                      patch.apiBaseUrl = "https://api.openai.com/v1";
+                    }
+                    update(patch);
+                  }}
+                >
+                  <option value={0}>OpenAI 兼容 (/chat/completions)</option>
+                  <option value={1}>Google Gemini (generateContent)</option>
+                </select>
+              </label>
+              <label>
                 <span>API Base URL</span>
-                <input value={current.apiBaseUrl} placeholder="https://api.openai.com/v1" inputMode="url" required onChange={(event) => update({ apiBaseUrl: event.target.value })} />
+                <input
+                  value={current.apiBaseUrl}
+                  placeholder={current.apiFormat === 1 ? "https://generativelanguage.googleapis.com/v1beta" : "https://api.openai.com/v1"}
+                  inputMode="url"
+                  required
+                  onChange={(event) => update({ apiBaseUrl: event.target.value })}
+                />
               </label>
               <label>
                 <span>模型</span>
-                <input value={current.model} placeholder="gpt-4o-mini" required onChange={(event) => update({ model: event.target.value })} />
+                <input value={current.model} placeholder={current.apiFormat === 1 ? "gemini-2.5-flash" : "gpt-4o-mini"} required onChange={(event) => update({ model: event.target.value })} />
               </label>
               <label>
                 <span>API Key</span>

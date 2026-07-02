@@ -1,13 +1,10 @@
 /**
- * 更多页 —— 对齐 ui-reference 的 .more-grid 2×2：
- *   ┌──────────┬──────────┐
- *   │ 食材清单 │ 购物清单 │
- *   ├──────────┼──────────┤
- *   │ 临期归位 │ 离线模式 │
- *   └──────────┴──────────┘
+ * 更多页 —— 承接固件“更多”页的扩展能力入口。
  *
  * 当前入口跳转到对应已存在的页面：
  *  - 食材清单 → inventory（用 navigateTo，因为 inventory 不再是 tabBar 页面）
+ *  - AI 菜谱 → recipe，读取/生成 recipe_cache
+ *  - 营养助手 → nutrition，读取/生成 nutrition_cache
  *  - 购物清单 → shopping（本地持久化清单）
  *  - 临期归位 → reminders
  *  - 离线模式 → offline 页，展示最近一次本地缓存。
@@ -25,6 +22,8 @@ Page({
   data: {
     entries: [
       { key: "inventory", title: "食材清单", hint: "按分区查看 / 搜索 / 入库", url: "/pages/inventory/index" },
+      { key: "recipe",    title: "AI 菜谱", hint: "按库存生成今晚菜单",       url: "/pages/recipe/index" },
+      { key: "nutrition", title: "营养助手", hint: "均衡分 / 忌口 / 膳食建议", url: "/pages/nutrition/index" },
       { key: "shopping",  title: "购物清单", hint: "AI 自动添加 + 手动勾选",  url: "/pages/shopping/index" },
       { key: "reminders", title: "临期归位", hint: "今日到期 / 待办提醒",     url: "/pages/reminders/index" },
       { key: "offline",   title: "离线模式", hint: "断网时也能看到最新状态",  url: "/pages/offline/index" },

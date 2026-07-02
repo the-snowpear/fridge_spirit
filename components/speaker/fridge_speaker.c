@@ -17,6 +17,7 @@
 #include "esp_http_client.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "fridge_i2s_shared.h"
 #include "fridge_network.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -30,6 +31,10 @@
 #define SPEAKER_DMA_FRAME_NUM 256
 #define SPEAKER_TASK_STACK 4096
 #define SPEAKER_HTTP_MAX_BYTES (384 * 1024)
+#define SPEAKER_HTTP_READ_CHUNK 4096
+#define SPEAKER_HTTP_TX_BUFFER_SIZE 2048
+#define SPEAKER_TTS_HTTP_ATTEMPTS 2
+#define SPEAKER_BUS_ACQUIRE_TIMEOUT_MS 200
 #define TTS_NVS_NAMESPACE "fridge_tts"
 #define TTS_NVS_KEY_URL "url"
 #define TTS_NVS_KEY_MODEL "model"
@@ -47,7 +52,17 @@ typedef struct {
     size_t len;
     size_t cap;
     bool overflow;
+    int status;
+    uint32_t latency_ms;
+    int64_t content_length;
+    bool complete;
 } speaker_http_buffer_t;
+
+typedef struct {
+    bool stream;
+    bool include_sample_rate;
+    const char *label;
+} speaker_tts_request_profile_t;
 
 static i2s_chan_handle_t s_tx_chan;
 static SemaphoreHandle_t s_lock;
@@ -69,6 +84,44 @@ static bool s_tts_enabled_loaded;
 static bool s_initialized;
 static bool s_i2s_enabled;
 static volatile bool s_stop_requested;
+
+static i2s_std_config_t make_speaker_std_config(void)
+{
+    i2s_std_config_t std_cfg = {
+        .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(FRIDGE_TTS_SAMPLE_RATE),
+        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO),
+        .gpio_cfg = {
+            .mclk = I2S_GPIO_UNUSED,
+            .bclk = SPEAKER_BCLK_GPIO,
+            .ws = SPEAKER_WS_GPIO,
+            .dout = SPEAKER_DOUT_GPIO,
+            .din = I2S_GPIO_UNUSED,
+            .invert_flags = {
+                .mclk_inv = false,
+                .bclk_inv = false,
+                .ws_inv = false,
+            },
+        },
+    };
+    std_cfg.slot_cfg.slot_mask = I2S_STD_SLOT_LEFT;
+    return std_cfg;
+}
+
+static esp_err_t rebind_speaker_i2s_bus(void)
+{
+    // 扬声器和 INMP441 共用 GPIO40/41 作为 BCLK/WS。麦克风录音后会把 GPIO matrix
+    // 重新指向 RX 通道；播放前再绑定 TX，避免共享时钟线长期停在麦克风配置。
+    i2s_std_config_t std_cfg = make_speaker_std_config();
+    esp_err_t err = i2s_channel_reconfig_std_clock(s_tx_chan, &std_cfg.clk_cfg);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = i2s_channel_reconfig_std_slot(s_tx_chan, &std_cfg.slot_cfg);
+    if (err != ESP_OK) {
+        return err;
+    }
+    return i2s_channel_reconfig_std_gpio(s_tx_chan, &std_cfg.gpio_cfg);
+}
 
 static void *speaker_large_alloc(size_t size)
 {
@@ -250,25 +303,6 @@ static void scale_pcm16(uint8_t *data, size_t len, uint8_t volume)
     }
 }
 
-static esp_err_t speaker_http_event_handler(esp_http_client_event_t *event)
-{
-    if (event->event_id != HTTP_EVENT_ON_DATA || !event->user_data || !event->data || event->data_len <= 0) {
-        return ESP_OK;
-    }
-    speaker_http_buffer_t *buffer = (speaker_http_buffer_t *)event->user_data;
-    size_t available = buffer->cap > buffer->len ? buffer->cap - buffer->len : 0;
-    size_t copy_len = (size_t)event->data_len;
-    if (copy_len > available) {
-        copy_len = available;
-        buffer->overflow = true;
-    }
-    if (copy_len > 0) {
-        memcpy(buffer->data + buffer->len, event->data, copy_len);
-        buffer->len += copy_len;
-    }
-    return ESP_OK;
-}
-
 static char *json_escape_alloc(const char *text)
 {
     size_t len = 0;
@@ -332,31 +366,305 @@ static void normalize_voice_for_model(const fridge_tts_config_update_t *config, 
     strlcpy(out, config->voice, out_size);
 }
 
-static char *build_tts_request(const fridge_tts_config_update_t *config, const char *text)
+static bool is_moss_tts_model(const char *model)
+{
+    return model && strcmp(model, "fnlp/MOSS-TTSD-v0.5") == 0;
+}
+
+static bool text_has_moss_speaker_prefix(const char *text)
+{
+    if (!text) {
+        return false;
+    }
+    while (*text && isspace((unsigned char)*text)) {
+        text++;
+    }
+    return strncmp(text, "[S1]", 4) == 0 || strncmp(text, "[S2]", 4) == 0;
+}
+
+static char *build_tts_request(const fridge_tts_config_update_t *config,
+                               const char *text,
+                               const speaker_tts_request_profile_t *profile)
 {
     char normalized_voice[FRIDGE_TTS_MAX_VOICE_LEN + 1] = {0};
     normalize_voice_for_model(config, normalized_voice, sizeof(normalized_voice));
     char *model = json_escape_alloc(config->model);
     char *voice = json_escape_alloc(normalized_voice);
-    char *input = json_escape_alloc(text);
+    char *input = NULL;
+    const bool moss = is_moss_tts_model(config->model);
+    const bool stream = profile ? profile->stream : moss;
+    const bool include_sample_rate = !profile || profile->include_sample_rate;
+    if (moss && !text_has_moss_speaker_prefix(text)) {
+        // SiliconFlow 的 MOSS-TTSD 使用 [S1]/[S2] 区分说话人；设备端单人播报默认补 [S1]，
+        // 避免普通文本被服务端当作不完整脚本而提前断开连接。
+        size_t wrapped_len = strlen(text ? text : "") + 6;
+        char *wrapped = calloc(1, wrapped_len);
+        if (wrapped) {
+            snprintf(wrapped, wrapped_len, "[S1] %s", text ? text : "");
+            input = json_escape_alloc(wrapped);
+            free(wrapped);
+        }
+    } else {
+        input = json_escape_alloc(text);
+    }
     if (!model || !voice || !input) {
         free(model);
         free(voice);
         free(input);
         return NULL;
     }
-    size_t body_len = strlen(model) + strlen(voice) + strlen(input) + 128;
+    size_t body_len = strlen(model) + strlen(voice) + strlen(input) + 180;
     char *body = calloc(1, body_len);
     if (body) {
-        snprintf(body, body_len,
-                 "{\"model\":\"%s\",\"voice\":\"%s\",\"input\":\"%s\","
-                 "\"response_format\":\"pcm\",\"sample_rate\":%d,\"stream\":false}",
-                 model, voice, input, FRIDGE_TTS_SAMPLE_RATE);
+        if (include_sample_rate) {
+            snprintf(body, body_len,
+                     "{\"model\":\"%s\",\"voice\":\"%s\",\"input\":\"%s\","
+                     "\"response_format\":\"pcm\",\"sample_rate\":%d,\"stream\":%s}",
+                     model, voice, input, FRIDGE_TTS_SAMPLE_RATE, stream ? "true" : "false");
+        } else {
+            snprintf(body, body_len,
+                     "{\"model\":\"%s\",\"voice\":\"%s\",\"input\":\"%s\","
+                     "\"response_format\":\"pcm\",\"stream\":%s}",
+                     model, voice, input, stream ? "true" : "false");
+        }
     }
     free(model);
     free(voice);
     free(input);
     return body;
+}
+
+static void speaker_set_http_headers(esp_http_client_handle_t client, const char *api_key)
+{
+    char auth_header[FRIDGE_TTS_MAX_API_KEY_LEN + 16] = {0};
+    snprintf(auth_header, sizeof(auth_header), "Bearer %s", api_key);
+    esp_http_client_set_header(client, "Accept", "audio/pcm, application/octet-stream, */*");
+    esp_http_client_set_header(client, "Accept-Encoding", "identity");
+    esp_http_client_set_header(client, "Content-Type", "application/json");
+    esp_http_client_set_header(client, "Connection", "close");
+    esp_http_client_set_header(client, "User-Agent", "fridge-spirit-esp32s3/1.0");
+    esp_http_client_set_header(client, "Authorization", auth_header);
+}
+
+static esp_err_t speaker_tts_http_download_once(const fridge_tts_config_update_t *config,
+                                                const char *request_body,
+                                                const char *profile_label,
+                                                speaker_http_buffer_t *rx)
+{
+    ESP_RETURN_ON_FALSE(config && request_body && rx && rx->data, ESP_ERR_INVALID_ARG, TAG, "invalid TTS download args");
+    rx->len = 0;
+    rx->overflow = false;
+    rx->status = 0;
+    rx->latency_ms = 0;
+    rx->content_length = -1;
+    rx->complete = false;
+
+    esp_http_client_config_t http_config = {
+        .url = config->api_base_url,
+        .method = HTTP_METHOD_POST,
+        .timeout_ms = (int)clamp_timeout_ms(config->timeout_ms),
+        .crt_bundle_attach = esp_crt_bundle_attach,
+        .buffer_size = 4096,
+        .buffer_size_tx = SPEAKER_HTTP_TX_BUFFER_SIZE,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&http_config);
+    if (!client) {
+        return ESP_FAIL;
+    }
+    speaker_set_http_headers(client, config->api_key);
+
+    int64_t start_us = esp_timer_get_time();
+    ESP_LOGI(TAG,
+             "TTS HTTP request: profile=%s model=%s voice=%s body=%u timeout=%ums",
+             profile_label ? profile_label : "default",
+             config->model,
+             config->voice,
+             (unsigned)strlen(request_body),
+             (unsigned)clamp_timeout_ms(config->timeout_ms));
+    esp_err_t err = esp_http_client_open(client, (int)strlen(request_body));
+    if (err == ESP_OK) {
+        int written = esp_http_client_write(client, request_body, (int)strlen(request_body));
+        if (written < 0 || written != (int)strlen(request_body)) {
+            ESP_LOGW(TAG, "TTS HTTP write failed: written=%d expected=%u", written, (unsigned)strlen(request_body));
+            err = ESP_FAIL;
+        }
+    } else {
+        ESP_LOGW(TAG, "TTS HTTP open failed: %s", esp_err_to_name(err));
+    }
+
+    if (err == ESP_OK) {
+        int64_t header_len = esp_http_client_fetch_headers(client);
+        if (header_len < 0) {
+            ESP_LOGW(TAG, "TTS HTTP fetch headers failed: %lld", (long long)header_len);
+            err = (header_len == -ESP_ERR_HTTP_EAGAIN) ? ESP_ERR_TIMEOUT : ESP_FAIL;
+        } else {
+            rx->content_length = header_len;
+            rx->status = esp_http_client_get_status_code(client);
+            ESP_LOGI(TAG, "TTS HTTP headers: status=%d content_length=%lld", rx->status, (long long)rx->content_length);
+            if (rx->status >= 200 && rx->status < 300 && rx->content_length > (int64_t)rx->cap) {
+                rx->overflow = true;
+                err = ESP_ERR_NO_MEM;
+            }
+        }
+    }
+
+    if (err == ESP_OK && rx->status >= 200 && rx->status < 300) {
+        char *chunk = speaker_large_alloc(SPEAKER_HTTP_READ_CHUNK);
+        if (!chunk) {
+            err = ESP_ERR_NO_MEM;
+        } else {
+            const bool streaming_without_length = rx->content_length <= 0;
+            esp_log_level_t tls_log = ESP_LOG_NONE;
+            esp_log_level_t transport_log = ESP_LOG_NONE;
+            esp_log_level_t http_log = ESP_LOG_NONE;
+            if (streaming_without_length) {
+                // 该 TTS 接口用 TLS close 表示流式音频结束。ESP-IDF 底层会先打 E 级日志，
+                // 这里仅在读取这类已确认 2xx 的流式响应期间临时压低相关 tag，避免 Web 面板误判为红色故障。
+                tls_log = esp_log_level_get("esp-tls-mbedtls");
+                transport_log = esp_log_level_get("transport_base");
+                http_log = esp_log_level_get("HTTP_CLIENT");
+                esp_log_level_set("esp-tls-mbedtls", ESP_LOG_NONE);
+                esp_log_level_set("transport_base", ESP_LOG_NONE);
+                esp_log_level_set("HTTP_CLIENT", ESP_LOG_NONE);
+            }
+            while (rx->len < rx->cap) {
+                int read_len = esp_http_client_read(client, chunk, SPEAKER_HTTP_READ_CHUNK);
+                if (read_len > 0) {
+                    size_t available = rx->cap - rx->len;
+                    size_t copy_len = (size_t)read_len;
+                    if (copy_len > available) {
+                        copy_len = available;
+                        rx->overflow = true;
+                    }
+                    memcpy(rx->data + rx->len, chunk, copy_len);
+                    rx->len += copy_len;
+                    if (rx->overflow) {
+                        err = ESP_ERR_NO_MEM;
+                        break;
+                    }
+                    if (rx->content_length <= 0 && esp_http_client_is_complete_data_received(client)) {
+                        ESP_LOGI(TAG, "TTS stream complete after %u bytes", (unsigned)rx->len);
+                        break;
+                    }
+                    continue;
+                }
+                if (read_len == 0) {
+                    break;
+                }
+                if (read_len == -ESP_ERR_HTTP_EAGAIN) {
+                    vTaskDelay(pdMS_TO_TICKS(20));
+                    continue;
+                }
+                if (rx->len > 0 && rx->content_length <= 0) {
+                    // SiliconFlow 流式 TTS 返回 200 但不带 Content-Length，服务端以 TLS close 结束音频。
+                    // esp_http_client_read 会把这个 close 记为 ESP_FAIL；已收到音频时按正常 EOF 处理。
+                    ESP_LOGI(TAG, "TTS stream ended by TLS close after %u bytes", (unsigned)rx->len);
+                    break;
+                }
+                err = ESP_FAIL;
+                break;
+            }
+            if (streaming_without_length) {
+                esp_log_level_set("esp-tls-mbedtls", tls_log);
+                esp_log_level_set("transport_base", transport_log);
+                esp_log_level_set("HTTP_CLIENT", http_log);
+            }
+            free(chunk);
+        }
+    } else if (err == ESP_OK) {
+        char preview[96] = {0};
+        int preview_len = esp_http_client_read_response(client, preview, sizeof(preview) - 1);
+        if (preview_len > 0) {
+            size_t copy_len = (size_t)preview_len < rx->cap ? (size_t)preview_len : rx->cap;
+            memcpy(rx->data, preview, copy_len);
+            rx->len = copy_len;
+        }
+    }
+
+    rx->complete = (err == ESP_OK) &&
+                   !rx->overflow &&
+                   rx->len > 0 &&
+                   (rx->content_length <= 0 || (int64_t)rx->len >= rx->content_length);
+    rx->latency_ms = (uint32_t)((esp_timer_get_time() - start_us) / 1000);
+    if (err == ESP_OK && rx->status >= 200 && rx->status < 300 && !rx->complete) {
+        ESP_LOGW(TAG,
+                 "TTS HTTP incomplete on manual read: got=%u expected=%lld complete=%d",
+                 (unsigned)rx->len,
+                 (long long)rx->content_length,
+                 esp_http_client_is_complete_data_received(client));
+        err = ESP_ERR_HTTP_INCOMPLETE_DATA;
+    }
+    esp_http_client_close(client);
+    esp_http_client_cleanup(client);
+    return err;
+}
+
+static esp_err_t speaker_tts_http_download_with_body(const fridge_tts_config_update_t *config,
+                                                     const char *request_body,
+                                                     const char *profile_label,
+                                                     speaker_http_buffer_t *rx)
+{
+    esp_err_t last_err = ESP_FAIL;
+    for (int attempt = 1; attempt <= SPEAKER_TTS_HTTP_ATTEMPTS; attempt++) {
+        last_err = speaker_tts_http_download_once(config, request_body, profile_label, rx);
+        if (last_err == ESP_OK) {
+            if (attempt > 1) {
+                ESP_LOGI(TAG, "TTS HTTP retry succeeded, bytes=%u", (unsigned)rx->len);
+            }
+            return ESP_OK;
+        }
+        ESP_LOGW(TAG,
+                 "TTS HTTP attempt %d/%d failed: %s, status=%d, bytes=%u/%lld",
+                 attempt,
+                 SPEAKER_TTS_HTTP_ATTEMPTS,
+                 esp_err_to_name(last_err),
+                 rx->status,
+                 (unsigned)rx->len,
+                 (long long)rx->content_length);
+        if (rx->status >= 400 || rx->overflow || last_err == ESP_ERR_NO_MEM) {
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(350 * attempt));
+    }
+    return last_err;
+}
+
+static esp_err_t speaker_tts_http_download(const fridge_tts_config_update_t *config,
+                                           const char *text,
+                                           speaker_http_buffer_t *rx)
+{
+    const bool moss = is_moss_tts_model(config->model);
+    const speaker_tts_request_profile_t profiles[] = {
+        {
+            .stream = moss,
+            .include_sample_rate = true,
+            .label = moss ? "moss_pcm_stream_sr" : "pcm_nonstream_sr",
+        },
+        {
+            .stream = true,
+            .include_sample_rate = false,
+            .label = "pcm_stream_no_sr",
+        },
+    };
+    const size_t profile_count = moss ? 2 : 1;
+    esp_err_t last_err = ESP_FAIL;
+    for (size_t i = 0; i < profile_count; i++) {
+        char *request_body = build_tts_request(config, text, &profiles[i]);
+        if (!request_body) {
+            return ESP_ERR_NO_MEM;
+        }
+        last_err = speaker_tts_http_download_with_body(config, request_body, profiles[i].label, rx);
+        free(request_body);
+        if (last_err == ESP_OK) {
+            return ESP_OK;
+        }
+        if (!(moss && i == 0 && rx->status == 0 && rx->len == 0)) {
+            break;
+        }
+        ESP_LOGW(TAG, "TTS first request profile disconnected before headers; retry without sample_rate");
+        vTaskDelay(pdMS_TO_TICKS(300));
+    }
+    return last_err;
 }
 
 static void play_task(void *arg)
@@ -410,6 +718,7 @@ static void play_task(void *arg)
     xSemaphoreGive(s_lock);
     if (should_disable) {
         (void)i2s_channel_disable(s_tx_chan);
+        fridge_i2s_shared_release(FRIDGE_I2S_SHARED_OWNER_SPEAKER);
     }
     vTaskDelete(NULL);
 }
@@ -428,23 +737,7 @@ esp_err_t fridge_speaker_init(void)
     esp_err_t err = i2s_new_channel(&chan_cfg, &s_tx_chan, NULL);
     ESP_RETURN_ON_ERROR(err, TAG, "speaker i2s channel create failed");
 
-    i2s_std_config_t std_cfg = {
-        .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(FRIDGE_TTS_SAMPLE_RATE),
-        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO),
-        .gpio_cfg = {
-            .mclk = I2S_GPIO_UNUSED,
-            .bclk = SPEAKER_BCLK_GPIO,
-            .ws = SPEAKER_WS_GPIO,
-            .dout = SPEAKER_DOUT_GPIO,
-            .din = I2S_GPIO_UNUSED,
-            .invert_flags = {
-                .mclk_inv = false,
-                .bclk_inv = false,
-                .ws_inv = false,
-            },
-        },
-    };
-    std_cfg.slot_cfg.slot_mask = I2S_STD_SLOT_LEFT;
+    i2s_std_config_t std_cfg = make_speaker_std_config();
     err = i2s_channel_init_std_mode(s_tx_chan, &std_cfg);
     ESP_RETURN_ON_ERROR(err, TAG, "speaker i2s std init failed");
     s_volume = load_saved_volume();
@@ -672,11 +965,8 @@ esp_err_t fridge_speaker_synthesize_and_play(const char *text, fridge_speaker_st
         return ESP_ERR_INVALID_STATE;
     }
 
-    char *request_body = build_tts_request(&config, text);
-    ESP_RETURN_ON_FALSE(request_body, ESP_ERR_NO_MEM, TAG, "build TTS request failed");
     uint8_t *audio = speaker_large_alloc(SPEAKER_HTTP_MAX_BYTES);
     if (!audio) {
-        free(request_body);
         set_state(FRIDGE_SPEAKER_STATE_ERROR, "分配 TTS 音频缓冲失败");
         return ESP_ERR_NO_MEM;
     }
@@ -685,6 +975,7 @@ esp_err_t fridge_speaker_synthesize_and_play(const char *text, fridge_speaker_st
         .len = 0,
         .cap = SPEAKER_HTTP_MAX_BYTES,
         .overflow = false,
+        .content_length = -1,
     };
     xSemaphoreTake(s_lock, portMAX_DELAY);
     s_state = FRIDGE_SPEAKER_STATE_SYNTHESIZING;
@@ -698,35 +989,11 @@ esp_err_t fridge_speaker_synthesize_and_play(const char *text, fridge_speaker_st
     s_error[0] = '\0';
     xSemaphoreGive(s_lock);
 
-    esp_http_client_config_t http_config = {
-        .url = config.api_base_url,
-        .method = HTTP_METHOD_POST,
-        .timeout_ms = (int)clamp_timeout_ms(config.timeout_ms),
-        .crt_bundle_attach = esp_crt_bundle_attach,
-        .event_handler = speaker_http_event_handler,
-        .user_data = &rx,
-    };
-    esp_http_client_handle_t client = esp_http_client_init(&http_config);
-    if (!client) {
-        free(request_body);
-        free(audio);
-        set_state(FRIDGE_SPEAKER_STATE_ERROR, "初始化 TTS HTTP 客户端失败");
-        return ESP_FAIL;
-    }
-    char auth_header[FRIDGE_TTS_MAX_API_KEY_LEN + 16] = {0};
-    snprintf(auth_header, sizeof(auth_header), "Bearer %s", config.api_key);
-    esp_http_client_set_header(client, "Accept", "audio/pcm");
-    esp_http_client_set_header(client, "Accept-Encoding", "identity");
-    esp_http_client_set_header(client, "Content-Type", "application/json");
-    esp_http_client_set_header(client, "Authorization", auth_header);
-    esp_http_client_set_post_field(client, request_body, (int)strlen(request_body));
-
-    int64_t start_us = esp_timer_get_time();
-    esp_err_t err = esp_http_client_perform(client);
-    int status = esp_http_client_get_status_code(client);
-    uint32_t latency_ms = (uint32_t)((esp_timer_get_time() - start_us) / 1000);
-    esp_http_client_cleanup(client);
-    free(request_body);
+    // PCM 音频通常是 200KB 级长响应。这里不用 esp_http_client_perform 的事件收包路径，
+    // 改为显式 open/write/read，并对 TLS 中途断流重试一次，避免偶发 incomplete data 直接让 TTS 不可用。
+    esp_err_t err = speaker_tts_http_download(&config, text, &rx);
+    int status = rx.status;
+    uint32_t latency_ms = rx.latency_ms;
 
     xSemaphoreTake(s_lock, portMAX_DELAY);
     s_http_status = status;
@@ -764,9 +1031,24 @@ esp_err_t fridge_speaker_synthesize_and_play(const char *text, fridge_speaker_st
     s_state = FRIDGE_SPEAKER_STATE_PLAYING;
     xSemaphoreGive(s_lock);
 
+    err = fridge_i2s_shared_acquire(FRIDGE_I2S_SHARED_OWNER_SPEAKER, pdMS_TO_TICKS(SPEAKER_BUS_ACQUIRE_TIMEOUT_MS));
+    if (err != ESP_OK) {
+        set_state(FRIDGE_SPEAKER_STATE_ERROR, "扬声器 I2S 总线忙");
+        return err == ESP_ERR_TIMEOUT ? ESP_ERR_INVALID_STATE : err;
+    }
+
+    err = rebind_speaker_i2s_bus();
+    if (err != ESP_OK) {
+        set_state(FRIDGE_SPEAKER_STATE_ERROR, "扬声器 I2S 重新绑定失败");
+        ESP_LOGE(TAG, "speaker i2s rebind failed: %s", esp_err_to_name(err));
+        fridge_i2s_shared_release(FRIDGE_I2S_SHARED_OWNER_SPEAKER);
+        return err;
+    }
+
     err = i2s_channel_enable(s_tx_chan);
     if (err != ESP_OK) {
         set_state(FRIDGE_SPEAKER_STATE_ERROR, "扬声器 I2S enable 失败");
+        fridge_i2s_shared_release(FRIDGE_I2S_SHARED_OWNER_SPEAKER);
         return err;
     }
     xSemaphoreTake(s_lock, portMAX_DELAY);
@@ -780,6 +1062,7 @@ esp_err_t fridge_speaker_synthesize_and_play(const char *text, fridge_speaker_st
         s_i2s_enabled = false;
         xSemaphoreGive(s_lock);
         set_state(FRIDGE_SPEAKER_STATE_ERROR, "创建扬声器播放任务失败");
+        fridge_i2s_shared_release(FRIDGE_I2S_SHARED_OWNER_SPEAKER);
         return ESP_ERR_NO_MEM;
     }
     return fridge_speaker_get_status(out);

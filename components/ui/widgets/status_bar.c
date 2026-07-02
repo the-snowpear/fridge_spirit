@@ -3,6 +3,7 @@
 
 #include "fridge_ui_internal.h"
 
+#include <string.h>
 #include <stdio.h>
 #include <time.h>
 
@@ -157,12 +158,15 @@ void fridge_ui_status_bar_update(void)
     }
     fridge_ui_label_set_text_if_changed(s_time, time_text);
 
-    fridge_ui_model_t model = {0};
-    fridge_ui_model_get(&model);
-    bool wifi_connected = model.network.connected;
+    fridge_ui_network_model_t network = {0};
+    fridge_ui_sensor_model_t sensors = {0};
+    (void)fridge_ui_model_get_network(&network);
+    (void)fridge_ui_model_get_sensors(&sensors);
+    size_t food_count = fridge_ui_model_get_food_count();
+    bool wifi_connected = network.connected;
     uint8_t wifi_level = 0;
-    if (model.network.connected) {
-        wifi_level = model.network.rssi >= -60 ? 3 : (model.network.rssi >= -75 ? 2 : 1);
+    if (network.connected) {
+        wifi_level = network.rssi >= -60 ? 3 : (network.rssi >= -75 ? 2 : 1);
     }
     fridge_ui_label_set_text_if_changed(s_wifi, "Wi-Fi");
     const fridge_ui_theme_t *theme = fridge_ui_theme_get();
@@ -195,14 +199,14 @@ void fridge_ui_status_bar_update(void)
     if (s_panel_labels[0]) {
         fridge_ui_label_set_text_fmt_if_changed(s_panel_labels[0],
                                                 "Wi-Fi  %s",
-                                                model.network.connected ? model.network.ssid : (model.network.connecting ? "连接中" : "未连接"));
-        fridge_ui_label_set_text_fmt_if_changed(s_panel_labels[1], "信号  %d dBm", model.network.rssi);
-        fridge_ui_label_set_text_if_changed(s_panel_labels[2], model.sensors.ready ? "传感器  正常" : "传感器  初始化中");
+                                                network.connected ? network.ssid : (network.connecting ? "连接中" : "未连接"));
+        fridge_ui_label_set_text_fmt_if_changed(s_panel_labels[1], "信号  %d dBm", network.rssi);
+        fridge_ui_label_set_text_if_changed(s_panel_labels[2], sensors.ready ? "传感器  正常" : "传感器  初始化中");
         fridge_ui_label_set_text_fmt_if_changed(s_panel_labels[3],
                                                 "雷达  %s",
-                                                model.sensors.radar_stable_presence ? "有人" : "无人");
+                                                sensors.radar_stable_presence ? "有人" : "无人");
         fridge_ui_label_set_text_fmt_if_changed(s_panel_labels[4],
                                                 "库存  %u 件",
-                                                (unsigned)model.food_count);
+                                                (unsigned)food_count);
     }
 }

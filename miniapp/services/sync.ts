@@ -27,6 +27,7 @@ import { getStorage, setStorage } from "../utils/storage";
 import { RequestError } from "../utils/request";
 import {
   RECIPE_RECOMMENDATIONS_KEY,
+  NUTRITION_CACHE_KEY,
   SHOPPING_ITEMS_KEY,
   updateOfflineSnapshot,
 } from "../utils/localFeatures";
@@ -40,7 +41,11 @@ const DEFAULT_SYNC_STATE: LocalSyncState = {
   dirtyDomains: [],
 };
 
-const DEVICE_SYNC_DOMAINS: SyncDomain[] = [
+const DEVICE_SEED_WAIT_MS = 1600;
+const DEVICE_SEED_POLL_COUNT = 4;
+const DEVICE_SEED_POLL_INTERVAL_MS = 1200;
+const STATUS_REFRESH_DEBOUNCE_MS = 1500;
+const DEVICE_REFRESH_DOMAINS: SyncDomain[] = [
   "inventory",
   "fridge_zones",
   "ai_config",
@@ -48,13 +53,23 @@ const DEVICE_SYNC_DOMAINS: SyncDomain[] = [
   "tts_config",
   "shopping_list",
   "recipe_cache",
+  "nutrition_cache",
+  "reminder",
+  "settings",
+];
+const DEVICE_MANUAL_REFRESH_DOMAINS: SyncDomain[] = [
+  "inventory",
+  "fridge_zones",
+  "shopping_list",
+  "recipe_cache",
+  "nutrition_cache",
   "reminder",
   "settings",
 ];
 
-const DEVICE_SEED_WAIT_MS = 1600;
-const DEVICE_SEED_POLL_COUNT = 6;
-const DEVICE_SEED_POLL_INTERVAL_MS = 1200;
+let syncInFlight: Promise<SyncSnapshotData | null> | null = null;
+let statusInFlight: Promise<LocalSyncState> | null = null;
+let lastStatusRefreshAt = 0;
 
 function isSyncRouteMissing(err: unknown): boolean {
   return err instanceof RequestError && err.kind === "http" && err.statusCode === 404;
@@ -92,13 +107,20 @@ export function enqueueSyncOp(
   payload: Record<string, unknown>,
 ): SyncEvent {
   const state = getLocalSyncState();
+  // 统一注入 updatedAtMs 作为"真实编辑时间"，供后端做 last-write-wins：
+  // 离线队列稍后 flush 时，后端据此判断这条是否比服务端现值更旧，旧的不覆盖。
+  // 调用方已显式给了 updatedAtMs/configUpdatedAt 时尊重原值，不覆盖。
+  const stampedPayload: Record<string, unknown> =
+    payload.updatedAtMs === undefined && payload.configUpdatedAt === undefined
+      ? { ...payload, updatedAtMs: Date.now() }
+      : { ...payload };
   const event: SyncEvent = {
     clientEventId: `miniapp:${domain}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
     domain,
     op,
     source: "miniapp",
     clientRevision: state.serverRevision || 0,
-    payload,
+    payload: stampedPayload,
     createdAt: new Date().toISOString(),
   };
   const queue = getSyncQueue();
@@ -186,7 +208,8 @@ async function requestInitialDeviceSeed(): Promise<boolean> {
     requestDeviceInventory: true,
     acceptCleanDeviceSnapshot: true,
     pushCloudSnapshot: false,
-    domains: ["inventory"],
+    domains: DEVICE_MANUAL_REFRESH_DOMAINS,
+    waitForAck: false,
   });
   if (result.deviceCount > 0 && result.queuedCount === 0) {
     saveLocalSyncState({ lastSyncError: result.errors?.[0] || "设备未在线，等待初次上报" });
@@ -206,6 +229,29 @@ async function requestInitialDeviceSeed(): Promise<boolean> {
 }
 
 export async function syncNow(options: { forceDeviceRefresh?: boolean } = {}): Promise<SyncSnapshotData | null> {
+  const previous = syncInFlight;
+  if (previous) {
+    if (!options.forceDeviceRefresh) {
+      return previous;
+    }
+    try {
+      await previous;
+    } catch {
+      // 强制同步由用户主动触发；如果上一轮前台自动同步失败，继续执行本轮设备刷新。
+    }
+  }
+  const task = runSyncNow(options);
+  syncInFlight = task;
+  try {
+    return await task;
+  } finally {
+    if (syncInFlight === task) {
+      syncInFlight = null;
+    }
+  }
+}
+
+async function runSyncNow(options: { forceDeviceRefresh?: boolean } = {}): Promise<SyncSnapshotData | null> {
   await flushSyncQueue();
   if (options.forceDeviceRefresh) {
     const baseRevision = getLocalSyncState().serverRevision || 0;
@@ -213,7 +259,8 @@ export async function syncNow(options: { forceDeviceRefresh?: boolean } = {}): P
       requestDeviceInventory: true,
       acceptCleanDeviceSnapshot: true,
       pushCloudSnapshot: false,
-      domains: ["inventory"],
+      domains: DEVICE_MANUAL_REFRESH_DOMAINS,
+      waitForAck: false,
     });
     if (result.queuedCount > 0) {
       await waitForServerRevisionAfter(baseRevision);
@@ -232,25 +279,31 @@ export async function syncNow(options: { forceDeviceRefresh?: boolean } = {}): P
     });
     return snapshot;
   }
-  try {
-    await pushSyncSnapshotToDevice({
-      requestDeviceInventory: false,
-      pushCloudSnapshot: true,
-      domains: DEVICE_SYNC_DOMAINS,
-    });
-    saveLocalSyncState({
-      lastPushedAt: Date.now(),
-      lastSyncError: "",
-    });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "设备同步下发失败";
-    saveLocalSyncState({ lastSyncError: message });
-    throw err;
-  }
+  saveLocalSyncState({
+    lastPushedAt: Date.now(),
+    lastSyncError: "",
+  });
   return snapshot;
 }
 
 export async function refreshSyncStatus(): Promise<LocalSyncState> {
+  const now = Date.now();
+  if (statusInFlight) {
+    return statusInFlight;
+  }
+  if (now - lastStatusRefreshAt < STATUS_REFRESH_DEBOUNCE_MS) {
+    return getLocalSyncState();
+  }
+  statusInFlight = runRefreshSyncStatus();
+  try {
+    return await statusInFlight;
+  } finally {
+    lastStatusRefreshAt = Date.now();
+    statusInFlight = null;
+  }
+}
+
+async function runRefreshSyncStatus(): Promise<LocalSyncState> {
   try {
     const remote = await getSyncStatus();
     return saveLocalSyncState({
@@ -278,6 +331,9 @@ export function applySnapshotToLocalCache(snapshot: SyncSnapshotData): void {
   }
   if (snapshot.recipeCache?.items) {
     setStorage(RECIPE_RECOMMENDATIONS_KEY, snapshot.recipeCache.items as unknown as RecipeRecommendation[]);
+  }
+  if (snapshot.nutritionCache?.nutrition) {
+    setStorage(NUTRITION_CACHE_KEY, snapshot.nutritionCache);
   }
   if (snapshot.settings) {
     const settings = snapshot.settings as Record<string, unknown>;

@@ -46,7 +46,7 @@
         <view class="row">
           <view class="col">
             <view class="item-title">{{item.name}}</view>
-            <view class="subtitle">{{item.quantity}}{{item.unit}} · {{item.placeText}}</view>
+            <view class="subtitle">{{item.quantityText}} · {{item.placeText}}</view>
           </view>
           <view class="tag warn">{{item.expireText}}</view>
         </view>

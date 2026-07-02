@@ -6,6 +6,7 @@
 #include "fridge_display.h"
 #include "fridge_speaker.h"
 #include "fridge_state_machine.h"
+#include "fridge_wake_word.h"
 
 static lv_obj_t *s_brightness_label;
 static lv_obj_t *s_brightness_slider;
@@ -94,6 +95,19 @@ static void wifi_cb(lv_event_t *event)
 {
     (void)event;
     fridge_ui_show_page(FRIDGE_UI_PAGE_WIFI);
+}
+
+// 语音唤醒开关：写入用户开关（NVS 持久化）。是否真正监听仍由策略层按亮屏/空闲条件决定。
+static void wake_switch_cb(lv_event_t *event)
+{
+    lv_obj_t *sw = lv_event_get_target(event);
+    bool enabled = lv_obj_has_state(sw, LV_STATE_CHECKED);
+    esp_err_t err = fridge_wake_word_set_user_enabled(enabled);
+    if (err != ESP_OK) {
+        fridge_ui_toast("语音唤醒设置保存失败");
+        return;
+    }
+    fridge_ui_toast(enabled ? "语音唤醒已开启" : "语音唤醒已关闭");
 }
 
 static void ops_cb(lv_event_t *event)
@@ -252,7 +266,11 @@ void fridge_ui_page_settings_create(lv_obj_t *parent)
     lv_obj_align(wake_label, LV_ALIGN_LEFT_MID, 0, 0);
     s_wake_switch = lv_switch_create(wake);
     lv_obj_align(s_wake_switch, LV_ALIGN_RIGHT_MID, 0, 0);
-    lv_obj_add_state(s_wake_switch, LV_STATE_CHECKED);
+    // 初始状态读用户开关（默认 false），不再硬编码常开。
+    if (fridge_wake_word_get_user_enabled()) {
+        lv_obj_add_state(s_wake_switch, LV_STATE_CHECKED);
+    }
+    lv_obj_add_event_cb(s_wake_switch, wake_switch_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
     lv_obj_t *expire_btn = create_button_row(list, 72);
     lv_obj_align(expire_btn, LV_ALIGN_TOP_MID, 0, 666);
@@ -299,6 +317,15 @@ void fridge_ui_page_settings_update(void)
             lv_obj_add_state(s_sleep_switch, LV_STATE_CHECKED);
         } else {
             lv_obj_remove_state(s_sleep_switch, LV_STATE_CHECKED);
+        }
+    }
+    if (s_wake_switch) {
+        // 同步语音唤醒开关显示，反映外部（如 Web/串口）对用户开关的修改。
+        bool enabled = fridge_wake_word_get_user_enabled();
+        if (enabled) {
+            lv_obj_add_state(s_wake_switch, LV_STATE_CHECKED);
+        } else {
+            lv_obj_remove_state(s_wake_switch, LV_STATE_CHECKED);
         }
     }
 }

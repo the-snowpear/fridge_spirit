@@ -9,8 +9,9 @@ import { getLocalSyncState, getSyncQueue, syncNow } from "../../services/sync";
 import type { InventoryItem, OfflineSnapshot, ReminderItem } from "../../types/models";
 import { displayPlace } from "../../utils/fridgeZones";
 import { getOfflineSnapshot, updateOfflineSnapshot } from "../../utils/localFeatures";
+import { formatInventoryQuantity } from "../../utils/quantity";
 
-type OfflineInventoryView = InventoryItem & { placeText: string; expireText: string };
+type OfflineInventoryView = InventoryItem & { placeText: string; expireText: string; quantityText: string };
 type OfflineReminderView = ReminderItem & { dueText: string };
 
 Page({
@@ -50,6 +51,7 @@ Page({
     const inventory = (snapshot.inventoryItems || []).slice(0, 8).map((item) => ({
       ...item,
       placeText: item.location || displayPlace(item.zone, item.slot),
+      quantityText: formatInventoryQuantity(item),
       expireText: item.expireDate ? item.expireDate : "未设置到期",
     }));
     const reminders = (snapshot.reminderItems || [])

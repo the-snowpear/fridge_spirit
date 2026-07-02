@@ -43,6 +43,7 @@
 #include "fridge_asr.h"
 #include "fridge_audio.h"
 #include "fridge_kitchen_tools.h"
+#include "fridge_kitchen_ai.h"
 #include "fridge_radar.h"
 #include "fridge_sensors.h"
 #include "fridge_speaker.h"
@@ -415,6 +416,14 @@ void app_main(void)
         ESP_LOGW(TAG, "USB provisioning console skipped: %s", esp_err_to_name(usb_ret));
     }
 
+    // 厨房 AI 后台任务只做网络请求和 LittleFS 缓存写入，不控制 GPIO。
+    // 它需要一小块连续内部 SRAM 作为 FreeRTOS 栈，因此放在音频/雷达/扬声器前初始化；
+    // 实际 AI 请求和响应大缓冲仍由组件内部优先分配到 PSRAM，降低黑屏重启风险。
+    esp_err_t kitchen_ai_ret = fridge_kitchen_ai_init();
+    if (kitchen_ai_ret != ESP_OK) {
+        ESP_LOGW(TAG, "kitchen AI skipped to keep demo firmware online: %s", esp_err_to_name(kitchen_ai_ret));
+    }
+
     start_saved_network_and_mqtt_early();
 
     ESP_ERROR_CHECK(fridge_asr_init());
@@ -422,11 +431,14 @@ void app_main(void)
     ESP_ERROR_CHECK(fridge_audio_init());
     ESP_ERROR_CHECK(fridge_state_machine_init());
     ESP_ERROR_CHECK(fridge_speaker_init());
-    ESP_ERROR_CHECK(fridge_kitchen_tools_init());
-    // 比赛同步演示优先保证 Wi-Fi/MQTT、库存、配置、ASR/TTS 和屏幕 UI 稳定在线。
-    // 当前 ESP-SR 热词模型与 MQTT/UI 同时运行时会触碰内部锁/映射资源边界，先禁用热词唤醒；
-    // 手动按钮语音、ASR、TTS 和云端双向同步仍然可用。
-    ESP_LOGW(TAG, "wake word disabled in cloud sync demo firmware");
+    esp_err_t kitchen_ret = fridge_kitchen_tools_init();
+    if (kitchen_ret != ESP_OK) {
+        ESP_LOGW(TAG, "kitchen tools skipped to keep demo firmware online: %s", esp_err_to_name(kitchen_ret));
+    }
+    // 语音唤醒：默认不监听，也不在启动期分配 AFE/模型内存。
+    // WakeNet 的初始化（含较大内部 SRAM 占用）推迟到用户首次打开“语音唤醒”开关、
+    // 由策略层在亮屏空闲时惰性触发；NVS 默认 user_en=false，保证升级后启动内存基线不变。
+    ESP_LOGI(TAG, "wake word available; lazily initialized on first enable, gated by screen-awake policy");
 #endif
 #endif
 }

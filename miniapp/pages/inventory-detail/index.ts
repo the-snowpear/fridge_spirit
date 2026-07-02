@@ -352,19 +352,20 @@ Page({
     try {
       const payload = this.buildPayload();
       if (this.data.mode === "create") {
-        const created = await createInventoryItem(payload);
-        enqueueSyncOp("inventory", "upsert", { item: created, payload });
+        await createInventoryItem(payload);
         wx.showToast({ title: "已入库", icon: "success" });
       } else {
-        const updated = await updateInventoryItem(this.data.itemId, payload);
-        enqueueSyncOp("inventory", "upsert", { item: updated, itemId: this.data.itemId, payload });
+        await updateInventoryItem(this.data.itemId, payload);
         wx.showToast({ title: "已保存", icon: "success" });
       }
+      // 在线 REST 已写库 + 记同步事件 + 推设备，这里不再入队，避免重复投影和旧 payload 回放。
+      // 仅刷新本地快照并触发一次设备下发即可。
       void syncNow().catch(() => {
-        // 页面写入已经完成；同步失败时保留队列，离线页可继续重试。
+        // 页面写入已经完成；同步失败不影响本次保存。
       });
       setTimeout(() => wx.navigateBack(), 400);
     } catch (err) {
+      // 离线/REST 失败才入队，等待恢复后由同步队列补写。
       const payload = this.buildPayload();
       enqueueSyncOp("inventory", this.data.mode === "create" ? "create_pending" : "update_pending", {
         itemId: this.data.itemId || undefined,
@@ -393,16 +394,14 @@ Page({
         if (!res.confirm) return;
         try {
           await deleteInventoryItem(this.data.itemId);
-          enqueueSyncOp("inventory", "delete", {
-            itemId: this.data.itemId,
-            name: this.data.name,
-          });
+          // 在线 REST 已软删 + 记同步事件 + 推设备，不再入队，避免重复投影。
           void syncNow().catch(() => {
-            // 删除后的同步失败会保留在队列里，离线页可继续重试。
+            // 删除后的同步失败不影响本次删除结果。
           });
           wx.showToast({ title: "已删除", icon: "success" });
           setTimeout(() => wx.navigateBack(), 400);
         } catch (err) {
+          // 离线/REST 失败才入队，等待恢复后补删。
           enqueueSyncOp("inventory", "delete_pending", {
             itemId: this.data.itemId,
             name: this.data.name,

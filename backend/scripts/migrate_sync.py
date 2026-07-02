@@ -62,6 +62,11 @@ DDL = [
     "CREATE INDEX IF NOT EXISTS ix_sync_events_op ON sync_events(op)",
     "CREATE INDEX IF NOT EXISTS ix_sync_events_source ON sync_events(source)",
     "CREATE INDEX IF NOT EXISTS ix_sync_events_server_revision ON sync_events(server_revision)",
+    # 设备命令轻量 outbox 复用 device_status_events(event_type='pending_command')。
+    # 这里补索引即可，表本身由 Base.metadata.create_all 或既有迁移创建。
+    "CREATE INDEX IF NOT EXISTS ix_device_status_events_pending_command ON device_status_events(device_sn, event_type, created_at)",
+    "CREATE INDEX IF NOT EXISTS ix_device_status_events_payload_status ON device_status_events((payload->>'status'))",
+    "CREATE INDEX IF NOT EXISTS ix_device_status_events_payload_request_id ON device_status_events((payload->>'request_id'))",
 ]
 
 

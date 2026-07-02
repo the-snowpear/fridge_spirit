@@ -23,7 +23,7 @@
       <view class="row">
         <view class="col">
           <view class="title" style="font-size: var(--text-md); margin: 0;">{{item.name}}</view>
-          <view class="subtitle">{{item.category || '未分类'}} · {{item.quantity}}{{item.unit}}</view>
+          <view class="subtitle">{{item.category || '未分类'}} · {{item.quantityText}}</view>
         </view>
         <view class="tag {{item.confidenceClass}}">置信 {{item.confidence}}%</view>
       </view>

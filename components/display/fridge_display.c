@@ -4,6 +4,7 @@
 
 #include "fridge_display.h"
 
+#include <stdint.h>
 #include <string.h>
 
 #include "driver/gpio.h"
@@ -345,8 +346,9 @@ esp_err_t fridge_display_init(void)
     }
 
     s_ready = true;
-    s_brightness = load_saved_brightness();
-    ESP_RETURN_ON_ERROR(fridge_display_set_brightness(s_brightness), TAG, "restore brightness failed");
+    uint8_t saved_brightness = load_saved_brightness();
+    s_brightness = UINT8_MAX;
+    ESP_RETURN_ON_ERROR(fridge_display_set_brightness(saved_brightness), TAG, "restore brightness failed");
     ESP_LOGI(TAG, "TR230S display ready, pclk=%uHz chunk_rows=%u brightness=%u%%",
              (unsigned)LCD_PCLK_HZ,
              (unsigned)LCD_FLUSH_CHUNK_ROWS,
@@ -403,6 +405,9 @@ esp_err_t fridge_display_set_brightness(uint8_t percent)
 {
     if (percent > 100) {
         percent = 100;
+    }
+    if (s_ready && percent == s_brightness) {
+        return ESP_OK;
     }
     if (!s_ready) {
         s_brightness = percent;

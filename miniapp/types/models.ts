@@ -364,6 +364,22 @@ export interface RecipeRecommendation {
   rawText?: string;
 }
 
+/** 固件厨房 AI 营养助手缓存。 */
+export interface NutritionCache {
+  schemaVersion?: number;
+  source?: string;
+  generatedAt?: number;
+  nutrition: {
+    score?: number;
+    summary?: string;
+    focus?: string[];
+    suggestions?: string[];
+    restrictNote?: string;
+    restrict_note?: string;
+  };
+  updatedAt?: string;
+}
+
 /** 冰箱分区配置：标准分区 + 用户自定义 custom_* 分区。 */
 export interface FridgeZoneConfig {
   key: string;
@@ -397,6 +413,7 @@ export type SyncDomain =
   | "reminder"
   | "shopping_list"
   | "recipe_cache"
+  | "nutrition_cache"
   | "ai_history"
   | string;
 
@@ -433,13 +450,20 @@ export interface SyncDevicePushRequest {
   requestDeviceInventory?: boolean;
   acceptCleanDeviceSnapshot?: boolean;
   pushCloudSnapshot?: boolean;
+  /** 是否等待固件 completed ACK；默认 false，避免手动同步请求超时。 */
+  waitForAck?: boolean;
 }
 
 /** POST /sync/device-push 响应。 */
 export interface SyncDevicePushData {
   deviceCount: number;
   commandCount: number;
+  /** 成功 publish 到 MQTT 的命令数（不代表设备已执行）。 */
   queuedCount: number;
+  /** 收到设备 completed ACK 且执行成功的命令数（真正落地）。 */
+  ackedCount?: number;
+  /** 因设备当前离线被跳过的命令数（依赖设备重连补发）。 */
+  skippedOffline?: number;
   domains: string[];
   errors: string[];
 }
@@ -463,6 +487,7 @@ export interface SyncSnapshotData {
   reminders: ReminderItem[];
   shoppingList: { items: Record<string, unknown>[]; updatedAt?: string };
   recipeCache: { items: Record<string, unknown>[]; updatedAt?: string };
+  nutritionCache?: NutritionCache;
   settings?: Record<string, unknown>;
   aiHistory?: { sessionId: string; messages: Record<string, unknown>[] };
 }

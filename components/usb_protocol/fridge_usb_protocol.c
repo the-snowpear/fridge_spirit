@@ -21,6 +21,7 @@
 #include "fridge_audio.h"
 #include "fridge_camera.h"
 #include "fridge_diagnostics.h"
+#include "fridge_kitchen_ai.h"
 #include "fridge_kitchen_tools.h"
 #include "fridge_mqtt_protocol.h"
 #include "fridge_network.h"
@@ -30,10 +31,12 @@
 #include "fridge_state_machine.h"
 #include "fridge_storage.h"
 #include "fridge_touch.h"
+#include "fridge_ui.h"
 #include "fridge_voice_session.h"
 #include "fridge_wake_word.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/idf_additions.h"
+#include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
@@ -41,14 +44,18 @@
 #define USB_VALUE_BUFFER_SIZE 128
 #define USB_SCAN_MAX_AP 50
 #define USB_PROTOCOL_TASK_STACK 12288
-#define USB_AI_WORKER_TASK_STACK 32768
-#define USB_CAMERA_WORKER_TASK_STACK 32768
+#define USB_AI_WORKER_TASK_STACK 20480
+#define USB_CAMERA_WORKER_TASK_STACK 24576
 
 static const char *TAG = "usb_protocol";
 static char s_usb_line_buffer[USB_LINE_BUFFER_SIZE];
 
+static QueueHandle_t s_ai_worker_queue;
+static TaskHandle_t s_ai_worker_task;
+
 typedef struct {
     const char *message;
+    fridge_ai_config_update_t *config;
     fridge_ai_chat_result_t *result;
     esp_err_t err;
     SemaphoreHandle_t done;
@@ -56,22 +63,36 @@ typedef struct {
 
 typedef struct {
     fridge_ai_assistant_request_t *request;
+    fridge_ai_config_update_t *config;
     fridge_ai_assistant_result_t *result;
     esp_err_t err;
     SemaphoreHandle_t done;
 } usb_ai_assistant_job_t;
 
 typedef struct {
-    fridge_voice_session_result_t *result;
+    fridge_asr_config_update_t *config;
+    fridge_asr_result_t *result;
     esp_err_t err;
     SemaphoreHandle_t done;
-} usb_voice_chat_job_t;
+} usb_asr_job_t;
 
 typedef struct {
+    fridge_ai_config_update_t *config;
     fridge_ai_image_result_t *result;
     esp_err_t err;
     SemaphoreHandle_t done;
 } usb_camera_analyze_job_t;
+
+typedef enum {
+    USB_AI_WORKER_JOB_CHAT = 0,
+    USB_AI_WORKER_JOB_ASSISTANT,
+    USB_AI_WORKER_JOB_ASR,
+} usb_ai_worker_job_type_t;
+
+typedef struct {
+    usb_ai_worker_job_type_t type;
+    void *job;
+} usb_ai_worker_dispatch_t;
 
 static void *usb_large_alloc(size_t size)
 {
@@ -82,32 +103,38 @@ static void *usb_large_alloc(size_t size)
     return ptr;
 }
 
-static BaseType_t usb_create_worker_task(TaskFunction_t task,
-                                         const char *name,
-                                         uint32_t stack_bytes,
-                                         void *arg,
-                                         UBaseType_t priority,
-                                         TaskHandle_t *handle)
+static void *usb_large_calloc(size_t count, size_t size)
 {
-    // AI、语音和图片识别 worker 栈较大，优先放 PSRAM，避免完整 UI 运行时内部 SRAM 不足导致任务创建失败。
-    BaseType_t ok = xTaskCreateWithCaps(task,
-                                        name,
-                                        stack_bytes,
-                                        arg,
-                                        priority,
-                                        handle,
-                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (ok == pdPASS) {
-        return ok;
+    if (count == 0 || size == 0 || count > SIZE_MAX / size) {
+        return NULL;
     }
-    ESP_LOGW(TAG,
-             "%s PSRAM stack create failed, retry internal stack=%lu, free_heap=%u KB, largest_internal=%u bytes, free_psram=%u KB",
-             name,
-             (unsigned long)stack_bytes,
-             (unsigned)(heap_caps_get_free_size(MALLOC_CAP_8BIT) / 1024),
-             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
-             (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
-    return xTaskCreate(task, name, stack_bytes, arg, priority, handle);
+    size_t total = count * size;
+    void *ptr = usb_large_alloc(total);
+    if (ptr) {
+        memset(ptr, 0, total);
+    }
+    return ptr;
+}
+
+static BaseType_t usb_create_flash_safe_worker_task(TaskFunction_t task,
+                                                    const char *name,
+                                                    uint32_t stack_bytes,
+                                                    void *arg,
+                                                    UBaseType_t priority,
+                                                    TaskHandle_t *handle)
+{
+    // 语音/拍照等路径仍可能在 worker 内部读取 NVS/LittleFS/Flash，必须用内部 SRAM 栈。
+    BaseType_t ok = xTaskCreate(task, name, stack_bytes, arg, priority, handle);
+    if (ok != pdPASS) {
+        ESP_LOGW(TAG,
+                 "%s internal stack create failed, stack=%lu, free_internal=%u KB, largest_internal=%u bytes, free_psram=%u KB",
+                 name,
+                 (unsigned long)stack_bytes,
+                 (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) / 1024),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                 (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) / 1024));
+    }
+    return ok;
 }
 
 static char *base64_encode_alloc(const uint8_t *data, size_t len)
@@ -494,6 +521,42 @@ static size_t convert_storage_history_to_ai_history(const fridge_storage_chat_hi
     return (count / 2) * 2;
 }
 
+static void normalize_ai_visible_reply(const char *input, char *out, size_t out_size)
+{
+    if (!out || out_size == 0) {
+        return;
+    }
+    out[0] = '\0';
+    if (!input) {
+        return;
+    }
+
+    // 部分 OpenAI-compatible 服务会把换行以字面量 "\n" 塞进 content。
+    // Web 端会按普通文本展示，因此在设备返回和写入历史前统一转成真实空白。
+    size_t written = 0;
+    for (const char *p = input; *p && written + 1 < out_size; p++) {
+        if (*p == '\\' && p[1]) {
+            if (p[1] == 'n') {
+                out[written++] = '\n';
+                p++;
+                continue;
+            }
+            if (p[1] == 'r') {
+                out[written++] = '\r';
+                p++;
+                continue;
+            }
+            if (p[1] == 't') {
+                out[written++] = '\t';
+                p++;
+                continue;
+            }
+        }
+        out[written++] = *p;
+    }
+    out[written] = '\0';
+}
+
 static void response_begin(const char *request_id, const char *command, bool ok)
 {
     flockfile(stdout);
@@ -792,6 +855,7 @@ static void print_ai_config_payload(const fridge_ai_config_view_t *config)
     fputs(",\"systemPrompt\":", stdout);
     json_print_escaped(config->system_prompt);
     printf(",\"timeoutMs\":%lu", (unsigned long)config->timeout_ms);
+    printf(",\"apiFormat\":%u", (unsigned)config->api_format);
     fputs(",\"hasApiKey\":", stdout);
     fputs(config->has_api_key ? "true" : "false", stdout);
     fputs(",\"apiKeyPreview\":", stdout);
@@ -871,6 +935,8 @@ static void build_ai_task_request_from_line(const char *line, fridge_ai_task_req
 
 static void handle_get_ai_context_preview(const char *line, const char *request_id, const char *command)
 {
+    fridge_ui_note_activity();
+
     fridge_ai_task_request_t request = {0};
     build_ai_task_request_from_line(line, &request);
 
@@ -902,6 +968,8 @@ static void handle_get_ai_context_preview(const char *line, const char *request_
 
 static void handle_test_ai_task(const char *line, const char *request_id, const char *command)
 {
+    fridge_ui_note_activity();
+
     fridge_ai_task_request_t request = {0};
     build_ai_task_request_from_line(line, &request);
 
@@ -980,6 +1048,78 @@ static void handle_get_kitchen_tools(const char *request_id, const char *command
     fputs(",\"payload\":", stdout);
     print_kitchen_tools_payload(&snap);
     response_end();
+}
+
+static fridge_kitchen_ai_page_t kitchen_ai_page_from_text(const char *text)
+{
+    if (!text || text[0] == '\0' || strcmp(text, "all") == 0) {
+        return FRIDGE_KITCHEN_AI_PAGE_ALL;
+    }
+    if (strcmp(text, "recipe") == 0) {
+        return FRIDGE_KITCHEN_AI_PAGE_RECIPE;
+    }
+    if (strcmp(text, "nutrition") == 0) {
+        return FRIDGE_KITCHEN_AI_PAGE_NUTRITION;
+    }
+    if (strcmp(text, "shopping") == 0) {
+        return FRIDGE_KITCHEN_AI_PAGE_SHOPPING;
+    }
+    return FRIDGE_KITCHEN_AI_PAGE_ALL;
+}
+
+static void print_kitchen_ai_status_payload(const fridge_kitchen_ai_status_t *status)
+{
+    fputs("{\"running\":", stdout);
+    fputs(status->running ? "true" : "false", stdout);
+    fputs(",\"lastOk\":", stdout);
+    fputs(status->last_ok ? "true" : "false", stdout);
+    fputs(",\"state\":", stdout);
+    json_print_escaped(fridge_kitchen_ai_state_text(status->state));
+    fputs(",\"lastTrigger\":", stdout);
+    json_print_escaped(status->last_trigger == FRIDGE_KITCHEN_AI_TRIGGER_MANUAL ? "manual" : "auto");
+    fputs(",\"currentPage\":", stdout);
+    json_print_escaped(fridge_kitchen_ai_page_text(status->current_page));
+    fputs(",\"lastPage\":", stdout);
+    json_print_escaped(fridge_kitchen_ai_page_text(status->last_page));
+    printf(",\"lastGeneratedAt\":%lld,\"lastAutoDay\":%lld,\"httpStatus\":%d,\"latencyMs\":%lu",
+           (long long)status->last_generated_at,
+           (long long)status->last_auto_day,
+           status->http_status,
+           (unsigned long)status->latency_ms);
+    printf(",\"lastReplyLen\":%u", (unsigned)status->last_reply_len);
+    fputs(",\"lastError\":", stdout);
+    json_print_escaped(status->last_error);
+    fputs(",\"lastReplyPreview\":", stdout);
+    json_print_escaped(status->last_reply_preview);
+    fputs("}", stdout);
+}
+
+static void handle_get_kitchen_ai_status(const char *request_id, const char *command)
+{
+    fridge_kitchen_ai_status_t status = {0};
+    esp_err_t err = fridge_kitchen_ai_get_status(&status);
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        send_error(request_id, command, esp_err_to_name(err));
+        return;
+    }
+    response_begin(request_id, command, true);
+    fputs(",\"payload\":", stdout);
+    print_kitchen_ai_status_payload(&status);
+    response_end();
+}
+
+static void handle_kitchen_ai_generate(const char *line, const char *request_id, const char *command)
+{
+    fridge_ui_note_activity();
+    char page_text[24] = "all";
+    json_get_string(line, "page", page_text, sizeof(page_text));
+    fridge_kitchen_ai_page_t page = kitchen_ai_page_from_text(page_text);
+    esp_err_t err = fridge_kitchen_ai_generate_page_async(FRIDGE_KITCHEN_AI_TRIGGER_MANUAL, page);
+    if (err != ESP_OK) {
+        send_error(request_id, command, esp_err_to_name(err));
+        return;
+    }
+    handle_get_kitchen_ai_status(request_id, command);
 }
 
 static void handle_timer_start(const char *line, const char *request_id, const char *command)
@@ -1169,6 +1309,28 @@ static void handle_clear_chat_history(const char *request_id, const char *comman
     handle_get_chat_history(request_id, command);
 }
 
+static void handle_get_inventory_snapshot(const char *request_id, const char *command)
+{
+    char *inventory = calloc(1, FRIDGE_STORAGE_MAX_JSON_LEN);
+    if (!inventory) {
+        send_error(request_id, command, "inventory allocation failed");
+        return;
+    }
+
+    // 只读维护命令：直接返回设备 LittleFS 中的 UI 库存快照，便于联调核对同步污染是否已清理。
+    esp_err_t err = fridge_storage_get_inventory_sync_payload(inventory, FRIDGE_STORAGE_MAX_JSON_LEN);
+    if (err != ESP_OK) {
+        free(inventory);
+        send_error(request_id, command, esp_err_to_name(err));
+        return;
+    }
+    response_begin(request_id, command, true);
+    fputs(",\"payload\":", stdout);
+    fputs(inventory, stdout);
+    response_end();
+    free(inventory);
+}
+
 static void handle_restore_seed_inventory(const char *request_id, const char *command)
 {
     esp_err_t err = fridge_storage_restore_seed_inventory();
@@ -1180,6 +1342,24 @@ static void handle_restore_seed_inventory(const char *request_id, const char *co
     esp_err_t publish_err = fridge_mqtt_publish_inventory_snapshot(true);
     response_begin(request_id, command, publish_err == ESP_OK || publish_err == ESP_ERR_INVALID_STATE);
     printf(",\"payload\":{\"restored\":true,\"publishAttempt\":\"%s\"}", esp_err_to_name(publish_err));
+    response_end();
+}
+
+static void handle_repair_inventory_quantities(const char *request_id, const char *command)
+{
+    size_t repaired_count = 0;
+    esp_err_t err = fridge_storage_repair_inventory_quantities(&repaired_count);
+    if (err != ESP_OK) {
+        send_error(request_id, command, esp_err_to_name(err));
+        return;
+    }
+    // 维护命令总是强制发布当前快照：即便本地本次无需修复，也要覆盖云端历史脏数据。
+    // 若 MQTT 暂离线或内存紧张，本地修复仍算成功，后续重连可再执行一次。
+    esp_err_t publish_err = fridge_mqtt_publish_inventory_snapshot(true);
+    response_begin(request_id, command, true);
+    printf(",\"payload\":{\"repairedCount\":%u,\"publishAttempt\":\"%s\"}",
+           (unsigned)repaired_count,
+           esp_err_to_name(publish_err));
     response_end();
 }
 
@@ -1253,11 +1433,13 @@ static void handle_set_ai_config(const char *line, const char *request_id, const
     strlcpy(update->model, current->model[0] ? current->model : FRIDGE_AI_DEFAULT_MODEL, sizeof(update->model));
     strlcpy(update->system_prompt, current->system_prompt, sizeof(update->system_prompt));
     update->timeout_ms = current->timeout_ms ? current->timeout_ms : FRIDGE_AI_DEFAULT_TIMEOUT_MS;
+    update->api_format = current->api_format;
 
     json_get_string(line, "apiBaseUrl", update->api_base_url, sizeof(update->api_base_url));
     json_get_string(line, "model", update->model, sizeof(update->model));
     json_get_string(line, "systemPrompt", update->system_prompt, sizeof(update->system_prompt));
     update->timeout_ms = json_get_u32(line, "timeoutMs", update->timeout_ms);
+    update->api_format = (uint8_t)json_get_u32(line, "apiFormat", update->api_format);
 
     if (json_has_key(line, "apiKey")) {
         json_get_string(line, "apiKey", update->api_key, sizeof(update->api_key));
@@ -1500,36 +1682,100 @@ static void handle_delete_ai_profile(const char *line, const char *request_id, c
 static void ai_chat_worker_task(void *arg)
 {
     usb_ai_chat_job_t *job = (usb_ai_chat_job_t *)arg;
-    // AI HTTPS/TLS 调用会占用较深调用栈；放到一次性 worker 里，避免长期抬高 USB 协议任务的常驻栈。
-    job->err = fridge_ai_client_test_chat(job->message, job->result);
+    // AI HTTPS/TLS 调用会占用较深调用栈；配置和校时已在 USB 任务预加载，
+    // worker 只执行不访问 NVS/LittleFS 的 _with_config HTTP 路径。
+    job->err = fridge_ai_client_test_chat_with_config(job->config, job->message, job->result);
     ESP_LOGI(TAG,
              "AI worker done, stack high watermark=%u words",
              (unsigned)uxTaskGetStackHighWaterMark(NULL));
     xSemaphoreGive(job->done);
-    vTaskDelete(NULL);
 }
 
 static void ai_assistant_worker_task(void *arg)
 {
     usb_ai_assistant_job_t *job = (usb_ai_assistant_job_t *)arg;
-    // 真实 AI 助手请求会携带项目上下文和 TLS 栈，必须放在 worker 中执行，避免 USB 协议任务栈被打满。
-    job->err = fridge_ai_client_assistant_chat(job->request, job->result);
+    // 真实 AI 助手请求会携带项目上下文和 TLS 栈；上下文/历史/配置已预加载，
+    // worker 只执行不访问 NVS/LittleFS 的 _with_config HTTP 路径。
+    job->err = fridge_ai_client_assistant_chat_with_config(job->config, job->request, job->result);
     ESP_LOGI(TAG,
              "AI assistant worker done, stack high watermark=%u words",
              (unsigned)uxTaskGetStackHighWaterMark(NULL));
     xSemaphoreGive(job->done);
-    vTaskDelete(NULL);
 }
 
-static void voice_chat_worker_task(void *arg)
-{
-    usb_voice_chat_job_t *job = (usb_voice_chat_job_t *)arg;
-    // 完整语音链路已抽到公共组件，USB 与状态机共享同一套 ASR/AI/历史保存逻辑。
-    job->err = fridge_voice_session_run_latest_recording(job->result);
+static void asr_worker_task(void *arg);
 
-    ESP_LOGI(TAG, "voice chat worker done, stack high watermark=%u words", (unsigned)uxTaskGetStackHighWaterMark(NULL));
+static void ai_worker_task(void *arg)
+{
+    (void)arg;
+    // 常驻 PSRAM 大栈 worker：内部 SRAM 当前只剩数 KB，无法承载 TLS 深栈。
+    // 约束是进入本任务前必须完成 NVS/LittleFS/校时读取；本任务只做 HTTP 请求，不做 Flash 写。
+    usb_ai_worker_dispatch_t dispatch = {0};
+    for (;;) {
+        if (xQueueReceive(s_ai_worker_queue, &dispatch, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+        switch (dispatch.type) {
+        case USB_AI_WORKER_JOB_CHAT:
+            ai_chat_worker_task(dispatch.job);
+            break;
+        case USB_AI_WORKER_JOB_ASSISTANT:
+            ai_assistant_worker_task(dispatch.job);
+            break;
+        case USB_AI_WORKER_JOB_ASR:
+            asr_worker_task(dispatch.job);
+            break;
+        default:
+            break;
+        }
+    }
+}
+
+static BaseType_t usb_dispatch_ai_worker(usb_ai_worker_dispatch_t dispatch)
+{
+    if (!s_ai_worker_queue) {
+        s_ai_worker_queue = xQueueCreate(1, sizeof(usb_ai_worker_dispatch_t));
+        if (!s_ai_worker_queue) {
+            ESP_LOGW(TAG, "AI worker queue create failed");
+            return pdFAIL;
+        }
+    }
+
+    if (!s_ai_worker_task) {
+        BaseType_t ok = xTaskCreateWithCaps(ai_worker_task,
+                                            "usb_ai_worker",
+                                            USB_AI_WORKER_TASK_STACK,
+                                            NULL,
+                                            4,
+                                            &s_ai_worker_task,
+                                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (ok != pdPASS) {
+            s_ai_worker_task = NULL;
+            ESP_LOGW(TAG,
+                     "usb_ai_worker PSRAM stack create failed, stack=%lu, free_internal=%u KB, largest_internal=%u bytes, free_psram=%u KB",
+                     (unsigned long)USB_AI_WORKER_TASK_STACK,
+                     (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) / 1024),
+                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                     (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) / 1024));
+            return pdFAIL;
+        }
+    }
+
+    if (uxQueueMessagesWaiting(s_ai_worker_queue) > 0) {
+        ESP_LOGW(TAG, "AI worker is busy");
+        return pdFAIL;
+    }
+    return xQueueSend(s_ai_worker_queue, &dispatch, pdMS_TO_TICKS(1000)) == pdTRUE ? pdPASS : pdFAIL;
+}
+
+static void asr_worker_task(void *arg)
+{
+    usb_asr_job_t *job = (usb_asr_job_t *)arg;
+    // ASR HTTPS/TLS 深栈在 PSRAM worker 中执行；配置和网络校时已在 USB 内部栈任务预处理。
+    job->err = fridge_asr_transcribe_latest_recording_with_config(job->config, job->result);
+
+    ESP_LOGI(TAG, "ASR worker done, stack high watermark=%u words", (unsigned)uxTaskGetStackHighWaterMark(NULL));
     xSemaphoreGive(job->done);
-    vTaskDelete(NULL);
 }
 
 static void camera_analyze_worker_task(void *arg)
@@ -1548,7 +1794,12 @@ static void camera_analyze_worker_task(void *arg)
             .height = frame.height,
         };
         strlcpy(request.task_type, "recognize_ingredients", sizeof(request.task_type));
-        err = fridge_ai_client_analyze_image(&request, job->result);
+        if (job->config) {
+            err = fridge_ai_client_analyze_image_with_config(job->config, &request, job->result);
+        } else {
+            err = ESP_ERR_INVALID_STATE;
+            strlcpy(job->result->chat.error, "AI 配置预加载失败", sizeof(job->result->chat.error));
+        }
     }
     if (err != ESP_OK && job->result->chat.error[0] == '\0') {
         // 清理帧缓存会重置 camera last_error；先把硬件侧失败原因转存到 AI 结果，便于 Web/串口显示。
@@ -1561,15 +1812,19 @@ static void camera_analyze_worker_task(void *arg)
     job->err = err;
     (void)fridge_camera_clear_frame();
     xSemaphoreGive(job->done);
-    vTaskDelete(NULL);
+    vTaskDeleteWithCaps(NULL);
 }
 
 static void handle_test_ai_chat(const char *line, const char *request_id, const char *command)
 {
-    char *message = calloc(1, FRIDGE_AI_MAX_CHAT_MESSAGE_LEN + 1);
-    fridge_ai_chat_result_t *result = calloc(1, sizeof(*result));
-    if (!message || !result) {
+    fridge_ui_note_activity();
+
+    char *message = usb_large_calloc(1, FRIDGE_AI_MAX_CHAT_MESSAGE_LEN + 1);
+    fridge_ai_config_update_t *ai_config = usb_large_calloc(1, sizeof(*ai_config));
+    fridge_ai_chat_result_t *result = usb_large_calloc(1, sizeof(*result));
+    if (!message || !ai_config || !result) {
         free(message);
+        free(ai_config);
         free(result);
         send_error(request_id, command, "AI 测试内存不足");
         return;
@@ -1578,14 +1833,36 @@ static void handle_test_ai_chat(const char *line, const char *request_id, const 
     json_get_string(line, "message", message, FRIDGE_AI_MAX_CHAT_MESSAGE_LEN + 1);
     if (message[0] == '\0') {
         free(message);
+        free(ai_config);
         free(result);
         send_error(request_id, command, "message is required");
+        return;
+    }
+
+    esp_err_t err = fridge_ai_client_load_active_config(ai_config);
+    if (err != ESP_OK) {
+        free(message);
+        free(ai_config);
+        free(result);
+        send_error(request_id, command, esp_err_to_name(err));
+        return;
+    }
+
+    // 网络和 SNTP 校时可能触发较深系统路径，先在 USB 协议任务的内部 SRAM 栈里完成；
+    // 后续 AI worker 同样使用内部 SRAM 栈，确保 Flash/cache 事务期间栈始终可访问。
+    err = fridge_ai_client_ensure_network_ready(result->error, sizeof(result->error));
+    if (err != ESP_OK) {
+        free(message);
+        free(ai_config);
+        send_error(request_id, command, result->error[0] ? result->error : esp_err_to_name(err));
+        free(result);
         return;
     }
 
     SemaphoreHandle_t done = xSemaphoreCreateBinary();
     if (!done) {
         free(message);
+        free(ai_config);
         free(result);
         send_error(request_id, command, "AI 测试同步对象创建失败");
         return;
@@ -1593,14 +1870,19 @@ static void handle_test_ai_chat(const char *line, const char *request_id, const 
 
     usb_ai_chat_job_t job = {
         .message = message,
+        .config = ai_config,
         .result = result,
         .err = ESP_FAIL,
         .done = done,
     };
-    BaseType_t task_ok = usb_create_worker_task(ai_chat_worker_task, "ai_chat_worker", USB_AI_WORKER_TASK_STACK, &job, 4, NULL);
+    BaseType_t task_ok = usb_dispatch_ai_worker((usb_ai_worker_dispatch_t) {
+        .type = USB_AI_WORKER_JOB_CHAT,
+        .job = &job,
+    });
     if (task_ok != pdPASS) {
         vSemaphoreDelete(done);
         free(message);
+        free(ai_config);
         free(result);
         send_error(request_id, command, "AI worker 任务创建失败");
         return;
@@ -1612,10 +1894,11 @@ static void handle_test_ai_chat(const char *line, const char *request_id, const 
              "USB protocol stack high watermark=%u words after AI test",
              (unsigned)uxTaskGetStackHighWaterMark(NULL));
 
-    esp_err_t err = job.err;
+    err = job.err;
     if (err != ESP_OK) {
         send_error(request_id, command, result->error[0] ? result->error : esp_err_to_name(err));
         free(message);
+        free(ai_config);
         free(result);
         return;
     }
@@ -1632,27 +1915,37 @@ static void handle_test_ai_chat(const char *line, const char *request_id, const 
     fputs("}", stdout);
     response_end();
     free(message);
+    free(ai_config);
     free(result);
 }
 
 static void handle_ai_assistant_chat(const char *line, const char *request_id, const char *command)
 {
-    fridge_ai_assistant_request_t *assistant_request = calloc(1, sizeof(*assistant_request));
-    fridge_ai_assistant_result_t *result = calloc(1, sizeof(*result));
-    fridge_ai_context_preview_t *preview = calloc(1, sizeof(*preview));
-    fridge_ai_chat_history_item_t *history = calloc(FRIDGE_AI_MAX_CHAT_HISTORY, sizeof(*history));
-    fridge_storage_chat_history_t *storage_history = calloc(1, sizeof(*storage_history));
-    fridge_storage_chat_message_t persisted_messages[2] = {0};
+    fridge_ui_note_activity();
+
+    fridge_ai_assistant_request_t *assistant_request = usb_large_calloc(1, sizeof(*assistant_request));
+    fridge_ai_assistant_result_t *result = usb_large_calloc(1, sizeof(*result));
+    fridge_ai_config_update_t *ai_config = usb_large_calloc(1, sizeof(*ai_config));
+    fridge_ai_context_preview_t *preview = usb_large_calloc(1, sizeof(*preview));
+    fridge_ai_chat_history_item_t *history = usb_large_calloc(FRIDGE_AI_MAX_CHAT_HISTORY, sizeof(*history));
+    fridge_storage_chat_history_t *storage_history = usb_large_calloc(1, sizeof(*storage_history));
+    fridge_storage_chat_message_t *persisted_messages = usb_large_calloc(2, sizeof(*persisted_messages));
+    char *clean_ai_reply = usb_large_calloc(1, FRIDGE_AI_MAX_REPLY_LEN + 1);
+    char *visible_reply = usb_large_calloc(1, FRIDGE_AI_MAX_REPLY_LEN + 1);
     size_t history_pruned_count = 0;
     size_t write_pruned_count = 0;
     bool history_persisted = false;
     esp_err_t err = ESP_OK;
-    if (!assistant_request || !result || !preview || !history || !storage_history) {
+    if (!assistant_request || !result || !ai_config || !preview || !history || !storage_history || !persisted_messages || !clean_ai_reply || !visible_reply) {
         free(assistant_request);
         free(result);
+        free(ai_config);
         free(preview);
         free(history);
         free(storage_history);
+        free(persisted_messages);
+        free(clean_ai_reply);
+        free(visible_reply);
         send_error(request_id, command, "AI assistant allocation failed");
         return;
     }
@@ -1666,21 +1959,62 @@ static void handle_ai_assistant_chat(const char *line, const char *request_id, c
     if (assistant_request->message[0] == '\0') {
         free(assistant_request);
         free(result);
+        free(ai_config);
         free(preview);
         free(history);
         free(storage_history);
+        free(persisted_messages);
+        free(clean_ai_reply);
+        free(visible_reply);
         send_error(request_id, command, "message is required");
         return;
     }
     strlcpy(context_request.user_text, assistant_request->message, sizeof(context_request.user_text));
 
+    // AI 配置保存在 NVS，必须在内部 SRAM 栈的 USB 任务里预加载。
+    // 后续 HTTPS worker 继续使用内部 SRAM 栈，避免 Flash 事务关闭 cache 时访问 PSRAM 栈崩溃。
+    err = fridge_ai_client_load_active_config(ai_config);
+    if (err != ESP_OK) {
+        free(assistant_request);
+        free(result);
+        free(ai_config);
+        free(preview);
+        free(history);
+        free(storage_history);
+        free(persisted_messages);
+        free(clean_ai_reply);
+        free(visible_reply);
+        send_error(request_id, command, esp_err_to_name(err));
+        return;
+    }
+
+    // 网络和 SNTP 校时放在内部 SRAM 栈的 USB 任务中完成，降低 worker 中进入校时路径的概率。
+    err = fridge_ai_client_ensure_network_ready(result->chat.error, sizeof(result->chat.error));
+    if (err != ESP_OK) {
+        send_error(request_id, command, result->chat.error[0] ? result->chat.error : esp_err_to_name(err));
+        free(assistant_request);
+        free(result);
+        free(ai_config);
+        free(preview);
+        free(history);
+        free(storage_history);
+        free(persisted_messages);
+        free(clean_ai_reply);
+        free(visible_reply);
+        return;
+    }
+
     err = fridge_storage_get_chat_history(storage_history, &history_pruned_count);
     if (err != ESP_OK) {
         free(assistant_request);
         free(result);
+        free(ai_config);
         free(preview);
         free(history);
         free(storage_history);
+        free(persisted_messages);
+        free(clean_ai_reply);
+        free(visible_reply);
         send_error(request_id, command, esp_err_to_name(err));
         return;
     }
@@ -1689,9 +2023,13 @@ static void handle_ai_assistant_chat(const char *line, const char *request_id, c
     if (err != ESP_OK) {
         free(assistant_request);
         free(result);
+        free(ai_config);
         free(preview);
         free(history);
         free(storage_history);
+        free(persisted_messages);
+        free(clean_ai_reply);
+        free(visible_reply);
         send_error(request_id, command, esp_err_to_name(err));
         return;
     }
@@ -1708,27 +2046,39 @@ static void handle_ai_assistant_chat(const char *line, const char *request_id, c
     if (!done) {
         free(assistant_request);
         free(result);
+        free(ai_config);
         free(preview);
         free(history);
         free(storage_history);
+        free(persisted_messages);
+        free(clean_ai_reply);
+        free(visible_reply);
         send_error(request_id, command, "AI assistant sync object failed");
         return;
     }
 
     usb_ai_assistant_job_t job = {
         .request = assistant_request,
+        .config = ai_config,
         .result = result,
         .err = ESP_FAIL,
         .done = done,
     };
-    BaseType_t task_ok = usb_create_worker_task(ai_assistant_worker_task, "ai_assist_worker", USB_AI_WORKER_TASK_STACK, &job, 4, NULL);
+    BaseType_t task_ok = usb_dispatch_ai_worker((usb_ai_worker_dispatch_t) {
+        .type = USB_AI_WORKER_JOB_ASSISTANT,
+        .job = &job,
+    });
     if (task_ok != pdPASS) {
         vSemaphoreDelete(done);
         free(assistant_request);
         free(result);
+        free(ai_config);
         free(preview);
         free(history);
         free(storage_history);
+        free(persisted_messages);
+        free(clean_ai_reply);
+        free(visible_reply);
         send_error(request_id, command, "AI assistant worker create failed");
         return;
     }
@@ -1744,30 +2094,45 @@ static void handle_ai_assistant_chat(const char *line, const char *request_id, c
         send_error(request_id, command, result->chat.error[0] ? result->chat.error : esp_err_to_name(err));
         free(assistant_request);
         free(result);
+        free(ai_config);
         free(preview);
         free(history);
         free(storage_history);
+        free(persisted_messages);
+        free(clean_ai_reply);
+        free(visible_reply);
         return;
     }
 
     fridge_ai_action_result_t action_result = {0};
-    char clean_ai_reply[FRIDGE_AI_MAX_REPLY_LEN + 1] = {0};
-    char visible_reply[FRIDGE_AI_MAX_REPLY_LEN + 1] = {0};
     bool memory_updated = false;
-    err = fridge_storage_apply_memory_directive(result->chat.reply, clean_ai_reply, sizeof(clean_ai_reply), &memory_updated);
-    if (err == ESP_OK && clean_ai_reply[0] != '\0') {
+    const char *memory_marker = strstr(result->chat.reply, "MEMORY_OP:");
+    if (memory_marker) {
+        // WebUI 文字测试优先保证响应稳定返回；MEMORY_OP 会写 LittleFS，先不在 USB 响应路径同步落盘。
+        size_t visible_len = (size_t)(memory_marker - result->chat.reply);
+        while (visible_len > 0 && (result->chat.reply[visible_len - 1] == '\n' ||
+                                   result->chat.reply[visible_len - 1] == '\r' ||
+                                   result->chat.reply[visible_len - 1] == ' ')) {
+            visible_len--;
+        }
+        if (visible_len > FRIDGE_AI_MAX_REPLY_LEN) {
+            visible_len = FRIDGE_AI_MAX_REPLY_LEN;
+        }
+        memcpy(clean_ai_reply, result->chat.reply, visible_len);
+        clean_ai_reply[visible_len] = '\0';
         strlcpy(result->chat.reply, clean_ai_reply, sizeof(result->chat.reply));
-    } else if (err != ESP_OK) {
-        ESP_LOGW(TAG, "apply AI memory directive failed: %s", esp_err_to_name(err));
+        ESP_LOGW(TAG, "MEMORY_OP skipped on USB assistant response path to avoid synchronous flash write");
     }
 
     esp_err_t action_err = fridge_ai_actions_strip_directives(result->chat.reply,
                                                               visible_reply,
-                                                              sizeof(visible_reply),
+                                                              FRIDGE_AI_MAX_REPLY_LEN + 1,
                                                               &action_result);
     bool tool_handled = (action_err == ESP_OK && action_result.executed);
     bool tool_feedback = action_result.tool[0] != '\0' && action_result.message[0] != '\0';
     const char *reply_text = (tool_handled || tool_feedback) ? action_result.message : (visible_reply[0] ? visible_reply : result->chat.reply);
+    normalize_ai_visible_reply(reply_text, clean_ai_reply, FRIDGE_AI_MAX_REPLY_LEN + 1);
+    reply_text = clean_ai_reply[0] ? clean_ai_reply : reply_text;
 
     strlcpy(persisted_messages[0].role, "user", sizeof(persisted_messages[0].role));
     strlcpy(persisted_messages[0].content, assistant_request->message, sizeof(persisted_messages[0].content));
@@ -1819,9 +2184,13 @@ static void handle_ai_assistant_chat(const char *line, const char *request_id, c
 
     free(assistant_request);
     free(result);
+    free(ai_config);
     free(preview);
     free(history);
     free(storage_history);
+    free(persisted_messages);
+    free(clean_ai_reply);
+    free(visible_reply);
 }
 
 static const char *audio_state_text(fridge_audio_state_t state)
@@ -1861,6 +2230,16 @@ static void print_wake_status_payload(void)
            (long)status.rms,
            (long)status.peak_abs,
            (unsigned long)status.timeout_count);
+    // 自动策略可观测字段：真机定位“为何没监听 / 内部 DMA 余量够不够”的唯一窗口。
+    fputs(",\"userEnabled\":", stdout);
+    fputs(status.user_enabled ? "true" : "false", stdout);
+    fputs(",\"autoAllowed\":", stdout);
+    fputs(status.auto_allowed ? "true" : "false", stdout);
+    fputs(",\"policyReason\":", stdout);
+    json_print_escaped(fridge_wake_policy_reason_text(status.policy_reason));
+    printf(",\"largestInternalDmaBlock\":%u,\"minDmaBlockThreshold\":%u",
+           (unsigned)status.largest_internal_dma_block,
+           (unsigned)status.min_dma_block_threshold);
     fputs(",\"error\":", stdout);
     json_print_escaped(status.error);
     fputs("}", stdout);
@@ -1874,6 +2253,109 @@ static void emit_wake_detected_event(void *user_ctx)
     print_wake_status_payload();
     event_end();
 }
+
+// ===== 唤醒后自动对话编排 =====
+// 设计要点：唤醒回调运行在 WakeNet 任务上下文，绝不能在其中做录音/HTTPS 等阻塞工作，
+// 否则会拖住 AFE feed/fetch 实时循环。这里回调只 give 一个信号量，由独立 worker 串行处理。
+#define WAKE_DIALOG_RECORD_MS 5000   // 唤醒后自动录音窗口；音频组件最长 6s，留 1s 余量
+
+static SemaphoreHandle_t s_wake_dialog_signal;  // 唤醒触发信号（回调 give，worker take）
+static TaskHandle_t s_wake_dialog_task;
+static portMUX_TYPE s_wake_dialog_task_lock = portMUX_INITIALIZER_UNLOCKED;
+
+// 唤醒后对话 worker：常驻 PSRAM 大栈任务（TLS 深栈，内部 SRAM 不足以承载），串行处理每次唤醒。
+static void wake_dialog_worker_task(void *arg)
+{
+    (void)arg;
+    fridge_voice_session_result_t *result = calloc(1, sizeof(*result));
+    for (;;) {
+        if (xSemaphoreTake(s_wake_dialog_signal, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+        if (!result) {
+            // 内存不足时也要清掉“对话进行中”标记，否则策略层永远不再恢复监听。
+            fridge_wake_word_notify_dialog_finished();
+            continue;
+        }
+
+        // 1) 点亮屏幕并跳到 AI 页，给用户“正在听”的反馈（异步入口，线程安全）。
+        fridge_ui_note_activity();
+        (void)fridge_ui_set_page_async(FRIDGE_UI_PAGE_AI, "在听你说话");
+
+        // 2) 让出 I2S：唤醒监听与录音共用同一路 I2S RX，必须先停监听再录音。
+        (void)fridge_wake_word_stop();
+
+        // 3) 录音固定窗口后停止。失败则直接结束本轮，交还策略层恢复监听。
+        esp_err_t err = fridge_audio_start_recording();
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "wake dialog start recording failed: %s", esp_err_to_name(err));
+            fridge_wake_word_notify_dialog_finished();
+            continue;
+        }
+        vTaskDelay(pdMS_TO_TICKS(WAKE_DIALOG_RECORD_MS));
+        (void)fridge_audio_stop_recording();
+
+        // 4) 复用公共语音会话：ASR -> AI -> 保存历史 -> 上行同步 -> TTS 播报。
+        //    manage_wake_word=false：唤醒词的暂停/恢复由本编排和策略层统一负责，避免重复管理。
+        memset(result, 0, sizeof(*result));
+        fridge_voice_session_options_t options = {
+            .play_tts = true,
+            .manage_wake_word = false,
+        };
+        err = fridge_voice_session_run_latest_recording_ex(&options, result);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "wake dialog session failed: %s",
+                     result->error[0] ? result->error : esp_err_to_name(err));
+        }
+
+        // 5) 清除“对话进行中”标记；是否恢复监听由策略层在下个 tick 按亮屏/空闲条件决定。
+        fridge_wake_word_notify_dialog_finished();
+        ESP_LOGI(TAG, "wake dialog done, stack high watermark=%u words",
+                 (unsigned)uxTaskGetStackHighWaterMark(NULL));
+    }
+}
+
+// 唤醒回调：仅投递信号，立即返回，不在 WakeNet 上下文做任何阻塞工作。
+static void on_wake_dialog_trigger(void *user_ctx)
+{
+    (void)user_ctx;
+    if (!s_wake_dialog_task) {
+        bool should_create = false;
+        portENTER_CRITICAL(&s_wake_dialog_task_lock);
+        if (!s_wake_dialog_task) {
+            should_create = true;
+        }
+        portEXIT_CRITICAL(&s_wake_dialog_task_lock);
+        if (should_create) {
+            // 唤醒后自动对话只有真正命中唤醒词时才创建，避免开机常驻占用 20KB 内部 SRAM。
+            BaseType_t ok = usb_create_flash_safe_worker_task(wake_dialog_worker_task,
+                                                              "wake_dialog",
+                                                              USB_AI_WORKER_TASK_STACK,
+                                                              NULL,
+                                                              4,
+                                                              &s_wake_dialog_task);
+            if (ok != pdPASS) {
+                ESP_LOGW(TAG, "create wake dialog worker failed");
+                return;
+            }
+        }
+    }
+    if (s_wake_dialog_signal) {
+        xSemaphoreGive(s_wake_dialog_signal);
+    }
+}
+
+static esp_err_t wake_dialog_init(void)
+{
+    if (!s_wake_dialog_signal) {
+        s_wake_dialog_signal = xSemaphoreCreateBinary();
+        if (!s_wake_dialog_signal) {
+            return ESP_ERR_NO_MEM;
+        }
+    }
+    return ESP_OK;
+}
+
 
 static void handle_wake_status(const char *request_id, const char *command)
 {
@@ -2019,6 +2501,10 @@ static void handle_tts_play(const char *line, const char *request_id, const char
     }
 
     // TTS 播放会通过扬声器回灌到麦克风；播放前暂停本地唤醒监听，避免误触发和 I2S 资源争用。
+    // 如果 HTTP/TLS 阶段失败，下面会按原状态恢复监听，避免一次 Web TTS 失败影响设备自带语音入口。
+    fridge_wake_word_status_t wake_status = {0};
+    bool wake_was_listening = fridge_wake_word_get_status(&wake_status) == ESP_OK &&
+                              wake_status.state == FRIDGE_WAKE_WORD_STATE_LISTENING;
     esp_err_t wake_err = fridge_wake_word_stop();
     if (wake_err != ESP_OK) {
         send_error(request_id, command, esp_err_to_name(wake_err));
@@ -2028,6 +2514,9 @@ static void handle_tts_play(const char *line, const char *request_id, const char
     fridge_speaker_status_t status = {0};
     esp_err_t err = fridge_speaker_synthesize_and_play(text, &status);
     if (err != ESP_OK) {
+        if (wake_was_listening) {
+            (void)fridge_wake_word_start();
+        }
         fridge_speaker_get_status(&status);
         response_begin(request_id, command, false);
         fputs(",\"error\":", stdout);
@@ -2120,40 +2609,271 @@ static void handle_voice_chat_stop(const char *request_id, const char *command)
         return;
     }
 
-    fridge_voice_session_result_t *result = calloc(1, sizeof(*result));
-    if (!result) {
+    fridge_voice_session_result_t *result = usb_large_calloc(1, sizeof(*result));
+    fridge_asr_config_update_t *asr_config = usb_large_calloc(1, sizeof(*asr_config));
+    fridge_asr_result_t *asr = usb_large_calloc(1, sizeof(*asr));
+    fridge_ai_config_update_t *ai_config = usb_large_calloc(1, sizeof(*ai_config));
+    fridge_ai_assistant_request_t *assistant_request = usb_large_calloc(1, sizeof(*assistant_request));
+    fridge_ai_assistant_result_t *ai = usb_large_calloc(1, sizeof(*ai));
+    fridge_ai_context_preview_t *preview = usb_large_calloc(1, sizeof(*preview));
+    fridge_ai_chat_history_item_t *history = usb_large_calloc(FRIDGE_AI_MAX_CHAT_HISTORY, sizeof(*history));
+    fridge_storage_chat_history_t *storage_history = usb_large_calloc(1, sizeof(*storage_history));
+    fridge_storage_chat_message_t *persisted_messages = usb_large_calloc(2, sizeof(*persisted_messages));
+    char *clean_reply = usb_large_calloc(1, FRIDGE_VOICE_SESSION_REPLY_LEN + 1);
+    char *visible_reply = usb_large_calloc(1, FRIDGE_VOICE_SESSION_REPLY_LEN + 1);
+    if (!result || !asr_config || !asr || !ai_config || !assistant_request || !ai || !preview || !history ||
+        !storage_history || !persisted_messages || !clean_reply || !visible_reply) {
+        free(result);
+        free(asr_config);
+        free(asr);
+        free(ai_config);
+        free(assistant_request);
+        free(ai);
+        free(preview);
+        free(history);
+        free(storage_history);
+        free(persisted_messages);
+        free(clean_reply);
+        free(visible_reply);
         send_error(request_id, command, "voice chat allocation failed");
+        return;
+    }
+
+    // NVS 配置读取和网络校时必须留在 USB 协议任务的内部 SRAM 栈中完成；
+    // PSRAM 大栈 worker 只执行 ASR/AI HTTPS，避免 Flash/cache 事务期间访问 PSRAM 栈导致重启。
+    err = fridge_asr_load_active_config(asr_config);
+    if (err == ESP_OK) {
+        err = fridge_ai_client_load_active_config(ai_config);
+    }
+    if (err == ESP_OK) {
+        err = fridge_ai_client_ensure_network_ready(result->error, sizeof(result->error));
+    }
+    if (err != ESP_OK) {
+        send_error(request_id, command, result->error[0] ? result->error : esp_err_to_name(err));
+        free(result);
+        free(asr_config);
+        free(asr);
+        free(ai_config);
+        free(assistant_request);
+        free(ai);
+        free(preview);
+        free(history);
+        free(storage_history);
+        free(persisted_messages);
+        free(clean_reply);
+        free(visible_reply);
         return;
     }
 
     SemaphoreHandle_t done = xSemaphoreCreateBinary();
     if (!done) {
         free(result);
+        free(asr_config);
+        free(asr);
+        free(ai_config);
+        free(assistant_request);
+        free(ai);
+        free(preview);
+        free(history);
+        free(storage_history);
+        free(persisted_messages);
+        free(clean_reply);
+        free(visible_reply);
         send_error(request_id, command, "voice chat sync object failed");
         return;
     }
 
-    usb_voice_chat_job_t job = {
-        .result = result,
+    usb_asr_job_t asr_job = {
+        .config = asr_config,
+        .result = asr,
         .err = ESP_FAIL,
         .done = done,
     };
-    BaseType_t task_ok = usb_create_worker_task(voice_chat_worker_task, "voice_chat_worker", USB_AI_WORKER_TASK_STACK, &job, 4, NULL);
+    BaseType_t task_ok = usb_dispatch_ai_worker((usb_ai_worker_dispatch_t) {
+        .type = USB_AI_WORKER_JOB_ASR,
+        .job = &asr_job,
+    });
     if (task_ok != pdPASS) {
         vSemaphoreDelete(done);
         free(result);
-        send_error(request_id, command, "voice chat worker create failed");
+        free(asr_config);
+        free(asr);
+        free(ai_config);
+        free(assistant_request);
+        free(ai);
+        free(preview);
+        free(history);
+        free(storage_history);
+        free(persisted_messages);
+        free(clean_reply);
+        free(visible_reply);
+        send_error(request_id, command, "ASR worker 任务创建失败");
+        return;
+    }
+
+    xSemaphoreTake(done, portMAX_DELAY);
+    err = asr_job.err;
+    if (err == ESP_OK && (asr->text[0] == '\0' || strlen(asr->text) < 2)) {
+        strlcpy(asr->error, "ASR 转写为空或过短，请重新录音", sizeof(asr->error));
+        err = ESP_ERR_INVALID_RESPONSE;
+    }
+    if (err != ESP_OK) {
+        vSemaphoreDelete(done);
+        const char *message = asr->error[0] ? asr->error : esp_err_to_name(err);
+        free(result);
+        free(asr_config);
+        free(asr);
+        free(ai_config);
+        free(assistant_request);
+        free(ai);
+        free(preview);
+        free(history);
+        free(storage_history);
+        free(persisted_messages);
+        free(clean_reply);
+        free(visible_reply);
+        send_error(request_id, command, message);
+        return;
+    }
+
+    size_t history_pruned_count = 0;
+    fridge_ai_task_request_t context_request = {
+        .include_inventory = true,
+        .include_memory = true,
+        .include_reminders = true,
+        .include_preferences = true,
+    };
+    strlcpy(context_request.task_type, "voice_intent_parse", sizeof(context_request.task_type));
+    strlcpy(context_request.user_text, asr->text, sizeof(context_request.user_text));
+
+    err = fridge_storage_get_chat_history(storage_history, &history_pruned_count);
+    if (err == ESP_OK) {
+        err = fridge_ai_context_build_preview(&context_request, preview);
+    }
+    if (err == ESP_OK) {
+        strlcpy(assistant_request->message, asr->text, sizeof(assistant_request->message));
+        strlcpy(assistant_request->task_type, "voice_intent_parse", sizeof(assistant_request->task_type));
+        strlcpy(assistant_request->context_json, preview->preview_json, sizeof(assistant_request->context_json));
+        assistant_request->history = history;
+        assistant_request->history_count = convert_storage_history_to_ai_history(storage_history, history, FRIDGE_AI_MAX_CHAT_HISTORY);
+        assistant_request->context_injected = true;
+        assistant_request->needs_confirmation = preview->needs_confirmation;
+        assistant_request->local_snapshot_version = preview->local_snapshot_version;
+    }
+    if (err != ESP_OK) {
+        vSemaphoreDelete(done);
+        free(result);
+        free(asr_config);
+        free(asr);
+        free(ai_config);
+        free(assistant_request);
+        free(ai);
+        free(preview);
+        free(history);
+        free(storage_history);
+        free(persisted_messages);
+        free(clean_reply);
+        free(visible_reply);
+        send_error(request_id, command, esp_err_to_name(err));
+        return;
+    }
+
+    usb_ai_assistant_job_t ai_job = {
+        .request = assistant_request,
+        .config = ai_config,
+        .result = ai,
+        .err = ESP_FAIL,
+        .done = done,
+    };
+    task_ok = usb_dispatch_ai_worker((usb_ai_worker_dispatch_t) {
+        .type = USB_AI_WORKER_JOB_ASSISTANT,
+        .job = &ai_job,
+    });
+    if (task_ok != pdPASS) {
+        vSemaphoreDelete(done);
+        free(result);
+        free(asr_config);
+        free(asr);
+        free(ai_config);
+        free(assistant_request);
+        free(ai);
+        free(preview);
+        free(history);
+        free(storage_history);
+        free(persisted_messages);
+        free(clean_reply);
+        free(visible_reply);
+        send_error(request_id, command, "AI assistant worker create failed");
         return;
     }
 
     xSemaphoreTake(done, portMAX_DELAY);
     vSemaphoreDelete(done);
-    if (job.err != ESP_OK) {
-        const char *message = result->error[0] ? result->error : esp_err_to_name(job.err);
+    err = ai_job.err;
+    if (err != ESP_OK) {
+        const char *message = ai->chat.error[0] ? ai->chat.error : esp_err_to_name(err);
         free(result);
+        free(asr_config);
+        free(asr);
+        free(ai_config);
+        free(assistant_request);
+        free(ai);
+        free(preview);
+        free(history);
+        free(storage_history);
+        free(persisted_messages);
+        free(clean_reply);
+        free(visible_reply);
         send_error(request_id, command, message);
         return;
     }
+
+    bool memory_updated = false;
+    (void)fridge_storage_apply_memory_directive(ai->chat.reply, clean_reply, FRIDGE_VOICE_SESSION_REPLY_LEN + 1, &memory_updated);
+    if (clean_reply[0] != '\0') {
+        strlcpy(ai->chat.reply, clean_reply, sizeof(ai->chat.reply));
+    }
+
+    fridge_ai_action_result_t action_result = {0};
+    err = fridge_ai_actions_strip_directives(ai->chat.reply, visible_reply, FRIDGE_VOICE_SESSION_REPLY_LEN + 1, &action_result);
+    bool action_feedback = action_result.tool[0] != '\0' && action_result.message[0] != '\0';
+    const char *reply_text = ai->chat.reply;
+    if ((err == ESP_OK && action_result.executed) || action_feedback) {
+        reply_text = action_result.message;
+    } else if (visible_reply[0] != '\0') {
+        reply_text = visible_reply;
+    }
+    normalize_ai_visible_reply(reply_text, clean_reply, FRIDGE_VOICE_SESSION_REPLY_LEN + 1);
+    reply_text = clean_reply[0] ? clean_reply : reply_text;
+
+    snprintf(persisted_messages[0].id, sizeof(persisted_messages[0].id), "msg_%" PRIu32 "_u", (uint32_t)(xTaskGetTickCount() & 0xFFFFFF));
+    strlcpy(persisted_messages[0].role, "user", sizeof(persisted_messages[0].role));
+    strlcpy(persisted_messages[0].content, asr->text, sizeof(persisted_messages[0].content));
+    strlcpy(persisted_messages[0].task_type, "voice_intent_parse", sizeof(persisted_messages[0].task_type));
+    snprintf(persisted_messages[1].id, sizeof(persisted_messages[1].id), "msg_%" PRIu32 "_a", (uint32_t)((xTaskGetTickCount() + 1) & 0xFFFFFF));
+    strlcpy(persisted_messages[1].role, "assistant", sizeof(persisted_messages[1].role));
+    strlcpy(persisted_messages[1].content, reply_text, sizeof(persisted_messages[1].content));
+    strlcpy(persisted_messages[1].task_type, "voice_intent_parse", sizeof(persisted_messages[1].task_type));
+    err = fridge_storage_append_chat_messages(persisted_messages, 2, &history_pruned_count);
+    if (err == ESP_OK) {
+        esp_err_t sync_err = fridge_mqtt_publish_chat_history_delta();
+        if (sync_err != ESP_OK) {
+            ESP_LOGW(TAG, "publish chat history delta failed: %s", esp_err_to_name(sync_err));
+        }
+    } else {
+        ESP_LOGW(TAG, "persist voice chat history failed: %s", esp_err_to_name(err));
+    }
+
+    strlcpy(result->transcript, asr->text, sizeof(result->transcript));
+    strlcpy(result->reply, reply_text, sizeof(result->reply));
+    strlcpy(result->asr_model, asr->model, sizeof(result->asr_model));
+    strlcpy(result->ai_model, ai->chat.model, sizeof(result->ai_model));
+    result->asr_http_status = asr->http_status;
+    result->ai_http_status = ai->chat.http_status;
+    result->asr_latency_ms = asr->latency_ms;
+    result->ai_latency_ms = ai->chat.latency_ms;
+    result->audio_bytes = asr->audio_bytes;
+    result->history_pruned_count = history_pruned_count;
 
     response_begin(request_id, command, true);
     fputs(",\"payload\":{\"transcript\":", stdout);
@@ -2174,6 +2894,17 @@ static void handle_voice_chat_stop(const char *request_id, const char *command)
     response_end();
 
     free(result);
+    free(asr_config);
+    free(asr);
+    free(ai_config);
+    free(assistant_request);
+    free(ai);
+    free(preview);
+    free(history);
+    free(storage_history);
+    free(persisted_messages);
+    free(clean_reply);
+    free(visible_reply);
 }
 
 static void print_camera_status_payload(const fridge_camera_status_t *status)
@@ -2366,27 +3097,61 @@ static void handle_camera_rgb565_diag(const char *request_id, const char *comman
 
 static void handle_camera_analyze(const char *request_id, const char *command)
 {
-    fridge_ai_image_result_t *result = calloc(1, sizeof(*result));
-    if (!result) {
+    // USB 图片识别会经过 TLS/HTTP 和 base64 编码，结果对象放 PSRAM，避免挤占已经很紧张的内部 SRAM。
+    fridge_ai_image_result_t *result = usb_large_calloc(1, sizeof(*result));
+    fridge_ai_config_update_t *config = usb_large_calloc(1, sizeof(*config));
+    if (!result || !config) {
+        free(result);
+        free(config);
         send_error(request_id, command, "camera analyze allocation failed");
+        return;
+    }
+
+    // 在 USB 协议任务里预加载 NVS 配置并等待网络，后台 worker 就可以使用 PSRAM 栈，避免内部栈创建失败。
+    esp_err_t preflight = fridge_ai_client_load_active_config(config);
+    if (preflight == ESP_OK) {
+        preflight = fridge_ai_client_ensure_network_ready(result->chat.error, sizeof(result->chat.error));
+    } else {
+        strlcpy(result->chat.error, esp_err_to_name(preflight), sizeof(result->chat.error));
+    }
+    if (preflight != ESP_OK) {
+        const char *message = result->chat.error[0] ? result->chat.error : esp_err_to_name(preflight);
+        free(config);
+        free(result);
+        send_error(request_id, command, message);
         return;
     }
 
     SemaphoreHandle_t done = xSemaphoreCreateBinary();
     if (!done) {
+        free(config);
         free(result);
         send_error(request_id, command, "camera analyze sync object failed");
         return;
     }
 
     usb_camera_analyze_job_t job = {
+        .config = config,
         .result = result,
         .err = ESP_FAIL,
         .done = done,
     };
-    BaseType_t task_ok = usb_create_worker_task(camera_analyze_worker_task, "camera_ai_worker", USB_CAMERA_WORKER_TASK_STACK, &job, 4, NULL);
+    BaseType_t task_ok = xTaskCreateWithCaps(camera_analyze_worker_task,
+                                             "camera_ai_worker",
+                                             USB_CAMERA_WORKER_TASK_STACK,
+                                             &job,
+                                             4,
+                                             NULL,
+                                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (task_ok != pdPASS) {
+        ESP_LOGW(TAG,
+                 "camera_ai_worker PSRAM stack create failed, stack=%lu, free_internal=%u KB, largest_internal=%u bytes, free_psram=%u KB",
+                 (unsigned long)USB_CAMERA_WORKER_TASK_STACK,
+                 (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) / 1024),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                 (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) / 1024));
         vSemaphoreDelete(done);
+        free(config);
         free(result);
         send_error(request_id, command, "camera analyze worker create failed");
         return;
@@ -2394,6 +3159,7 @@ static void handle_camera_analyze(const char *request_id, const char *command)
 
     xSemaphoreTake(done, portMAX_DELAY);
     vSemaphoreDelete(done);
+    free(config);
     if (job.err != ESP_OK) {
         const char *message = result->chat.error[0] ? result->chat.error : esp_err_to_name(job.err);
         free(result);
@@ -2977,6 +3743,10 @@ static void handle_line(const char *line)
         handle_test_ai_chat(line, request_id, command);
     } else if (strcmp(command, "ai_assistant_chat") == 0) {
         handle_ai_assistant_chat(line, request_id, command);
+    } else if (strcmp(command, "get_kitchen_ai_status") == 0) {
+        handle_get_kitchen_ai_status(request_id, command);
+    } else if (strcmp(command, "kitchen_ai_generate") == 0) {
+        handle_kitchen_ai_generate(line, request_id, command);
     } else if (strcmp(command, "get_kitchen_tools") == 0) {
         handle_get_kitchen_tools(request_id, command);
     } else if (strcmp(command, "timer_start") == 0) {
@@ -3063,8 +3833,12 @@ static void handle_line(const char *line)
         handle_get_chat_history(request_id, command);
     } else if (strcmp(command, "clear_chat_history") == 0) {
         handle_clear_chat_history(request_id, command);
+    } else if (strcmp(command, "get_inventory_snapshot") == 0) {
+        handle_get_inventory_snapshot(request_id, command);
     } else if (strcmp(command, "restore_seed_inventory") == 0) {
         handle_restore_seed_inventory(request_id, command);
+    } else if (strcmp(command, "repair_inventory_quantities") == 0) {
+        handle_repair_inventory_quantities(request_id, command);
     } else if (strcmp(command, "get_pins") == 0) {
         handle_get_pins(request_id, command);
     } else if (strcmp(command, "touch_i2c_diag") == 0) {
@@ -3120,6 +3894,10 @@ esp_err_t fridge_usb_protocol_start(void)
 {
     // 唤醒词事件通过同一条 USB JSON Lines 输出；这里只注册轻量回调，不在回调里触发 ASR/AI。
     (void)fridge_wake_word_set_event_callback(emit_wake_detected_event, NULL);
+    // 唤醒后自动对话：先建好信号量和 worker，再注册“唤醒->对话”回调（回调只投递信号，不阻塞）。
+    if (wake_dialog_init() == ESP_OK) {
+        (void)fridge_wake_word_set_dialog_callback(on_wake_dialog_trigger, NULL);
+    }
     BaseType_t ok = xTaskCreate(usb_protocol_task, "usb_protocol", USB_PROTOCOL_TASK_STACK, NULL, 5, NULL);
     return ok == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
 }

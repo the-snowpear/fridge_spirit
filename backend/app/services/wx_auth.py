@@ -24,8 +24,11 @@ class WxAuthService:
 
     async def code2session(self, code: str) -> Code2SessionResult:
         if not settings.wx_appid or not settings.wx_secret:
-            digest = sha256(code.encode("utf-8")).hexdigest()[:24]
-            return Code2SessionResult(openid=f"demo_openid_{digest}", is_placeholder=True)
+            # 开发/比赛模式没有真实微信 code2Session；这里必须返回稳定 openid。
+            # 如果按 wx.login() 的临时代码生成 openid，小程序清缓存或重登会创建新家庭，
+            # 而固件 MQTT 仍发往旧 home_id，表现为“同步成功但页面完全没变化”。
+            _ = sha256(code.encode("utf-8")).hexdigest()
+            return Code2SessionResult(openid="demo_openid_seed_001", is_placeholder=True)
 
         params = {
             "appid": settings.wx_appid,

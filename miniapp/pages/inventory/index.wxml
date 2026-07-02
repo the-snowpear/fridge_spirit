@@ -27,7 +27,7 @@
       <view class="cell-slot">{{item.slot}}</view>
       <block wx:if="{{item.occupied}}">
         <view class="cell-name">{{item.item.name}}</view>
-        <view class="cell-meta">{{item.item.quantity}}{{item.item.unit}}</view>
+        <view class="cell-meta">{{item.item.quantityText}}</view>
         <view wx:if="{{item.expireText}}" class="cell-expire">{{item.expireText}}</view>
       </block>
       <block wx:else>
@@ -42,7 +42,7 @@
       <view class="row">
         <view class="col">
           <view class="title" style="font-size: var(--text-md); margin: 0;">{{item.name}}</view>
-          <view class="subtitle">{{item.category || '未分类'}} · {{item.quantity}}{{item.unit}}</view>
+          <view class="subtitle">{{item.category || '未分类'}} · {{item.quantityText}}</view>
         </view>
         <view wx:if="{{item.expireDate}}" class="tag warn">{{item.expireDate}}</view>
       </view>

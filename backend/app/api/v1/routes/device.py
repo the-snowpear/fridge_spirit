@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
@@ -57,6 +57,17 @@ async def device_bind(
         db.add(device)
         await db.flush()
 
+    # 比赛演示版：同一台 ESP 只允许一个 active 家庭，旧兼容接口也同步收敛。
+    await db.execute(
+        update(DeviceBinding)
+        .where(
+            DeviceBinding.device_id == device.id,
+            DeviceBinding.home_id != payload.home_id,
+            DeviceBinding.status == "active",
+        )
+        .values(status="inactive")
+    )
+
     # 绑定关系也要 upsert：同一 device + home 已有 active 绑定时跳过插入，幂等。
     binding_result = await db.execute(
         select(DeviceBinding).where(
@@ -66,13 +77,26 @@ async def device_bind(
         )
     )
     if binding_result.scalar_one_or_none() is None:
-        db.add(
-            DeviceBinding(
-                device_id=device.id,
-                home_id=payload.home_id,
-                bound_by_user_id=payload.user_id,
+        inactive_binding = (
+            await db.execute(
+                select(DeviceBinding).where(
+                    DeviceBinding.device_id == device.id,
+                    DeviceBinding.home_id == payload.home_id,
+                )
             )
-        )
+        ).scalar_one_or_none()
+        if inactive_binding is None:
+            db.add(
+                DeviceBinding(
+                    device_id=device.id,
+                    home_id=payload.home_id,
+                    bound_by_user_id=payload.user_id,
+                )
+            )
+        else:
+            inactive_binding.status = "active"
+            inactive_binding.unbound_at = None
+            inactive_binding.bound_by_user_id = payload.user_id
 
     await db.commit()
     return ApiResponse[DeviceSummary](data=_to_summary(device))

@@ -28,6 +28,7 @@ class InventoryItemSchema(CamelModel):
     source: str
     confidence: int | None = None
     updated_at: datetime | None = None
+    extra: JsonDict = Field(default_factory=dict)
 
 
 class InventoryListData(CamelModel):

@@ -15,6 +15,7 @@ import { STANDARD_SLOTS, STANDARD_ZONES } from "../../types/models";
 import { RequestError } from "../../utils/request";
 import { displayPlace, getFridgeZones } from "../../utils/fridgeZones";
 import { updateOfflineSnapshot } from "../../utils/localFeatures";
+import { formatInventoryQuantity } from "../../utils/quantity";
 
 interface ZoneTab {
   key: string;
@@ -24,12 +25,12 @@ interface ZoneTab {
 interface SlotCellView {
   slot: string;
   occupied: boolean;
-  item?: InventoryItem;
+  item?: InventoryItem & { quantityText?: string };
   level?: "normal" | "warn" | "danger";
   expireText?: string;
 }
 
-type InventoryListViewItem = InventoryItem & { locationText: string };
+type InventoryListViewItem = InventoryItem & { locationText: string; quantityText: string };
 
 function zoneTabs(): ZoneTab[] {
   return [
@@ -94,6 +95,12 @@ Page({
     this.load().finally(() => wx.stopPullDownRefresh());
   },
 
+  onCloudSyncApplied() {
+    if (this.data.loading) return;
+    this.setData({ zones: zoneTabs() });
+    void this.load();
+  },
+
   async load() {
     if (this.data.loading) return;
     this.setData({ loading: true, errorText: "" });
@@ -139,7 +146,7 @@ Page({
         ? {
             slot,
             occupied: true,
-            item,
+            item: { ...item, quantityText: formatInventoryQuantity(item) },
             level: freshnessLevel(item),
             expireText: expireText(item),
           }
@@ -154,6 +161,7 @@ Page({
     return items.map((item) => ({
       ...item,
       locationText: item.location || displayPlace(item.zone, item.slot),
+      quantityText: formatInventoryQuantity(item),
     }));
   },
 

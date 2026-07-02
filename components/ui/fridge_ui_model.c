@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "cJSON.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "fridge_display.h"
 #include "fridge_mqtt_protocol.h"
@@ -29,10 +30,11 @@ static TaskHandle_t s_wifi_scan_task;
 static TaskHandle_t s_wifi_connect_task;
 static char s_connect_ssid[FRIDGE_WIFI_MAX_SSID_LEN + 1];
 static char s_connect_password[FRIDGE_WIFI_MAX_PASSWORD_LEN + 1];
-static char s_inventory_buf[FRIDGE_STORAGE_MAX_JSON_LEN];
+static char *s_inventory_buf;
 static bool s_place_picking;
 static uint8_t s_place_pick_origin_zone = 1;
 static uint8_t s_place_pick_origin_cell = 4;
+static uint32_t s_last_inventory_version;
 
 static const char *CELL_NAMES[FRIDGE_UI_ZONE_CELL_COUNT] = {"A1", "A2", "A3", "B1", "B2", "B3", "C1", "C2", "C3"};
 
@@ -84,6 +86,73 @@ static uint8_t food_days_from_expire_text(const char *text)
         return 99;
     }
     return (uint8_t)days;
+}
+
+static void normalize_quantity_text(char *quantity, size_t quantity_size)
+{
+    if (!quantity || quantity_size == 0 || quantity[0] == '\0') {
+        return;
+    }
+    char number[16] = {0};
+    char unit[16] = {0};
+    size_t number_len = 0;
+    while (quantity[number_len] &&
+           ((quantity[number_len] >= '0' && quantity[number_len] <= '9') || quantity[number_len] == '.')) {
+        number_len++;
+    }
+    if (number_len == 0 || number_len >= sizeof(number)) {
+        return;
+    }
+    memcpy(number, quantity, number_len);
+    number[number_len] = '\0';
+    strlcpy(unit, quantity + number_len, sizeof(unit));
+
+    bool integer_number = true;
+    for (size_t i = 0; number[i]; i++) {
+        if (number[i] < '0' || number[i] > '9') {
+            integer_number = false;
+            break;
+        }
+    }
+    if (strcmp(unit, "gg") == 0 || strcmp(unit, "ggg") == 0 || strcmp(unit, "gggg") == 0) {
+        strlcpy(unit, "g", sizeof(unit));
+    } else if (strcmp(unit, "克克") == 0) {
+        strlcpy(unit, "克", sizeof(unit));
+    } else if (strcmp(unit, "个个") == 0) {
+        strlcpy(unit, "个", sizeof(unit));
+    } else if (strcmp(unit, "份份") == 0) {
+        strlcpy(unit, "份", sizeof(unit));
+    }
+
+    if (!integer_number) {
+        char cleaned_decimal[32] = {0};
+        snprintf(cleaned_decimal, sizeof(cleaned_decimal), "%s%s", number, unit);
+        strlcpy(quantity, cleaned_decimal, quantity_size);
+        return;
+    }
+
+    bool gram_like = strcmp(unit, "g") == 0 || strcmp(unit, "克") == 0 || strcmp(unit, "ml") == 0 || strcmp(unit, "毫升") == 0;
+    size_t max_digits = gram_like ? 3 : 2;
+    size_t digits = strlen(number);
+    bool polluted_prefix = digits > max_digits && number[0] == '1' && number[1] == '1';
+    while (polluted_prefix && digits > max_digits && number[0] == '1') {
+        memmove(number, number + 1, digits);
+        digits--;
+    }
+    bool all_one = digits > 1;
+    for (size_t i = 0; i < digits; i++) {
+        if (number[i] != '1') {
+            all_one = false;
+            break;
+        }
+    }
+    if (all_one) {
+        strlcpy(number, "1", sizeof(number));
+    }
+
+    char cleaned[32] = {0};
+    snprintf(cleaned, sizeof(cleaned), "%s%s", number, unit);
+    strlcpy(quantity, cleaned, quantity_size);
 }
 
 static void model_fill_default_zones(fridge_ui_zone_summary_t *zones)
@@ -152,7 +221,13 @@ static void parse_inventory_json(const char *json)
 
     fridge_ui_zone_summary_t zones[FRIDGE_UI_ZONE_COUNT] = {0};
     model_fill_default_zones(zones);
-    fridge_ui_food_t foods[FRIDGE_UI_MAX_FOODS] = {0};
+    // 库存最多 54 项，食材数组约数 KB；解析运行在 UI 任务里，必须放堆上，避免挤爆 LVGL 栈。
+    fridge_ui_food_t *foods = calloc(FRIDGE_UI_MAX_FOODS, sizeof(*foods));
+    if (!foods) {
+        ESP_LOGW(TAG, "alloc inventory foods failed");
+        cJSON_Delete(root);
+        return;
+    }
     size_t food_count = 0;
     uint8_t active_zone = s_model.active_zone;
 
@@ -189,6 +264,10 @@ static void parse_inventory_json(const char *json)
         const cJSON *name = cJSON_GetObjectItemCaseSensitive(item, "name");
         const cJSON *quantity = cJSON_GetObjectItemCaseSensitive(item, "quantity");
         const cJSON *expire = cJSON_GetObjectItemCaseSensitive(item, "expire_date");
+        const cJSON *stored_at = cJSON_GetObjectItemCaseSensitive(item, "storedAt");
+        if (!cJSON_IsString(stored_at)) {
+            stored_at = cJSON_GetObjectItemCaseSensitive(item, "stored_at");
+        }
         const cJSON *days = cJSON_GetObjectItemCaseSensitive(item, "days_left");
         const cJSON *location = cJSON_GetObjectItemCaseSensitive(item, "location");
         const cJSON *zone_json = cJSON_GetObjectItemCaseSensitive(item, "zone");
@@ -205,7 +284,9 @@ static void parse_inventory_json(const char *json)
             fridge_ui_food_t *food = &foods[food_count];
             strlcpy(food->name, cJSON_IsString(name) ? name->valuestring : "未命名", sizeof(food->name));
             strlcpy(food->quantity, cJSON_IsString(quantity) ? quantity->valuestring : "-", sizeof(food->quantity));
+            normalize_quantity_text(food->quantity, sizeof(food->quantity));
             strlcpy(food->expire, cJSON_IsString(expire) ? expire->valuestring : "-", sizeof(food->expire));
+            strlcpy(food->stored_at, cJSON_IsString(stored_at) ? stored_at->valuestring : "", sizeof(food->stored_at));
             strlcpy(food->location, loc, sizeof(food->location));
             food->days_left = cJSON_IsNumber(days) ? days->valueint : food_days_from_expire_text(food->expire);
             food->zone = zone;
@@ -219,12 +300,13 @@ static void parse_inventory_json(const char *json)
 
     xSemaphoreTake(s_lock, portMAX_DELAY);
     memcpy(s_model.zones, zones, sizeof(zones));
-    memcpy(s_model.foods, foods, sizeof(foods));
+    memcpy(s_model.foods, foods, sizeof(s_model.foods));
     s_model.food_count = food_count;
     if (active_zone >= FRIDGE_UI_ZONE_COUNT) {
         s_model.active_zone = 1;
     }
     xSemaphoreGive(s_lock);
+    free(foods);
     cJSON_Delete(root);
 }
 
@@ -279,6 +361,7 @@ static char *model_to_inventory_json(const fridge_ui_model_t *model)
         cJSON_AddStringToObject(item, "name", food->name);
         cJSON_AddStringToObject(item, "quantity", food->quantity);
         cJSON_AddStringToObject(item, "expire_date", food->expire);
+        cJSON_AddStringToObject(item, "storedAt", food->stored_at);
         cJSON_AddNumberToObject(item, "days_left", food->days_left);
         cJSON_AddStringToObject(item, "location", food->location);
         cJSON_AddNumberToObject(item, "zone", food->zone);
@@ -302,13 +385,43 @@ static void model_persist_snapshot(const fridge_ui_model_t *model)
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "persist ui inventory failed: %s", esp_err_to_name(ret));
     } else {
-        // 用户确认修改后立即尝试上报完整库存快照；离线时保留 dirty 标记，等待下次同步刷新。
-        esp_err_t publish_ret = fridge_mqtt_publish_inventory_snapshot(false);
+        // 用户确认修改后投递后台上报。这里处于 LVGL 回调路径，不能直接执行大 JSON/MQTT 发布。
+        esp_err_t publish_ret = fridge_mqtt_request_inventory_publish(false);
         if (publish_ret != ESP_OK && publish_ret != ESP_ERR_INVALID_STATE) {
-            ESP_LOGW(TAG, "publish ui inventory snapshot failed: %s", esp_err_to_name(publish_ret));
+            ESP_LOGW(TAG, "request ui inventory publish failed: %s", esp_err_to_name(publish_ret));
         }
     }
     cJSON_free(json);
+}
+
+bool fridge_ui_model_get_zone_summary(uint8_t zone, fridge_ui_zone_summary_t *out)
+{
+    if (!out || zone >= FRIDGE_UI_ZONE_COUNT) {
+        return false;
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    *out = s_model.zones[zone];
+    xSemaphoreGive(s_lock);
+    return true;
+}
+
+uint8_t fridge_ui_model_get_active_zone(void)
+{
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    uint8_t zone = s_model.active_zone;
+    xSemaphoreGive(s_lock);
+    return zone;
+}
+
+uint8_t fridge_ui_model_get_active_cell(void)
+{
+    if (!s_lock) {
+        return 0;
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    uint8_t cell = s_model.active_cell;
+    xSemaphoreGive(s_lock);
+    return cell;
 }
 
 static void wifi_scan_task(void *arg)
@@ -364,6 +477,16 @@ void fridge_ui_model_init(void)
         return;
     }
     s_lock = xSemaphoreCreateMutex();
+    if (!s_inventory_buf) {
+        // 8KB JSON 缓冲常驻堆内，避免作为全局 BSS 占用宝贵内部 SRAM。
+        s_inventory_buf = heap_caps_calloc(1, FRIDGE_STORAGE_MAX_JSON_LEN, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!s_inventory_buf) {
+            s_inventory_buf = calloc(1, FRIDGE_STORAGE_MAX_JSON_LEN);
+        }
+        if (!s_inventory_buf) {
+            ESP_LOGW(TAG, "alloc inventory buffer failed");
+        }
+    }
     memset(&s_model, 0, sizeof(s_model));
     model_fill_default_zones(s_model.zones);
     s_model.active_zone = 1;
@@ -423,8 +546,17 @@ void fridge_ui_model_poll(void)
     s_model.speaker_volume = fridge_speaker_get_volume();
     xSemaphoreGive(s_lock);
 
-    if (fridge_storage_get_ui_inventory_snapshot(s_inventory_buf, sizeof(s_inventory_buf)) == ESP_OK) {
+    uint32_t inventory_version = 0;
+    bool should_reload_inventory = s_last_inventory_version == 0;
+    if (fridge_storage_get_inventory_snapshot_version(&inventory_version) == ESP_OK &&
+        inventory_version != s_last_inventory_version) {
+        should_reload_inventory = true;
+    }
+    // UI 每秒轮询状态，但完整库存 JSON 只在版本变化时读取/解析，避免触摸路径撞上大 Flash 读和 cJSON 解析。
+    if (should_reload_inventory && s_inventory_buf &&
+        fridge_storage_get_ui_inventory_snapshot(s_inventory_buf, FRIDGE_STORAGE_MAX_JSON_LEN) == ESP_OK) {
         parse_inventory_json(s_inventory_buf);
+        s_last_inventory_version = inventory_version ? inventory_version : 1;
     }
 }
 
@@ -434,6 +566,95 @@ void fridge_ui_model_get(fridge_ui_model_t *out)
         return;
     }
     model_lock_copy(out);
+}
+
+bool fridge_ui_model_get_network(fridge_ui_network_model_t *out)
+{
+    if (!out || !s_lock) {
+        return false;
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    *out = s_model.network;
+    xSemaphoreGive(s_lock);
+    return true;
+}
+
+bool fridge_ui_model_get_sensors(fridge_ui_sensor_model_t *out)
+{
+    if (!out || !s_lock) {
+        return false;
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    *out = s_model.sensors;
+    xSemaphoreGive(s_lock);
+    return true;
+}
+
+bool fridge_ui_model_get_editing_food(fridge_ui_food_t *out, bool *valid)
+{
+    if (!out || !s_lock) {
+        return false;
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    *out = s_model.editing_food;
+    if (valid) {
+        *valid = s_model.editing_valid;
+    }
+    xSemaphoreGive(s_lock);
+    return true;
+}
+
+bool fridge_ui_model_get_food(size_t index, fridge_ui_food_t *out)
+{
+    if (!out || !s_lock) {
+        return false;
+    }
+    bool ok = false;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (index < s_model.food_count && index < FRIDGE_UI_MAX_FOODS) {
+        *out = s_model.foods[index];
+        ok = true;
+    }
+    xSemaphoreGive(s_lock);
+    return ok;
+}
+
+size_t fridge_ui_model_get_food_count(void)
+{
+    if (!s_lock) {
+        return 0;
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    size_t count = s_model.food_count;
+    xSemaphoreGive(s_lock);
+    return count;
+}
+
+uint8_t fridge_ui_model_count_expiring_days(int max_days)
+{
+    if (!s_lock) {
+        return 0;
+    }
+    uint8_t count = 0;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    for (size_t i = 0; i < s_model.food_count && i < FRIDGE_UI_MAX_FOODS && count < UINT8_MAX; i++) {
+        if (s_model.foods[i].name[0] != '\0' && s_model.foods[i].days_left <= max_days) {
+            count++;
+        }
+    }
+    xSemaphoreGive(s_lock);
+    return count;
+}
+
+bool fridge_ui_model_get_camera_result(fridge_ui_camera_result_t *out)
+{
+    if (!out || !s_lock) {
+        return false;
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    *out = s_model.camera_result;
+    xSemaphoreGive(s_lock);
+    return true;
 }
 
 void fridge_ui_model_set_active_zone(uint8_t zone)
@@ -452,7 +673,6 @@ void fridge_ui_model_select_cell(uint8_t zone, uint8_t cell)
         return;
     }
 
-    fridge_ui_model_t snapshot = {0};
     xSemaphoreTake(s_lock, portMAX_DELAY);
     s_model.active_zone = zone;
     s_model.active_cell = cell;
@@ -469,6 +689,7 @@ void fridge_ui_model_select_cell(uint8_t zone, uint8_t cell)
         strlcpy(s_model.editing_food.name, "", sizeof(s_model.editing_food.name));
         strlcpy(s_model.editing_food.quantity, "1份", sizeof(s_model.editing_food.quantity));
         strlcpy(s_model.editing_food.expire, "3天后", sizeof(s_model.editing_food.expire));
+        strlcpy(s_model.editing_food.stored_at, "", sizeof(s_model.editing_food.stored_at));
         snprintf(s_model.editing_food.location,
                  sizeof(s_model.editing_food.location),
                  "%s %s",
@@ -478,9 +699,7 @@ void fridge_ui_model_select_cell(uint8_t zone, uint8_t cell)
         s_model.editing_food.zone = zone;
         s_model.editing_food.cell = cell;
     }
-    snapshot = s_model;
     xSemaphoreGive(s_lock);
-    (void)snapshot;
 }
 
 void fridge_ui_model_set_editing_draft(const fridge_ui_food_t *food)
@@ -533,7 +752,11 @@ bool fridge_ui_model_apply_place_pick(uint8_t zone, uint8_t cell)
         return false;
     }
 
-    fridge_ui_model_t snapshot = {0};
+    fridge_ui_model_t *snapshot = calloc(1, sizeof(*snapshot));
+    if (!snapshot) {
+        ESP_LOGW(TAG, "alloc place pick snapshot failed");
+        return false;
+    }
     xSemaphoreTake(s_lock, portMAX_DELAY);
     s_model.active_zone = zone;
     s_model.active_cell = cell;
@@ -570,9 +793,10 @@ bool fridge_ui_model_apply_place_pick(uint8_t zone, uint8_t cell)
     s_model.editing_valid = s_model.editing_food.name[0] != '\0';
     s_place_picking = false;
     model_recount_zone_items(&s_model);
-    snapshot = s_model;
+    *snapshot = s_model;
     xSemaphoreGive(s_lock);
-    model_persist_snapshot(&snapshot);
+    model_persist_snapshot(snapshot);
+    free(snapshot);
     return true;
 }
 
@@ -581,30 +805,41 @@ void fridge_ui_model_update_editing_food(const fridge_ui_food_t *food)
     if (!food || food->zone >= FRIDGE_UI_ZONE_COUNT || food->cell >= FRIDGE_UI_ZONE_CELL_COUNT) {
         return;
     }
-    fridge_ui_model_t snapshot = {0};
+    fridge_ui_model_t *snapshot = calloc(1, sizeof(*snapshot));
+    if (!snapshot) {
+        ESP_LOGW(TAG, "alloc update food snapshot failed");
+        return;
+    }
+    fridge_ui_food_t clean_food = *food;
+    normalize_quantity_text(clean_food.quantity, sizeof(clean_food.quantity));
     xSemaphoreTake(s_lock, portMAX_DELAY);
     bool found = false;
     for (size_t i = 0; i < s_model.food_count; i++) {
-        if (s_model.foods[i].zone == food->zone && s_model.foods[i].cell == food->cell) {
-            s_model.foods[i] = *food;
+        if (s_model.foods[i].zone == clean_food.zone && s_model.foods[i].cell == clean_food.cell) {
+            s_model.foods[i] = clean_food;
             found = true;
             break;
         }
     }
-    if (!found && food->name[0] != '\0' && s_model.food_count < FRIDGE_UI_MAX_FOODS) {
-        s_model.foods[s_model.food_count++] = *food;
+    if (!found && clean_food.name[0] != '\0' && s_model.food_count < FRIDGE_UI_MAX_FOODS) {
+        s_model.foods[s_model.food_count++] = clean_food;
     }
-    s_model.editing_food = *food;
-    s_model.editing_valid = food->name[0] != '\0';
+    s_model.editing_food = clean_food;
+    s_model.editing_valid = clean_food.name[0] != '\0';
     model_recount_zone_items(&s_model);
-    snapshot = s_model;
+    *snapshot = s_model;
     xSemaphoreGive(s_lock);
-    model_persist_snapshot(&snapshot);
+    model_persist_snapshot(snapshot);
+    free(snapshot);
 }
 
 void fridge_ui_model_delete_editing_food(void)
 {
-    fridge_ui_model_t snapshot = {0};
+    fridge_ui_model_t *snapshot = calloc(1, sizeof(*snapshot));
+    if (!snapshot) {
+        ESP_LOGW(TAG, "alloc delete food snapshot failed");
+        return;
+    }
     xSemaphoreTake(s_lock, portMAX_DELAY);
     uint8_t zone = s_model.editing_food.zone;
     uint8_t cell = s_model.editing_food.cell;
@@ -622,9 +857,10 @@ void fridge_ui_model_delete_editing_food(void)
     memset(&s_model.editing_food, 0, sizeof(s_model.editing_food));
     s_model.editing_valid = false;
     model_recount_zone_items(&s_model);
-    snapshot = s_model;
+    *snapshot = s_model;
     xSemaphoreGive(s_lock);
-    model_persist_snapshot(&snapshot);
+    model_persist_snapshot(snapshot);
+    free(snapshot);
 }
 
 void fridge_ui_model_add_camera_food(const char *name, const char *quantity, uint8_t zone, uint8_t cell)
@@ -634,16 +870,49 @@ void fridge_ui_model_add_camera_food(const char *name, const char *quantity, uin
         cell = 4;
     }
     fridge_ui_food_t food = {0};
-    strlcpy(food.name, name && name[0] ? name : "待确认食材", sizeof(food.name));
-    strlcpy(food.quantity, quantity && quantity[0] ? quantity : "1份", sizeof(food.quantity));
+    strlcpy(food.name, name && name[0] ? name : "水杯", sizeof(food.name));
+    strlcpy(food.quantity, quantity && quantity[0] ? quantity : "1件", sizeof(food.quantity));
+    strlcpy(food.expire, "3天后", sizeof(food.expire));
+    strlcpy(food.stored_at, "", sizeof(food.stored_at));
+    food.days_left = 3;
+    food.zone = zone;
+    food.cell = cell;
+    fridge_ui_zone_summary_t zone_summary = {0};
+    (void)fridge_ui_model_get_zone_summary(zone, &zone_summary);
+    snprintf(food.location, sizeof(food.location), "%s %s",
+             zone_summary.name[0] ? zone_summary.name : "冰箱区域",
+             CELL_NAMES[cell]);
+    fridge_ui_model_update_editing_food(&food);
+}
+
+void fridge_ui_model_prepare_camera_food_draft(const char *name, const char *quantity, uint8_t zone, uint8_t cell)
+{
+    if (zone >= FRIDGE_UI_ZONE_COUNT || cell >= FRIDGE_UI_ZONE_CELL_COUNT) {
+        zone = 1;
+        cell = 4;
+    }
+
+    fridge_ui_food_t food = {0};
+    strlcpy(food.name, name && name[0] ? name : "水杯", sizeof(food.name));
+    strlcpy(food.quantity, quantity && quantity[0] ? quantity : "1件", sizeof(food.quantity));
     strlcpy(food.expire, "3天后", sizeof(food.expire));
     food.days_left = 3;
     food.zone = zone;
     food.cell = cell;
-    fridge_ui_model_t model = {0};
-    fridge_ui_model_get(&model);
-    snprintf(food.location, sizeof(food.location), "%s %s", model.zones[zone].name, CELL_NAMES[cell]);
-    fridge_ui_model_update_editing_food(&food);
+    fridge_ui_zone_summary_t zone_summary = {0};
+    (void)fridge_ui_model_get_zone_summary(zone, &zone_summary);
+    snprintf(food.location, sizeof(food.location), "%s %s",
+             zone_summary.name[0] ? zone_summary.name : "冰箱区域",
+             CELL_NAMES[cell]);
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    // 拍照结果页的“确认登记”只生成编辑草稿，不写 Flash、不触发 MQTT。
+    // 真正入库仍由编辑页“保存修改”完成，避免 AI 结果未经用户核对就落库。
+    s_model.editing_food = food;
+    s_model.editing_valid = food.name[0] != '\0';
+    s_model.active_zone = zone;
+    s_model.active_cell = cell;
+    xSemaphoreGive(s_lock);
 }
 
 void fridge_ui_model_set_camera_result(const fridge_ui_camera_result_t *result)
@@ -665,7 +934,11 @@ void fridge_ui_model_clear_camera_result(void)
 
 bool fridge_ui_model_add_custom_zone(void)
 {
-    fridge_ui_model_t snapshot = {0};
+    fridge_ui_model_t *snapshot = calloc(1, sizeof(*snapshot));
+    if (!snapshot) {
+        ESP_LOGW(TAG, "alloc add zone snapshot failed");
+        return false;
+    }
     bool added = false;
     xSemaphoreTake(s_lock, portMAX_DELAY);
     for (uint8_t i = 4; i < FRIDGE_UI_ZONE_COUNT; i++) {
@@ -689,11 +962,12 @@ bool fridge_ui_model_add_custom_zone(void)
             }
         }
     }
-    snapshot = s_model;
+    *snapshot = s_model;
     xSemaphoreGive(s_lock);
     if (added) {
-        model_persist_snapshot(&snapshot);
+        model_persist_snapshot(snapshot);
     }
+    free(snapshot);
     return added;
 }
 
@@ -702,7 +976,11 @@ bool fridge_ui_model_rename_active_zone(const char *name)
     if (!name || name[0] == '\0') {
         return false;
     }
-    fridge_ui_model_t snapshot = {0};
+    fridge_ui_model_t *snapshot = calloc(1, sizeof(*snapshot));
+    if (!snapshot) {
+        ESP_LOGW(TAG, "alloc rename zone snapshot failed");
+        return false;
+    }
     bool renamed = false;
     xSemaphoreTake(s_lock, portMAX_DELAY);
     uint8_t zone = s_model.active_zone;
@@ -719,11 +997,12 @@ bool fridge_ui_model_rename_active_zone(const char *name)
         }
         renamed = true;
     }
-    snapshot = s_model;
+    *snapshot = s_model;
     xSemaphoreGive(s_lock);
     if (renamed) {
-        model_persist_snapshot(&snapshot);
+        model_persist_snapshot(snapshot);
     }
+    free(snapshot);
     return renamed;
 }
 
@@ -743,7 +1022,11 @@ bool fridge_ui_model_update_zone(uint8_t zone, const char *name, uint8_t width, 
         height = 3;
     }
 
-    fridge_ui_model_t snapshot = {0};
+    fridge_ui_model_t *snapshot = calloc(1, sizeof(*snapshot));
+    if (!snapshot) {
+        ESP_LOGW(TAG, "alloc zone snapshot failed");
+        return false;
+    }
     xSemaphoreTake(s_lock, portMAX_DELAY);
     strlcpy(s_model.zones[zone].name, name, sizeof(s_model.zones[zone].name));
     strlcpy(s_model.zones[zone].note, note && note[0] ? note : "可放食材", sizeof(s_model.zones[zone].note));
@@ -758,15 +1041,20 @@ bool fridge_ui_model_update_zone(uint8_t zone, const char *name, uint8_t width, 
                      CELL_NAMES[s_model.foods[i].cell]);
         }
     }
-    snapshot = s_model;
+    *snapshot = s_model;
     xSemaphoreGive(s_lock);
-    model_persist_snapshot(&snapshot);
+    model_persist_snapshot(snapshot);
+    free(snapshot);
     return true;
 }
 
 void fridge_ui_model_delete_zone(uint8_t zone)
 {
-    fridge_ui_model_t snapshot = {0};
+    fridge_ui_model_t *snapshot = calloc(1, sizeof(*snapshot));
+    if (!snapshot) {
+        ESP_LOGW(TAG, "alloc delete zone snapshot failed");
+        return;
+    }
     xSemaphoreTake(s_lock, portMAX_DELAY);
     if (zone >= 4 && zone < FRIDGE_UI_ZONE_COUNT && s_model.zones[zone].custom) {
         memset(&s_model.zones[zone], 0, sizeof(s_model.zones[zone]));
@@ -785,16 +1073,15 @@ void fridge_ui_model_delete_zone(uint8_t zone)
         }
         s_model.active_zone = 1;
     }
-    snapshot = s_model;
+    *snapshot = s_model;
     xSemaphoreGive(s_lock);
-    model_persist_snapshot(&snapshot);
+    model_persist_snapshot(snapshot);
+    free(snapshot);
 }
 
 void fridge_ui_model_delete_active_custom_zone(void)
 {
-    fridge_ui_model_t model = {0};
-    fridge_ui_model_get(&model);
-    fridge_ui_model_delete_zone(model.active_zone);
+    fridge_ui_model_delete_zone(fridge_ui_model_get_active_zone());
 }
 
 void fridge_ui_model_start_wifi_scan(void)

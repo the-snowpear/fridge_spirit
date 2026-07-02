@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "esp_check.h"
+#include "cJSON.h"
 #include "fridge_storage.h"
 
 static const char *TAG = "fridge_ai_context";
@@ -21,6 +22,9 @@ static const char *supported_tasks[] = {
     "recognize_ingredients",
     "inventory_parse",
     "recipe_generate",
+    "kitchen_recipe",
+    "kitchen_nutrition",
+    "kitchen_shopping",
     "shopping_list_generate",
     "reminder_explain",
     "voice_intent_parse",
@@ -76,6 +80,15 @@ static const char *task_template_for(const char *task_type)
     }
     if (strcmp(task_type, "recipe_generate") == 0) {
         return "优先使用已有且临期食材，输出菜名、可用库存、缺少食材、预计耗时和简要步骤。";
+    }
+    if (strcmp(task_type, "kitchen_recipe") == 0) {
+        return "为屏幕菜谱页生成极短 JSON：只给 1 道可做菜，字段少、步骤短，优先消耗临期库存。";
+    }
+    if (strcmp(task_type, "kitchen_nutrition") == 0) {
+        return "为屏幕营养助手页生成极短 JSON：只给日常饮食建议，不做医疗诊断。";
+    }
+    if (strcmp(task_type, "kitchen_shopping") == 0) {
+        return "为屏幕购物清单页生成极短 JSON：只补库存缺口，避免重复购买。";
     }
     if (strcmp(task_type, "shopping_list_generate") == 0) {
         return "根据库存缺口和菜谱计划生成清单，区分建议购买和可选补充，避免过度推荐。";
@@ -209,6 +222,38 @@ static void build_history_preview_json(const fridge_storage_chat_history_t *hist
     }
 }
 
+static bool json_fragment_is_valid_value(const char *text)
+{
+    if (!text) {
+        return false;
+    }
+    while (*text == ' ' || *text == '\t' || *text == '\r' || *text == '\n') {
+        text++;
+    }
+    if (*text == '\0') {
+        return false;
+    }
+
+    const char *end = NULL;
+    cJSON *root = cJSON_ParseWithOpts(text, &end, true);
+    if (!root) {
+        return false;
+    }
+    cJSON_Delete(root);
+    return end && *end == '\0';
+}
+
+static void ensure_json_fragment_or_fallback(char *text, size_t text_size, const char *fallback)
+{
+    if (!text || text_size == 0) {
+        return;
+    }
+    if (json_fragment_is_valid_value(text)) {
+        return;
+    }
+    strlcpy(text, fallback ? fallback : "null", text_size);
+}
+
 bool fridge_ai_context_task_type_supported(const char *task_type)
 {
     if (!task_type || task_type[0] == '\0') {
@@ -299,6 +344,16 @@ esp_err_t fridge_ai_context_build_preview(const fridge_ai_task_request_t *reques
         free(work);
         ESP_RETURN_ON_FALSE(false, ESP_ERR_NO_MEM, TAG, "build history preview failed");
     }
+
+    // 这些字段会作为原始 JSON 片段嵌入最终上下文。旧版本同步或文件损坏可能留下空串，
+    // 这里统一兜底，避免串口 response 出现 `"reminders":,` 这类非法 JSON 导致 Web Serial 超时。
+    ensure_json_fragment_or_fallback(work->inventory, sizeof(work->inventory), "{}");
+    ensure_json_fragment_or_fallback(work->reminders, sizeof(work->reminders), "{}");
+    ensure_json_fragment_or_fallback(work->preferences, sizeof(work->preferences), "{}");
+    ensure_json_fragment_or_fallback(work->memory, sizeof(work->memory), "{}");
+    ensure_json_fragment_or_fallback(work->offline, sizeof(work->offline), "{}");
+    ensure_json_fragment_or_fallback(work->history_json, sizeof(work->history_json),
+                                     "{\"time_ready\":false,\"count\":0,\"ttl_seconds\":172800,\"messages\":[]}");
 
     json_escape_into(request->user_text, work->escaped_user, sizeof(work->escaped_user));
     json_escape_into(PERSONA_TEMPLATE, work->escaped_persona, sizeof(work->escaped_persona));

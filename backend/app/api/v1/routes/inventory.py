@@ -46,6 +46,11 @@ from app.services.sync_service import get_status, record_server_event
 router = APIRouter()
 
 
+def _now_ms() -> int:
+    """当前时间毫秒，作为后写覆盖（last-write-wins）的服务端编辑时间戳。"""
+    return int(datetime.now(timezone.utc).timestamp() * 1000)
+
+
 # 把 ORM 实例渲染为对外的 schema。从 ORM 直读避免漏字段，集中在一处便于扩展。
 def _item_to_schema(item: InventoryItem) -> InventoryItemSchema:
     return InventoryItemSchema(
@@ -62,6 +67,7 @@ def _item_to_schema(item: InventoryItem) -> InventoryItemSchema:
         source=item.source,
         confidence=item.confidence,
         updated_at=item.updated_at,
+        extra=item.extra if isinstance(item.extra, dict) else {},
     )
 
 
@@ -105,7 +111,7 @@ async def inventory_create_v2(
         user_id=_user.id,
         domain="inventory",
         op="upsert",
-        payload=payload.model_dump(mode="json", by_alias=True),
+        payload={**payload.model_dump(mode="json", by_alias=True), "updatedAtMs": _now_ms()},
     )
     await db.commit()
     await db.refresh(item)
@@ -137,6 +143,10 @@ async def inventory_patch_v2(
     patch_data = payload.model_dump(exclude_unset=True, by_alias=False)
     for key, value in patch_data.items():
         setattr(item, key, value)
+    # 记录本次编辑时间，供设备快照回流时做后写覆盖比较。
+    patch_extra = dict(item.extra) if isinstance(item.extra, dict) else {}
+    patch_extra["syncUpdatedAtMs"] = _now_ms()
+    item.extra = patch_extra
 
     # 写一条变更事件，便于后续审计 / 同步到设备端。
     db.add(
@@ -155,7 +165,7 @@ async def inventory_patch_v2(
         user_id=_user.id,
         domain="inventory",
         op="patch",
-        payload={"id": str(item.id), **payload.model_dump(mode="json", exclude_unset=True, by_alias=True)},
+        payload={"id": str(item.id), **payload.model_dump(mode="json", exclude_unset=True, by_alias=True), "updatedAtMs": _now_ms()},
     )
 
     await db.commit()
@@ -182,6 +192,10 @@ async def inventory_delete_v2(
     if item is None or item.home_id != home.id:
         raise HTTPException(status_code=404, detail="inventory item not found")
     item.status = "deleted"
+    # 删除也是一次编辑：记录编辑时间，防止较旧的设备快照回流时把刚删除的条目复活。
+    delete_extra = dict(item.extra) if isinstance(item.extra, dict) else {}
+    delete_extra["syncUpdatedAtMs"] = _now_ms()
+    item.extra = delete_extra
     db.add(
         InventoryEvent(
             home_id=item.home_id,
@@ -198,7 +212,7 @@ async def inventory_delete_v2(
         user_id=_user.id,
         domain="inventory",
         op="delete",
-        payload={"id": str(item.id), "status": "deleted"},
+        payload={"id": str(item.id), "status": "deleted", "updatedAtMs": _now_ms()},
     )
     await db.commit()
     await push_cloud_snapshot_to_devices(
@@ -356,7 +370,10 @@ async def _upsert_item(
     item.status = payload.status
     item.source = payload.source
     item.confidence = payload.confidence
-    item.extra = payload.extra
+    # 记录本次编辑时间，供设备快照回流时做后写覆盖比较（与同步通道写入的 syncUpdatedAtMs 对齐）。
+    next_extra = dict(payload.extra) if isinstance(payload.extra, dict) else {}
+    next_extra["syncUpdatedAtMs"] = _now_ms()
+    item.extra = next_extra
 
     db.add(
         InventoryEvent(

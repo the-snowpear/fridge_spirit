@@ -28,6 +28,9 @@ build_recovery_profile/
 # 本地聊天记录目录，不纳入版本管理
 chat_history/
 example/
+# 厂商大体积资料与演示视频，只保留在本地磁盘，不纳入版本管理（约 2.7GB / 218MB）
+doc/慧勤智远 ESP32-P4 CB V1.2小系统板/
+video/
 *.o
 *.a
 *.out

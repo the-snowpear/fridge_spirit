@@ -144,7 +144,7 @@
         <text class="muted">固件</text><text class="value">{{deviceFirmware}}</text>
       </view>
       <view class="row" style="gap: var(--space-3); margin-top: var(--space-6);">
-        <button class="btn ghost" style="flex: 1;" loading="{{refreshing}}" bindtap="onTapRefreshDevice">刷新冰箱</button>
+        <button class="btn ghost" style="flex: 1;" loading="{{refreshing || syncBusy}}" bindtap="onTapSyncNow">同步设备</button>
         <button class="btn secondary" style="flex: 1;" bindtap="onTapBindManual">换设备</button>
       </view>
       <button class="btn ghost" style="margin-top: var(--space-3); width: 100%;" bindtap="onTapOffline">查看离线缓存</button>

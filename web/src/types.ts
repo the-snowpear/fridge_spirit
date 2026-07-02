@@ -58,6 +58,8 @@ export type DeviceCommand =
   | "delete_ai_profile"
   | "test_ai_chat"
   | "ai_assistant_chat"
+  | "get_kitchen_ai_status"
+  | "kitchen_ai_generate"
   | "get_kitchen_tools"
   | "timer_start"
   | "timer_pause"
@@ -177,6 +179,7 @@ export interface AIConfig {
   model: string;
   systemPrompt: string;
   timeoutMs: number;
+  apiFormat?: number; // 接口格式：0=OpenAI 兼容，1=Google Gemini 原生
   hasApiKey: boolean;
   apiKeyPreview: string;
   lastError: string;
@@ -305,6 +308,28 @@ export interface KitchenToolsStatus {
   alarms: KitchenAlarmStatus[];
   lastAlert: string;
   lastError: string;
+}
+
+export type KitchenAIPage = "all" | "recipe" | "nutrition" | "shopping";
+
+export interface KitchenAIGenerateRequest {
+  page: KitchenAIPage;
+}
+
+export interface KitchenAIStatus {
+  running: boolean;
+  lastOk: boolean;
+  state: "idle" | "running" | "ok" | "error" | string;
+  lastTrigger: "auto" | "manual" | string;
+  currentPage: KitchenAIPage | string;
+  lastPage: KitchenAIPage | string;
+  lastGeneratedAt: number;
+  lastAutoDay: number;
+  httpStatus: number;
+  latencyMs: number;
+  lastReplyLen?: number;
+  lastError: string;
+  lastReplyPreview?: string;
 }
 
 export interface CameraStatus {

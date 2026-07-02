@@ -69,8 +69,8 @@ async def sync_push(
         device_domains.update({"inventory", "fridge_zones"})
     if "ai_config" in changed_domains:
         device_domains.update({"ai_config", "asr_config", "tts_config"})
-    if changed_domains & {"shopping_list", "recipe_cache", "reminder", "settings"}:
-        device_domains.update(changed_domains & {"shopping_list", "recipe_cache", "reminder", "settings"})
+    if changed_domains & {"shopping_list", "recipe_cache", "nutrition_cache", "reminder", "settings"}:
+        device_domains.update(changed_domains & {"shopping_list", "recipe_cache", "nutrition_cache", "reminder", "settings"})
     if device_domains:
         await push_cloud_snapshot_to_devices(
             db,
@@ -91,8 +91,8 @@ async def sync_device_push(
 ) -> ApiResponse[SyncDevicePushData]:
     """把当前云端快照主动下发给绑定设备。
 
-    小程序“立即同步”会调用此接口：先请求设备上报本地库存，再把云端最新库存、
-    分区和 AI/ASR/TTS 配置推到设备端 NVS/LittleFS。
+    小程序“立即同步”会调用此接口。默认采用轻量投递，不等待设备写盘 ACK，避免
+    微信请求超时；确需诊断设备执行结果时可传 waitForAck=true。
     """
     status = await get_status(db, home.id)
     data = await push_cloud_snapshot_to_devices(
@@ -103,6 +103,7 @@ async def sync_device_push(
         request_device_inventory=payload.request_device_inventory,
         accept_clean_device_snapshot=payload.accept_clean_device_snapshot,
         push_cloud_snapshot=payload.push_cloud_snapshot,
+        wait_for_ack=payload.wait_for_ack,
     )
     message = "device sync queued" if data.queued_count else "no device command queued"
     return ApiResponse[SyncDevicePushData](data=data, message=message)

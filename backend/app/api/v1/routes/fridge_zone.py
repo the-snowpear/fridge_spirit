@@ -1,5 +1,7 @@
 """冰箱分区配置路由。"""
 
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -42,7 +44,10 @@ async def write_fridge_zones(
         user_id=_user.id,
         domain="fridge_zones",
         op="replace",
-        payload={"zones": [zone.model_dump(mode="json", by_alias=True) for zone in data.zones]},
+        payload={
+            "zones": [zone.model_dump(mode="json", by_alias=True) for zone in data.zones],
+            "updatedAtMs": int(datetime.now(timezone.utc).timestamp() * 1000),
+        },
     )
     await db.commit()
     await push_cloud_snapshot_to_devices(

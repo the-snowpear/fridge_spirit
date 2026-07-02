@@ -30,6 +30,9 @@ import type {
   DeviceChatHistory,
   DeviceCommand,
   DeviceResponse,
+  KitchenAIGenerateRequest,
+  KitchenAIPage,
+  KitchenAIStatus,
   KitchenToolsStatus,
   MemorySummary,
   MQTTConfig,
@@ -143,6 +146,21 @@ export class MockTransport extends BaseTransport {
     alarms: [],
     lastAlert: "",
     lastError: "",
+  };
+  private kitchenAiStatus: KitchenAIStatus = {
+    running: false,
+    lastOk: false,
+    state: "idle",
+    lastTrigger: "manual",
+    currentPage: "all",
+    lastPage: "all",
+    lastGeneratedAt: 0,
+    lastAutoDay: 0,
+    httpStatus: 0,
+    latencyMs: 0,
+    lastReplyLen: 0,
+    lastError: "",
+    lastReplyPreview: "",
   };
   private kitchenTimerStartedAt = 0;
   private kitchenTimerEndsAt = 0;
@@ -518,6 +536,36 @@ export class MockTransport extends BaseTransport {
           toolMessage: tool?.message ?? "",
         } satisfies AIAssistantChatResponse;
         this.emitLog("info", `Mock AI 助手已注入上下文并完成：${request.taskType}`, "ai");
+        break;
+      }
+      case "get_kitchen_ai_status":
+        responsePayload = this.kitchenAiStatus;
+        break;
+      case "kitchen_ai_generate": {
+        const request = payload as Partial<KitchenAIGenerateRequest> | undefined;
+        const page = this.normalizeKitchenAiPage(request?.page);
+        const mockReply = page === "nutrition"
+          ? "{\"schema_version\":1,\"generated_at\":0,\"nutrition\":{\"score\":82,\"summary\":\"蛋白质够用，蔬菜可再补一点\",\"focus\":[\"补绿叶菜\"],\"suggestions\":[\"晚餐加一份青菜\"],\"restrict_note\":\"仅供日常参考，非医疗建议\"}}"
+          : page === "shopping"
+            ? "{\"schema_version\":1,\"generated_at\":0,\"items\":[{\"name\":\"青菜\",\"quantity\":\"1把\",\"reason\":\"补充蔬菜\",\"priority\":\"high\",\"checked\":false}]}"
+            : "{\"schema_version\":1,\"generated_at\":0,\"items\":[{\"title\":\"菠菜虾仁豆腐汤\",\"tag\":\"清淡临期\",\"time_minutes\":15,\"use_inventory\":[\"菠菜\",\"虾仁\",\"豆腐\"],\"missing\":[],\"steps\":[\"洗净菠菜\",\"豆腐切块\",\"煮开调味\"],\"reason\":\"优先消耗临期食材\"}]}";
+        this.kitchenAiStatus = {
+          running: false,
+          lastOk: true,
+          state: "ok",
+          lastTrigger: "manual",
+          currentPage: "all",
+          lastPage: page,
+          lastGeneratedAt: Math.floor(Date.now() / 1000),
+          lastAutoDay: this.createTodayKey(),
+          httpStatus: 200,
+          latencyMs: 420 + Math.round(Math.random() * 260),
+          lastReplyLen: mockReply.length,
+          lastError: "",
+          lastReplyPreview: mockReply,
+        };
+        this.emitLog("info", `Mock 厨房 AI 已生成 ${page} JSON 缓存。`, "kitchen_ai");
+        responsePayload = this.kitchenAiStatus;
         break;
       }
       case "get_kitchen_tools":
@@ -1024,6 +1072,15 @@ export class MockTransport extends BaseTransport {
       window.clearInterval(this.wakeTimer);
       this.wakeTimer = undefined;
     }
+  }
+
+  private normalizeKitchenAiPage(page: unknown): KitchenAIPage {
+    return page === "recipe" || page === "nutrition" || page === "shopping" || page === "all" ? page : "all";
+  }
+
+  private createTodayKey() {
+    const now = new Date();
+    return (now.getFullYear() * 10000) + ((now.getMonth() + 1) * 100) + now.getDate();
   }
 
   private getKitchenToolsSnapshot(): KitchenToolsStatus {

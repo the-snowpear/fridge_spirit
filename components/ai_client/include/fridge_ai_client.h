@@ -16,7 +16,7 @@ extern "C" {
 #define FRIDGE_AI_MAX_CHAT_MESSAGE_LEN 768
 #define FRIDGE_AI_MAX_CHAT_HISTORY 30
 #define FRIDGE_AI_MAX_CONTEXT_LEN 8192
-#define FRIDGE_AI_MAX_REPLY_LEN 2048
+#define FRIDGE_AI_MAX_REPLY_LEN 8192
 #define FRIDGE_AI_MAX_ERROR_LEN 160
 #define FRIDGE_AI_MAX_PROFILE_NAME_LEN 32
 #define FRIDGE_AI_MAX_PROFILES 5
@@ -24,8 +24,15 @@ extern "C" {
 #define FRIDGE_AI_DEFAULT_MODEL "gpt-4o-mini"
 #define FRIDGE_AI_DEFAULT_TIMEOUT_MS 30000
 
+// AI 接口格式：决定设备出网时使用哪种请求/鉴权/响应协议。
+// OpenAI 走 /chat/completions + Authorization: Bearer；Google 走 Gemini 原生 generateContent + x-goog-api-key。
+typedef enum {
+    FRIDGE_AI_API_FORMAT_OPENAI = 0,  // 默认：OpenAI-compatible /chat/completions（messages 数组）
+    FRIDGE_AI_API_FORMAT_GOOGLE = 1,  // Google Gemini 原生 REST：{base}/models/{model}:generateContent
+} fridge_ai_api_format_t;
+
 // AI 配置只返回可展示信息，不包含 API Key 明文。
-// 注意：首版采用设备直连 OpenAI-compatible API，API Key 保存在 NVS；串口响应和日志不得回显明文。
+// 注意：首版采用设备直连 OpenAI-compatible 或 Google Gemini API，API Key 保存在 NVS；串口响应和日志不得回显明文。
 typedef struct {
     uint8_t profile_id;
     char profile_name[FRIDGE_AI_MAX_PROFILE_NAME_LEN + 1];
@@ -33,6 +40,7 @@ typedef struct {
     char model[FRIDGE_AI_MAX_MODEL_LEN + 1];
     char system_prompt[FRIDGE_AI_MAX_SYSTEM_PROMPT_LEN + 1];
     uint32_t timeout_ms;
+    uint8_t api_format;  // 接口格式，取值见 fridge_ai_api_format_t；缺省 0 = OpenAI，保证旧配置兼容
     bool has_api_key;
     bool ready;
     char api_key_preview[32];
@@ -49,6 +57,7 @@ typedef struct {
     char model[FRIDGE_AI_MAX_MODEL_LEN + 1];
     char system_prompt[FRIDGE_AI_MAX_SYSTEM_PROMPT_LEN + 1];
     uint32_t timeout_ms;
+    uint8_t api_format;  // 接口格式，取值见 fridge_ai_api_format_t；缺省 0 = OpenAI
     int64_t config_updated_at_ms;
     bool update_api_key;
 } fridge_ai_config_update_t;
@@ -83,6 +92,7 @@ typedef struct {
     char task_type[32];
     char context_json[FRIDGE_AI_MAX_CONTEXT_LEN + 1];
     const fridge_ai_chat_history_item_t *history;
+    const fridge_ai_config_update_t *preloaded_config;  // 已在内部栈任务中读取的配置；非空时 AI worker 不再访问 NVS
     size_t history_count;
     bool context_injected;
     bool needs_confirmation;
@@ -145,14 +155,35 @@ esp_err_t fridge_ai_client_delete_profile(uint8_t profile_id, fridge_ai_config_v
 // 清除本地保存的 API Key，保留 Base URL、模型和系统提示词。
 esp_err_t fridge_ai_client_clear_key(void);
 
+// 读取当前激活的 AI 配置；包含 API Key 明文，仅供设备内部任务预加载后调用，禁止回显到日志/串口。
+esp_err_t fridge_ai_client_load_active_config(fridge_ai_config_update_t *out);
+
+// 确认 Wi-Fi 和 SNTP/互联网状态可用于 HTTPS；会在调用方当前任务内执行必要校时。
+esp_err_t fridge_ai_client_ensure_network_ready(char *error_out, size_t error_out_size);
+
 // 使用 OpenAI-compatible /chat/completions 进行一次文本聊天测试。
 esp_err_t fridge_ai_client_test_chat(const char *message, fridge_ai_chat_result_t *out);
+
+// 使用已预加载的 AI 配置进行文本聊天测试；不会读取 NVS，适合 PSRAM 栈 HTTPS worker。
+esp_err_t fridge_ai_client_test_chat_with_config(const fridge_ai_config_update_t *config,
+                                                 const char *message,
+                                                 fridge_ai_chat_result_t *out);
 
 // 使用 OpenAI-compatible /chat/completions 进行一次带项目上下文的真实 AI 助手对话。
 esp_err_t fridge_ai_client_assistant_chat(const fridge_ai_assistant_request_t *request, fridge_ai_assistant_result_t *out);
 
+// 使用已预加载的 AI 配置进行真实 AI 助手对话；不会读取 NVS，适合 PSRAM 栈 HTTPS worker。
+esp_err_t fridge_ai_client_assistant_chat_with_config(const fridge_ai_config_update_t *config,
+                                                      const fridge_ai_assistant_request_t *request,
+                                                      fridge_ai_assistant_result_t *out);
+
 // 使用 OpenAI-compatible /chat/completions + image_url(data:) 分析一张最近拍摄的 JPEG。
 esp_err_t fridge_ai_client_analyze_image(const fridge_ai_image_request_t *request, fridge_ai_image_result_t *out);
+
+// 使用已预加载的 AI 配置分析图片；不会读取 NVS，适合 PSRAM 栈 HTTPS worker。
+esp_err_t fridge_ai_client_analyze_image_with_config(const fridge_ai_config_update_t *config,
+                                                     const fridge_ai_image_request_t *request,
+                                                     fridge_ai_image_result_t *out);
 
 #ifdef __cplusplus
 }

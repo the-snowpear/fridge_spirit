@@ -24,13 +24,20 @@ static bool s_initialized;
 
 static esp_err_t touch_read_reg(uint8_t reg, uint8_t *data, size_t len)
 {
-    return i2c_master_write_read_device(FRIDGE_IMU_I2C_PORT,
-                                        FRIDGE_TOUCH_I2C_ADDR,
-                                        &reg,
-                                        1,
-                                        data,
-                                        len,
-                                        pdMS_TO_TICKS(TOUCH_READ_TIMEOUT_MS));
+    // 触摸、MPU6050 和 OV3660 SCCB 共用 GPIO4/GPIO5；读触摸前先拿共享锁，避免打断摄像头寄存器初始化序列。
+    esp_err_t lock_err = fridge_sensors_i2c_lock(TOUCH_READ_TIMEOUT_MS + 50);
+    if (lock_err != ESP_OK) {
+        return lock_err;
+    }
+    esp_err_t ret = i2c_master_write_read_device(FRIDGE_IMU_I2C_PORT,
+                                                 FRIDGE_TOUCH_I2C_ADDR,
+                                                 &reg,
+                                                 1,
+                                                 data,
+                                                 len,
+                                                 pdMS_TO_TICKS(TOUCH_READ_TIMEOUT_MS));
+    fridge_sensors_i2c_unlock();
+    return ret;
 }
 
 esp_err_t fridge_touch_init(void)

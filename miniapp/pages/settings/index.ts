@@ -164,6 +164,17 @@ Page({
     await this.refreshRemoteSyncView();
   },
 
+  onCloudSyncApplied() {
+    if (this.data.syncBusy || this.data.zoneSyncing || this.data.aiSaving || this.data.savingPrivacy || this.data.savingPreferences) {
+      return;
+    }
+    this.setData({ zones: getFridgeZones() });
+    this.refreshLocalSyncView();
+    void Promise.all([this.loadPrivacy(), this.loadAiConfig(), this.loadZones()])
+      .then(() => this.refreshRemoteSyncView())
+      .catch(() => undefined);
+  },
+
   // ---------- API 地址 ----------
 
   onBaseUrlInput(event: WechatMiniprogram.Input) {
@@ -232,7 +243,7 @@ Page({
     setStorage("privacySettings", this.data.privacy);
     try {
       await updateSettings({ privacy: this.data.privacy });
-      enqueueSyncOp("settings", "privacy_update", { privacy: this.data.privacy });
+      // 在线 REST 已写库 + 记录同步事件 + 推设备，成功后不再入队，避免重复投影。
       this.refreshLocalSyncView();
       void this.trySyncQuietly();
       wx.showToast({ title: "隐私已同步", icon: "success" });
@@ -261,7 +272,7 @@ Page({
         lowStockThreshold: parseInt(this.data.lowStockThreshold, 10) || 1,
       };
       await updateSettings({ preferences });
-      enqueueSyncOp("settings", "preferences_update", { preferences });
+      // 在线 REST 已写库 + 记录同步事件 + 推设备，成功后不再入队，避免重复投影。
       this.refreshLocalSyncView();
       void this.trySyncQuietly();
       wx.showToast({ title: "提醒偏好已保存", icon: "success" });
@@ -412,7 +423,6 @@ Page({
     if (this.data.ttsNewKey) payload.ttsApiKey = this.data.ttsNewKey;
     try {
       const cfg = await updateAiConfig(payload);
-      enqueueSyncOp("ai_config", "update", this.maskAiSyncPayload(payload));
       const model = cfg.model || cfg.chatModel || this.data.aiModel || DEFAULT_AI_MODEL;
       const nextSystemPrompt = cfg.systemPrompt ?? systemPrompt;
       const ready = cfg.ready ?? Boolean(cfg.apiBaseUrl && model && cfg.hasApiKey);
@@ -448,7 +458,7 @@ Page({
       void this.trySyncQuietly();
       wx.showToast({ title: "AI 配置已同步", icon: "success" });
     } catch (err) {
-      enqueueSyncOp("ai_config", "update_pending", this.maskAiSyncPayload(payload));
+      enqueueSyncOp("ai_config", "update_pending", this.buildAiSyncPayload(payload));
       this.refreshLocalSyncView();
       const message =
         err instanceof RequestError ? err.message : "保存失败";
@@ -464,7 +474,6 @@ Page({
     try {
       // backend 约定：apiKey="" 表示清空。
       const cfg = await updateAiConfig({ apiKey: "" });
-      enqueueSyncOp("ai_config", "clear_api_key", { keyCleared: true });
       const model = cfg.model || cfg.chatModel || this.data.aiModel || DEFAULT_AI_MODEL;
       this.setData({
         aiKeyPreview: cfg.apiKeyPreview || "",
@@ -488,7 +497,6 @@ Page({
     this.setData({ aiSaving: true });
     try {
       const cfg = await updateAiConfig({ asrApiKey: "" });
-      enqueueSyncOp("ai_config", "clear_asr_key", { asrKeyCleared: true });
       this.setData({
         asrKeyPreview: cfg.asrApiKeyPreview || "",
         asrHasKey: cfg.asrHasApiKey ?? false,
@@ -509,7 +517,6 @@ Page({
     this.setData({ aiSaving: true });
     try {
       const cfg = await updateAiConfig({ ttsApiKey: "" });
-      enqueueSyncOp("ai_config", "clear_tts_key", { ttsKeyCleared: true });
       this.setData({
         ttsKeyPreview: cfg.ttsApiKeyPreview || "",
         ttsHasKey: cfg.ttsHasApiKey ?? false,
@@ -544,7 +551,6 @@ Page({
     this.setData({ zones, zoneSyncing: true });
     try {
       const synced = await saveFridgeZonesToCloud(zones);
-      enqueueSyncOp("fridge_zones", "replace", { zones: synced });
       this.setData({ zones: synced });
       this.refreshLocalSyncView();
       void this.trySyncQuietly();
@@ -583,6 +589,7 @@ Page({
     this.setData({ syncBusy: true, syncErrorText: "" });
     try {
       await syncNow({ forceDeviceRefresh: true });
+      this.setData({ zones: getFridgeZones() });
       this.refreshLocalSyncView();
       wx.showToast({ title: "同步完成", icon: "success" });
     } catch (err) {
@@ -631,15 +638,16 @@ Page({
     }
   },
 
-  maskAiSyncPayload(payload: AiConfigUpdateRequest): Record<string, unknown> {
-    const masked: Record<string, unknown> = { ...payload };
-    if (payload.apiKey !== undefined) masked.apiKeyChanged = true;
-    if (payload.asrApiKey !== undefined) masked.asrApiKeyChanged = true;
-    if (payload.ttsApiKey !== undefined) masked.ttsApiKeyChanged = true;
-    delete masked.apiKey;
-    delete masked.asrApiKey;
-    delete masked.ttsApiKey;
-    return masked;
+  /**
+   * 构造进入同步队列的 AI 配置 payload。
+   *
+   * 比赛 demo 链路下允许把明文 apiKey/asrApiKey/ttsApiKey 放进同步队列，
+   * 这样离线保存/清除 Key 在恢复网络后也能真正写到后端（否则只发标记位、后端无从落地）。
+   * 安全权衡：Key 会进小程序本地 syncQueue 与后端 sync_events.payload；仅适用于受控比赛环境，
+   * 公开部署需改为加密通道。附带 configUpdatedAt 供后端做 last-write-wins。
+   */
+  buildAiSyncPayload(payload: AiConfigUpdateRequest): Record<string, unknown> {
+    return { ...payload, configUpdatedAt: Date.now() };
   },
 
   async onAddZone() {

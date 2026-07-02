@@ -10,7 +10,7 @@
 """
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_active_home, get_current_user
@@ -109,6 +109,17 @@ async def devices_bind(
         await db.flush()
 
     # 2) upsert 绑定关系：避免重复插入造成 UNIQUE 冲突。
+    # 比赛演示版：同一台 DEMO 设备只保留当前家庭一个 active 绑定，避免 MQTT 下发时
+    # _resolve_home_id 命中旧家庭，导致小程序和固件看见的库存不同。
+    await db.execute(
+        update(DeviceBinding)
+        .where(
+            DeviceBinding.device_id == device.id,
+            DeviceBinding.home_id != home.id,
+            DeviceBinding.status == "active",
+        )
+        .values(status="inactive")
+    )
     binding_row = await db.execute(
         select(DeviceBinding).where(
             DeviceBinding.device_id == device.id,
@@ -117,13 +128,26 @@ async def devices_bind(
         )
     )
     if binding_row.scalar_one_or_none() is None:
-        db.add(
-            DeviceBinding(
-                device_id=device.id,
-                home_id=home.id,
-                bound_by_user_id=user.id,
+        inactive_binding = (
+            await db.execute(
+                select(DeviceBinding).where(
+                    DeviceBinding.device_id == device.id,
+                    DeviceBinding.home_id == home.id,
+                )
             )
-        )
+        ).scalar_one_or_none()
+        if inactive_binding is None:
+            db.add(
+                DeviceBinding(
+                    device_id=device.id,
+                    home_id=home.id,
+                    bound_by_user_id=user.id,
+                )
+            )
+        else:
+            inactive_binding.status = "active"
+            inactive_binding.unbound_at = None
+            inactive_binding.bound_by_user_id = user.id
 
     await db.commit()
     return ApiResponse[DeviceSummary](data=_to_summary(device))

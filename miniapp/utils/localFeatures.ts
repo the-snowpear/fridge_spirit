@@ -7,6 +7,7 @@
 import type {
   HomeOverview,
   InventoryItem,
+  NutritionCache,
   OfflineSnapshot,
   RecipeRecommendation,
   ReminderItem,
@@ -16,6 +17,7 @@ import { getStorage, setStorage } from "./storage";
 
 export const SHOPPING_ITEMS_KEY = "shoppingItems";
 export const RECIPE_RECOMMENDATIONS_KEY = "recipeRecommendations";
+export const NUTRITION_CACHE_KEY = "nutritionCache";
 export const OFFLINE_SNAPSHOT_KEY = "offlineSnapshot";
 
 export function makeLocalId(prefix: string): string {
@@ -70,6 +72,14 @@ export function getRecipeRecommendations(): RecipeRecommendation[] {
 
 export function saveRecipeRecommendations(cards: RecipeRecommendation[]): void {
   setStorage(RECIPE_RECOMMENDATIONS_KEY, cards);
+}
+
+export function getNutritionCache(): NutritionCache | null {
+  return getStorage<NutritionCache>(NUTRITION_CACHE_KEY);
+}
+
+export function saveNutritionCache(cache: NutritionCache | null): void {
+  setStorage(NUTRITION_CACHE_KEY, cache);
 }
 
 export function updateOfflineSnapshot(patch: {

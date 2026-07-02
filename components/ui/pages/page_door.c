@@ -69,14 +69,17 @@ static const char *format_days_left(const fridge_ui_food_t *food, char *buf, siz
 static void row_cb(lv_event_t *event)
 {
     uintptr_t index = (uintptr_t)lv_event_get_user_data(event);
-    fridge_ui_model_t model = {0};
-    fridge_ui_model_get(&model);
 
     size_t visible = 0;
-    for (size_t i = 0; i < model.food_count; i++) {
-        if (model.foods[i].days_left <= 3) {
+    size_t food_count = fridge_ui_model_get_food_count();
+    for (size_t i = 0; i < food_count; i++) {
+        fridge_ui_food_t food = {0};
+        if (!fridge_ui_model_get_food(i, &food)) {
+            continue;
+        }
+        if (food.days_left <= 3) {
             if (visible == index) {
-                fridge_ui_model_select_cell(model.foods[i].zone, model.foods[i].cell);
+                fridge_ui_model_select_cell(food.zone, food.cell);
                 fridge_ui_show_page(FRIDGE_UI_PAGE_EDIT_FOOD);
                 return;
             }
@@ -280,16 +283,17 @@ void fridge_ui_page_door_create(lv_obj_t *parent)
 
 void fridge_ui_page_door_update(void)
 {
-    fridge_ui_model_t model = {0};
-    fridge_ui_model_get(&model);
-
     uint8_t row = 0;
-    for (size_t i = 0; i < model.food_count && row < DOOR_MAX_ROWS; i++) {
-        const fridge_ui_food_t *food = &model.foods[i];
-        if (food->days_left > 3) {
+    size_t food_count = fridge_ui_model_get_food_count();
+    for (size_t i = 0; i < food_count && row < DOOR_MAX_ROWS; i++) {
+        fridge_ui_food_t food = {0};
+        if (!fridge_ui_model_get_food(i, &food)) {
             continue;
         }
-        update_row(&s_rows[row], food);
+        if (food.days_left > 3) {
+            continue;
+        }
+        update_row(&s_rows[row], &food);
         row++;
     }
 

@@ -16,13 +16,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.db.session import get_db
-from app.models.device import DeviceBinding
+from app.models.device import Device, DeviceBinding
 from app.models.home import Home, HomeMember
 from app.models.user import User, WxSession
 from app.schemas.auth import LoginData, WechatLoginRequest
 from app.schemas.common import ApiResponse
 from app.services.token import issue_access_token
 from app.services.wx_auth import wx_auth_service
+from app.core.deps import get_active_home
 
 router = APIRouter()
 
@@ -70,7 +71,8 @@ async def perform_wechat_login(payload: WechatLoginRequest, db: AsyncSession) ->
     # 4) 签发 JWT。注意：这里必须在 commit 之前完成 user.id 写入（flush 已经写入）。
     access_token = issue_access_token(user.id, wx_session.openid)
 
-    # 5) 判断 hasBoundDevice：用户所在的活跃家庭里是否已经有任何 active 绑定。
+    # 5) 比赛版登录即收敛到 DEMO 设备家庭；避免首屏先显示未绑定再等待用户手点。
+    await get_active_home(user=user, db=db)
     has_bound_device = await _user_has_bound_device(db, user_id=user.id)
 
     await db.commit()
@@ -89,9 +91,18 @@ async def perform_wechat_login(payload: WechatLoginRequest, db: AsyncSession) ->
 async def _user_has_bound_device(db: AsyncSession, *, user_id) -> bool:
     """判断用户名下任一 owner 家庭是否含 active 绑定。
 
-    仅以"owner 角色"为口径；当前演示场景里其他角色暂不上线。
-    没有家庭直接返回 False，让小程序首屏引导绑定。
+    比赛演示版所有微信账号共用 DEMO-FRIDGE-001，因此只要演示设备存在 active
+    绑定，就直接返回 True；正式多用户版再恢复到 user_id 家庭范围判断。
     """
+    demo_binding = await db.execute(
+        select(DeviceBinding.id)
+        .join(Device, Device.id == DeviceBinding.device_id)
+        .where(Device.device_sn == "DEMO-FRIDGE-001", DeviceBinding.status == "active")
+        .limit(1)
+    )
+    if demo_binding.scalar_one_or_none() is not None:
+        return True
+
     home_id_row = await db.execute(
         select(Home.id)
         .join(HomeMember, HomeMember.home_id == Home.id)

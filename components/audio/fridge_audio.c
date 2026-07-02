@@ -8,6 +8,7 @@
 #include "esp_timer.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "fridge_i2s_shared.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -22,6 +23,8 @@
 #define AUDIO_WAKE_READ_FRAMES 256
 #define AUDIO_PCM_SHIFT 14
 #define AUDIO_CLIP_THRESHOLD 32000
+#define AUDIO_TIMEOUT_BACKOFF_MS 20
+#define AUDIO_BUS_ACQUIRE_TIMEOUT_MS 200
 
 static const char *TAG = "fridge_audio";
 
@@ -48,6 +51,44 @@ static char s_error[128];
 static bool s_initialized;
 static bool s_i2s_enabled;
 static uint32_t s_i2s_timeout_count;
+
+static i2s_std_config_t make_mic_std_config(void)
+{
+    i2s_std_config_t std_cfg = {
+        .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(FRIDGE_AUDIO_SAMPLE_RATE),
+        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_32BIT, I2S_SLOT_MODE_MONO),
+        .gpio_cfg = {
+            .mclk = I2S_GPIO_UNUSED,
+            .bclk = MIC_BCLK_GPIO,
+            .ws = MIC_WS_GPIO,
+            .dout = I2S_GPIO_UNUSED,
+            .din = MIC_DIN_GPIO,
+            .invert_flags = {
+                .mclk_inv = false,
+                .bclk_inv = false,
+                .ws_inv = false,
+            },
+        },
+    };
+    std_cfg.slot_cfg.slot_mask = I2S_STD_SLOT_LEFT;
+    return std_cfg;
+}
+
+static esp_err_t rebind_mic_i2s_bus(void)
+{
+    // 麦克风和 MAX98357A 共用 GPIO40/41 作为 BCLK/WS。扬声器组件初始化或播放后，
+    // GPIO matrix 可能指向 TX 通道；每次录音前重新绑定 RX，保证 INMP441 能收到主机时钟。
+    i2s_std_config_t std_cfg = make_mic_std_config();
+    esp_err_t err = i2s_channel_reconfig_std_clock(s_rx_chan, &std_cfg.clk_cfg);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = i2s_channel_reconfig_std_slot(s_rx_chan, &std_cfg.slot_cfg);
+    if (err != ESP_OK) {
+        return err;
+    }
+    return i2s_channel_reconfig_std_gpio(s_rx_chan, &std_cfg.gpio_cfg);
+}
 
 static void set_state(fridge_audio_state_t state, const char *error)
 {
@@ -139,13 +180,18 @@ static void record_task(void *arg)
             if (err == ESP_ERR_TIMEOUT) {
                 // 麦克风未接好或 I2S 边沿不稳定时可能连续超时；限频记录，避免录音期间刷爆 USB 日志。
                 s_i2s_timeout_count++;
+                strlcpy(s_error, "i2s read timeout: check INMP441 SCK/WS/SD/GND and L/R", sizeof(s_error));
                 if (s_i2s_timeout_count == 1 || (s_i2s_timeout_count % 32) == 0) {
                     ESP_LOGW(TAG, "i2s read timeout, count=%lu", (unsigned long)s_i2s_timeout_count);
                 }
             } else {
                 ESP_LOGW(TAG, "i2s read failed: %s", esp_err_to_name(err));
+                strlcpy(s_error, esp_err_to_name(err), sizeof(s_error));
             }
             xSemaphoreGive(s_lock);
+            // I2S 在断线或无时钟时可能立即返回 timeout。这里主动让出 CPU，
+            // 避免高优先级录音任务空转，导致 USB/Web 状态轮询和看门狗被饿住。
+            vTaskDelay(pdMS_TO_TICKS(AUDIO_TIMEOUT_BACKOFF_MS));
             continue;
         }
         size_t frames = bytes_read / sizeof(raw[0]);
@@ -164,6 +210,9 @@ static void record_task(void *arg)
         }
         s_pcm_bytes += frames * sizeof(int16_t);
         update_stats_locked(write_ptr, frames);
+        if (s_peak_abs >= 400 && s_rms >= 80) {
+            s_error[0] = '\0';
+        }
         s_duration_ms = (uint32_t)(s_sample_count * 1000 / FRIDGE_AUDIO_SAMPLE_RATE);
         bool full = s_pcm_bytes >= s_pcm_capacity;
         xSemaphoreGive(s_lock);
@@ -189,6 +238,7 @@ static void record_task(void *arg)
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "i2s disable failed: %s", esp_err_to_name(err));
         }
+        fridge_i2s_shared_release(FRIDGE_I2S_SHARED_OWNER_MIC);
     }
     vTaskDelete(NULL);
 }
@@ -221,23 +271,7 @@ esp_err_t fridge_audio_init(void)
         return err;
     }
 
-    i2s_std_config_t std_cfg = {
-        .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(FRIDGE_AUDIO_SAMPLE_RATE),
-        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_32BIT, I2S_SLOT_MODE_MONO),
-        .gpio_cfg = {
-            .mclk = I2S_GPIO_UNUSED,
-            .bclk = MIC_BCLK_GPIO,
-            .ws = MIC_WS_GPIO,
-            .dout = I2S_GPIO_UNUSED,
-            .din = MIC_DIN_GPIO,
-            .invert_flags = {
-                .mclk_inv = false,
-                .bclk_inv = false,
-                .ws_inv = false,
-            },
-        },
-    };
-    std_cfg.slot_cfg.slot_mask = I2S_STD_SLOT_LEFT;
+    i2s_std_config_t std_cfg = make_mic_std_config();
     err = i2s_channel_init_std_mode(s_rx_chan, &std_cfg);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "i2s std init failed: %s", esp_err_to_name(err));
@@ -261,6 +295,29 @@ esp_err_t fridge_audio_start_recording(void)
         xSemaphoreGive(s_lock);
         return ESP_ERR_INVALID_STATE;
     }
+    xSemaphoreGive(s_lock);
+
+    err = fridge_i2s_shared_acquire(FRIDGE_I2S_SHARED_OWNER_MIC, pdMS_TO_TICKS(AUDIO_BUS_ACQUIRE_TIMEOUT_MS));
+    if (err != ESP_OK) {
+        set_state(FRIDGE_AUDIO_STATE_ERROR, "mic i2s bus busy");
+        return err == ESP_ERR_TIMEOUT ? ESP_ERR_INVALID_STATE : err;
+    }
+
+    err = rebind_mic_i2s_bus();
+    if (err != ESP_OK) {
+        set_state(FRIDGE_AUDIO_STATE_ERROR, "mic i2s rebind failed");
+        ESP_LOGE(TAG, "mic i2s rebind failed: %s", esp_err_to_name(err));
+        fridge_i2s_shared_release(FRIDGE_I2S_SHARED_OWNER_MIC);
+        return err;
+    }
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (s_state == FRIDGE_AUDIO_STATE_RECORDING || s_state == FRIDGE_AUDIO_STATE_WAKE_LISTENING ||
+        s_wake_stream_active || s_i2s_enabled) {
+        xSemaphoreGive(s_lock);
+        fridge_i2s_shared_release(FRIDGE_I2S_SHARED_OWNER_MIC);
+        return ESP_ERR_INVALID_STATE;
+    }
     s_pcm_bytes = 0;
     reset_stats_locked();
     s_error[0] = '\0';
@@ -272,6 +329,7 @@ esp_err_t fridge_audio_start_recording(void)
     if (err != ESP_OK) {
         set_state(FRIDGE_AUDIO_STATE_ERROR, "i2s enable failed");
         ESP_LOGE(TAG, "i2s enable failed: %s", esp_err_to_name(err));
+        fridge_i2s_shared_release(FRIDGE_I2S_SHARED_OWNER_MIC);
         return err;
     }
 
@@ -286,6 +344,7 @@ esp_err_t fridge_audio_start_recording(void)
         s_i2s_enabled = false;
         xSemaphoreGive(s_lock);
         set_state(FRIDGE_AUDIO_STATE_ERROR, "audio record task create failed");
+        fridge_i2s_shared_release(FRIDGE_I2S_SHARED_OWNER_MIC);
         return ESP_ERR_NO_MEM;
     }
     return ESP_OK;
@@ -328,6 +387,28 @@ esp_err_t fridge_audio_wake_stream_start(void)
         xSemaphoreGive(s_lock);
         return ESP_ERR_INVALID_STATE;
     }
+    xSemaphoreGive(s_lock);
+
+    err = fridge_i2s_shared_acquire(FRIDGE_I2S_SHARED_OWNER_MIC, pdMS_TO_TICKS(AUDIO_BUS_ACQUIRE_TIMEOUT_MS));
+    if (err != ESP_OK) {
+        set_state(FRIDGE_AUDIO_STATE_ERROR, "wake i2s bus busy");
+        return err == ESP_ERR_TIMEOUT ? ESP_ERR_INVALID_STATE : err;
+    }
+
+    err = rebind_mic_i2s_bus();
+    if (err != ESP_OK) {
+        set_state(FRIDGE_AUDIO_STATE_ERROR, "wake i2s rebind failed");
+        ESP_LOGE(TAG, "wake i2s rebind failed: %s", esp_err_to_name(err));
+        fridge_i2s_shared_release(FRIDGE_I2S_SHARED_OWNER_MIC);
+        return err;
+    }
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (s_state == FRIDGE_AUDIO_STATE_RECORDING || s_wake_stream_active || s_i2s_enabled) {
+        xSemaphoreGive(s_lock);
+        fridge_i2s_shared_release(FRIDGE_I2S_SHARED_OWNER_MIC);
+        return ESP_ERR_INVALID_STATE;
+    }
     s_wake_stream_active = true;
     s_i2s_enabled = true;
     s_state = FRIDGE_AUDIO_STATE_WAKE_LISTENING;
@@ -345,6 +426,7 @@ esp_err_t fridge_audio_wake_stream_start(void)
         strlcpy(s_error, "wake i2s enable failed", sizeof(s_error));
         xSemaphoreGive(s_lock);
         ESP_LOGE(TAG, "wake i2s enable failed: %s", esp_err_to_name(err));
+        fridge_i2s_shared_release(FRIDGE_I2S_SHARED_OWNER_MIC);
         return err;
     }
     return ESP_OK;
@@ -399,6 +481,9 @@ esp_err_t fridge_audio_wake_stream_read(int16_t *out_samples, size_t max_samples
 
     xSemaphoreTake(s_lock, portMAX_DELAY);
     update_stats_locked(out_samples, total_frames);
+    if (s_peak_abs >= 400 && s_rms >= 80) {
+        s_error[0] = '\0';
+    }
     s_duration_ms = (uint32_t)(s_sample_count * 1000 / FRIDGE_AUDIO_SAMPLE_RATE);
     xSemaphoreGive(s_lock);
     *sample_count = total_frames;
@@ -425,8 +510,10 @@ esp_err_t fridge_audio_wake_stream_stop(void)
         esp_err_t err = i2s_channel_disable(s_rx_chan);
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "wake i2s disable failed: %s", esp_err_to_name(err));
+            fridge_i2s_shared_release(FRIDGE_I2S_SHARED_OWNER_MIC);
             return err;
         }
+        fridge_i2s_shared_release(FRIDGE_I2S_SHARED_OWNER_MIC);
     }
     return ESP_OK;
 }
@@ -436,9 +523,6 @@ static const char *quality_hint_locked(void)
     if (s_sample_count == 0 || s_pcm_bytes == 0) {
         return "too_short";
     }
-    if (s_i2s_timeout_count > 0) {
-        return "i2s_timeout";
-    }
     if (s_clip_count > 0) {
         return "clipping";
     }
@@ -447,6 +531,9 @@ static const char *quality_hint_locked(void)
     }
     if (s_rms < 80 || s_peak_abs < 400) {
         return "silent";
+    }
+    if (s_i2s_timeout_count > 0 && s_pcm_bytes < 16000) {
+        return "i2s_timeout";
     }
     return "ok";
 }
@@ -460,7 +547,9 @@ esp_err_t fridge_audio_get_status(fridge_audio_status_t *out)
     xSemaphoreTake(s_lock, portMAX_DELAY);
     out->state = s_state;
     out->pcm_bytes = s_pcm_bytes;
-    out->duration_ms = s_duration_ms;
+    out->duration_ms = s_state == FRIDGE_AUDIO_STATE_RECORDING
+                           ? (uint32_t)((esp_timer_get_time() - s_record_start_us) / 1000)
+                           : s_duration_ms;
     out->rms = s_rms;
     out->min_sample = s_sample_count > 0 ? s_min_sample : 0;
     out->max_sample = s_sample_count > 0 ? s_max_sample : 0;
@@ -470,7 +559,11 @@ esp_err_t fridge_audio_get_status(fridge_audio_status_t *out)
     out->timeout_count = s_i2s_timeout_count;
     out->sample_count = s_sample_count;
     strlcpy(out->quality_hint, quality_hint_locked(), sizeof(out->quality_hint));
-    strlcpy(out->error, s_error, sizeof(out->error));
+    if (strcmp(out->quality_hint, "ok") == 0 || strcmp(out->quality_hint, "clipping") == 0) {
+        out->error[0] = '\0';
+    } else {
+        strlcpy(out->error, s_error, sizeof(out->error));
+    }
     xSemaphoreGive(s_lock);
     return ESP_OK;
 }

@@ -81,8 +81,14 @@ esp_err_t fridge_storage_set_ui_inventory_snapshot(const char *inventory_json);
 // 恢复出厂演示库存；用于联调时被空云端误覆盖后的受控恢复，恢复后会标记 dirty 等待上报。
 esp_err_t fridge_storage_restore_seed_inventory(void);
 
+// 清洗旧同步循环污染的库存数量文本，如 11111200g/200gg；清洗后标记 dirty 等待上报。
+esp_err_t fridge_storage_repair_inventory_quantities(size_t *repaired_count);
+
 // 读取 UI 库存同步状态；文件缺失时会先创建默认快照。
 esp_err_t fridge_storage_get_inventory_sync_status(fridge_storage_inventory_sync_status_t *out);
+
+// 轻量读取 UI 库存本地版本号；用于 UI 判断是否需要重新解析完整库存 JSON。
+esp_err_t fridge_storage_get_inventory_snapshot_version(uint32_t *out_version);
 
 // 生成可上报给云端的完整 UI 库存同步文档。
 esp_err_t fridge_storage_get_inventory_sync_payload(char *out, size_t out_size);
@@ -121,6 +127,18 @@ esp_err_t fridge_storage_get_recipe_cache(char *out, size_t out_size);
 // 写入 AI 菜谱缓存 JSON；由 MQTT 同步命令或 AI 推荐确认后调用。
 esp_err_t fridge_storage_set_recipe_cache(const char *recipe_json);
 
+// 读取 AI 营养助手缓存 JSON；离线时营养页仍可展示最近一次生成结果。
+esp_err_t fridge_storage_get_nutrition_cache(char *out, size_t out_size);
+
+// 写入 AI 营养助手缓存 JSON；内容只作为生活化膳食建议，不作为医疗或专业营养诊断。
+esp_err_t fridge_storage_set_nutrition_cache(const char *nutrition_json);
+
+// 读取厨房 AI 生成元数据；用于记录每日自动生成节流状态。
+esp_err_t fridge_storage_get_kitchen_ai_meta(char *out, size_t out_size);
+
+// 写入厨房 AI 生成元数据；只记录日期、次数和错误摘要，不保存 API Key 或完整隐私对话。
+esp_err_t fridge_storage_set_kitchen_ai_meta(const char *meta_json);
+
 // 从 cache LittleFS 读取结构化记忆摘要；不会保存完整聊天记录。
 esp_err_t fridge_storage_get_memory_summary(char *out, size_t out_size);
 
@@ -147,6 +165,17 @@ esp_err_t fridge_storage_append_chat_messages(const fridge_storage_chat_message_
 
 // 清空设备端短期会话历史；不影响结构化记忆摘要。
 esp_err_t fridge_storage_clear_chat_history(void);
+
+// 读取会话历史上行同步游标（最近一条已推送到云端的消息 created_at，秒级）。
+// 命名空间或键缺失时返回 0，表示尚未上报过，调用方应据此做首轮全量补发。
+esp_err_t fridge_storage_get_chat_synced_at(int64_t *out_ms);
+
+// 更新会话历史上行同步游标；传入 <=0 视为归零（清空历史时使用）。
+esp_err_t fridge_storage_set_chat_synced_at(int64_t ms);
+
+// 取出 created_at 大于 after_ms 的会话历史增量，用于云端 ai_history 域的增量上报。
+// 内部复用 get_chat_history 的过期/超量裁剪，只返回尚未上报且非空的消息，保持原有顺序。
+esp_err_t fridge_storage_get_chat_history_since(int64_t after_ms, fridge_storage_chat_history_t *out);
 
 // 从 cache LittleFS 读取离线队列摘要 JSON；只保存任务状态和必要元数据，不保存图片原图。
 esp_err_t fridge_storage_get_offline_queue_summary(char *out, size_t out_size);

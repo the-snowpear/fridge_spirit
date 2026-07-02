@@ -8,6 +8,7 @@ import { getInventory } from "../../services/api";
 import { enqueueSyncOp, syncNow } from "../../services/sync";
 import type { InventoryItem, ShoppingItem } from "../../types/models";
 import { addShoppingItems, getShoppingItems, saveShoppingItems } from "../../utils/localFeatures";
+import { formatInventoryQuantity } from "../../utils/quantity";
 
 type SourceFilter = "all" | ShoppingItem["source"];
 type WxActionSheet = {
@@ -189,7 +190,7 @@ Page({
       const items = addShoppingItems(
         expiring.map((item) => ({
           name: item.name,
-          quantityText: `${item.quantity}${item.unit}`,
+          quantityText: formatInventoryQuantity(item),
           source: "expire",
           sourceText: "临期补货",
         })),

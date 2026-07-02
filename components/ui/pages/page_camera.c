@@ -17,10 +17,11 @@
 #include "freertos/task.h"
 
 #define CAMERA_PREVIEW_TASK_STACK 6144
-#define CAMERA_ANALYZE_TASK_STACK 24576
+#define CAMERA_ANALYZE_TASK_STACK 20480
 #define CAMERA_PREVIEW_INTERVAL_MS 650
 #define CAMERA_PREVIEW_FINDER_W 656
 #define CAMERA_PREVIEW_FINDER_H 392
+#define CAMERA_AI_FALLBACK_NAME "水杯"
 
 static const char *TAG = "fridge_ui_camera";
 
@@ -55,16 +56,37 @@ typedef struct {
     bool heap_allocated;
 } camera_analyze_done_t;
 
+typedef struct {
+    uint32_t generation;
+    fridge_ai_config_update_t *config;
+} camera_analyze_job_arg_t;
+
 static camera_analyze_done_t s_emergency_done;
 
 static BaseType_t create_camera_task(TaskFunction_t task,
                                      const char *name,
                                      uint32_t stack_bytes,
                                      void *arg,
-                                     TaskHandle_t *handle)
+                                     TaskHandle_t *handle,
+                                     bool may_touch_flash)
 {
-    // 完整 UI + Wi-Fi + 摄像头 DMA 会吃掉较多内部 SRAM。
-    // 登记页预览/AI 任务不在 ISR 中运行，栈可放到 PSRAM，优先保留内部 SRAM 给 DMA 和系统任务。
+    if (may_touch_flash) {
+        // 只有确实需要在 worker 内访问 NVS/LittleFS 时才使用内部 SRAM 栈。
+        // 图片 AI 路径会先在 UI 任务中预加载配置，因此可走 PSRAM 栈，避免完整 UI 场景下内部 SRAM 碎片导致任务创建失败。
+        BaseType_t ok = xTaskCreate(task, name, stack_bytes, arg, 4, handle);
+        if (ok != pdPASS) {
+            ESP_LOGW(TAG,
+                     "%s internal stack create failed, stack=%lu, largest_internal=%u bytes, free_psram=%u KB",
+                     name,
+                     (unsigned long)stack_bytes,
+                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                     (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) / 1024));
+        }
+        return ok;
+    }
+
+    // 预览任务只做相机采集和 UI 通知，暂不访问 NVS/Flash；保留 PSRAM 栈以减轻取景页内部 SRAM 压力。
+    // 注意：xTaskCreateWithCaps 创建的任务结束时必须使用 vTaskDeleteWithCaps。
     BaseType_t ok = xTaskCreateWithCaps(task,
                                         name,
                                         stack_bytes,
@@ -83,13 +105,13 @@ static BaseType_t create_camera_task(TaskFunction_t task,
     }
 
     ESP_LOGW(TAG,
-             "%s PSRAM stack create failed, retry internal stack=%lu, free_heap=%u KB, largest_internal=%u bytes, free_psram=%u KB",
+             "%s PSRAM stack create failed, stack=%lu, free_heap=%u KB, largest_internal=%u bytes, free_psram=%u KB",
              name,
              (unsigned long)stack_bytes,
              (unsigned)(heap_caps_get_free_size(MALLOC_CAP_8BIT) / 1024),
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
              (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
-    return xTaskCreate(task, name, stack_bytes, arg, 4, handle);
+    return pdFAIL;
 }
 
 static void set_status_text(const char *text)
@@ -204,7 +226,7 @@ static void preview_task(void *arg)
     }
     s_preview_running = false;
     s_preview_task = NULL;
-    vTaskDelete(NULL);
+    vTaskDeleteWithCaps(NULL);
 }
 
 static void stop_preview(void)
@@ -230,7 +252,8 @@ static void start_preview(void)
                                        "ui_cam_preview",
                                        CAMERA_PREVIEW_TASK_STACK,
                                        (void *)(uintptr_t)s_generation,
-                                       &s_preview_task);
+                                       &s_preview_task,
+                                       false);
     if (ok != pdPASS) {
         s_preview_running = false;
         s_preview_task = NULL;
@@ -270,6 +293,136 @@ static esp_err_t wait_preview_stopped_before_capture(void)
     return ESP_OK;
 }
 
+static char *extract_json_object_copy(const char *text)
+{
+    // 兼容 Gemini/OpenAI 常见的 ```json ... ``` 包裹；只抽取第一段完整 JSON 对象。
+    // 这里不手写 JSON 解析，只做括号边界定位，真正字段校验仍交给 cJSON。
+    if (!text) {
+        return NULL;
+    }
+    const char *start = strchr(text, '{');
+    if (!start) {
+        return NULL;
+    }
+
+    bool in_string = false;
+    bool escape = false;
+    int depth = 0;
+    for (const char *p = start; *p; p++) {
+        char ch = *p;
+        if (escape) {
+            escape = false;
+            continue;
+        }
+        if (ch == '\\' && in_string) {
+            escape = true;
+            continue;
+        }
+        if (ch == '"') {
+            in_string = !in_string;
+            continue;
+        }
+        if (in_string) {
+            continue;
+        }
+        if (ch == '{') {
+            depth++;
+        } else if (ch == '}') {
+            depth--;
+            if (depth == 0) {
+                size_t len = (size_t)(p - start + 1);
+                char *json = heap_caps_malloc(len + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+                if (!json) {
+                    json = malloc(len + 1);
+                }
+                if (!json) {
+                    return NULL;
+                }
+                memcpy(json, start, len);
+                json[len] = '\0';
+                return json;
+            }
+        }
+    }
+    return NULL;
+}
+
+static void make_reply_preview(const char *reply, char *out, size_t out_size)
+{
+    if (!out || out_size == 0) {
+        return;
+    }
+    out[0] = '\0';
+    if (!reply || reply[0] == '\0') {
+        strlcpy(out, "空返回", out_size);
+        return;
+    }
+
+    size_t written = 0;
+    bool last_space = false;
+    for (const unsigned char *p = (const unsigned char *)reply; *p && written + 1 < out_size; p++) {
+        if (*p == '\r' || *p == '\n' || *p == '\t' || *p == ' ') {
+            if (!last_space && written > 0) {
+                out[written++] = ' ';
+                last_space = true;
+            }
+            continue;
+        }
+        out[written++] = (char)*p;
+        last_space = false;
+    }
+    out[written] = '\0';
+}
+
+static bool is_uncertain_object_name(const char *name)
+{
+    if (!name || name[0] == '\0') {
+        return true;
+    }
+    return strstr(name, "待确认") ||
+           strstr(name, "未知") ||
+           strstr(name, "无法识别") ||
+           strstr(name, "不能识别") ||
+           strstr(name, "不确定") ||
+           strstr(name, "包装物") ||
+           strstr(name, "瓶罐") ||
+           strstr(name, "袋装物") ||
+           strstr(name, "盒装物") ||
+           strstr(name, "电子设备") ||
+           strstr(name, "反光物体") ||
+           strstr(name, "模糊物体");
+}
+
+static const char *best_guess_name_from_text(const char *reply, const char *doubt)
+{
+    const char *texts[] = {reply ? reply : "", doubt ? doubt : ""};
+    for (size_t i = 0; i < sizeof(texts) / sizeof(texts[0]); i++) {
+        const char *text = texts[i];
+        if (strstr(text, "包装")) {
+            return "零食袋";
+        }
+        if (strstr(text, "瓶") || strstr(text, "罐")) {
+            return "饮料瓶";
+        }
+        if (strstr(text, "袋")) {
+            return "零食袋";
+        }
+        if (strstr(text, "盒") || strstr(text, "箱")) {
+            return "纸盒";
+        }
+        if (strstr(text, "纸")) {
+            return "纸巾";
+        }
+        if (strstr(text, "屏") || strstr(text, "电子")) {
+            return "手机";
+        }
+        if (strstr(text, "反光") || strstr(text, "过曝") || strstr(text, "高光")) {
+            return "玻璃杯";
+        }
+    }
+    return CAMERA_AI_FALLBACK_NAME;
+}
+
 static void parse_ai_candidate(const char *reply, fridge_ui_camera_result_t *result)
 {
     if (!result) {
@@ -277,22 +430,73 @@ static void parse_ai_candidate(const char *reply, fridge_ui_camera_result_t *res
     }
     result->zone = 1;
     result->cell = 4;
-    strlcpy(result->name, "待确认食材", sizeof(result->name));
-    strlcpy(result->quantity, "1份", sizeof(result->quantity));
+    strlcpy(result->name, CAMERA_AI_FALLBACK_NAME, sizeof(result->name));
+    strlcpy(result->quantity, "1件", sizeof(result->quantity));
+    result->doubt[0] = '\0';
 
-    cJSON *root = cJSON_Parse(reply ? reply : "");
+    char *json_text = extract_json_object_copy(reply);
+    cJSON *root = cJSON_Parse(json_text ? json_text : (reply ? reply : ""));
     if (!root) {
+        char preview[128] = {0};
+        make_reply_preview(reply, preview, sizeof(preview));
         strlcpy(result->raw_reply, reply ? reply : "", sizeof(result->raw_reply));
-        strlcpy(result->meta, "AI 返回内容不是标准 JSON，请在修改页核对后再入库。", sizeof(result->meta));
+        strlcpy(result->name, best_guess_name_from_text(reply, NULL), sizeof(result->name));
+        strlcpy(result->meta, "AI 返回内容无法解析，请在结果页确认后再入库。", sizeof(result->meta));
+        strlcpy(result->doubt, "诊断：图片已上传且 AI 已返回，但返回内容不是可解析 JSON。AI 原文摘要：", sizeof(result->doubt));
+        strlcat(result->doubt, preview, sizeof(result->doubt));
+        free(json_text);
         return;
     }
 
     const cJSON *candidates = cJSON_GetObjectItemCaseSensitive(root, "candidates");
+    if (!cJSON_IsArray(candidates)) {
+        candidates = cJSON_GetObjectItemCaseSensitive(root, "ingredients");
+    }
+    if (!cJSON_IsArray(candidates)) {
+        candidates = cJSON_GetObjectItemCaseSensitive(root, "items");
+    }
+    if (!cJSON_IsArray(candidates)) {
+        candidates = cJSON_GetObjectItemCaseSensitive(root, "foods");
+    }
     const cJSON *first = cJSON_IsArray(candidates) ? cJSON_GetArrayItem(candidates, 0) : NULL;
+    if (!first && cJSON_IsObject(root)) {
+        first = root;
+    }
+
     const cJSON *name = first ? cJSON_GetObjectItemCaseSensitive(first, "name") : NULL;
+    if (!cJSON_IsString(name)) {
+        name = first ? cJSON_GetObjectItemCaseSensitive(first, "food") : NULL;
+    }
+    if (!cJSON_IsString(name)) {
+        name = first ? cJSON_GetObjectItemCaseSensitive(first, "ingredient") : NULL;
+    }
+    if (!cJSON_IsString(name)) {
+        name = first ? cJSON_GetObjectItemCaseSensitive(first, "label") : NULL;
+    }
+
     const cJSON *quantity = first ? cJSON_GetObjectItemCaseSensitive(first, "quantity") : NULL;
+    if (!cJSON_IsString(quantity)) {
+        quantity = first ? cJSON_GetObjectItemCaseSensitive(first, "amount") : NULL;
+    }
+    if (!cJSON_IsString(quantity)) {
+        quantity = first ? cJSON_GetObjectItemCaseSensitive(first, "count") : NULL;
+    }
+
     const cJSON *confidence = first ? cJSON_GetObjectItemCaseSensitive(first, "confidence") : NULL;
+    if (!cJSON_IsNumber(confidence)) {
+        confidence = first ? cJSON_GetObjectItemCaseSensitive(first, "score") : NULL;
+    }
+    if (!cJSON_IsNumber(confidence)) {
+        confidence = first ? cJSON_GetObjectItemCaseSensitive(first, "probability") : NULL;
+    }
+
     const cJSON *doubt = first ? cJSON_GetObjectItemCaseSensitive(first, "doubt") : NULL;
+    if (!cJSON_IsString(doubt)) {
+        doubt = first ? cJSON_GetObjectItemCaseSensitive(first, "note") : NULL;
+    }
+    if (!cJSON_IsString(doubt)) {
+        doubt = first ? cJSON_GetObjectItemCaseSensitive(first, "reason") : NULL;
+    }
     const cJSON *safety = cJSON_GetObjectItemCaseSensitive(root, "safety_note");
 
     if (cJSON_IsString(name) && name->valuestring && name->valuestring[0]) {
@@ -307,15 +511,28 @@ static void parse_ai_candidate(const char *reply, fridge_ui_camera_result_t *res
         strlcpy(result->meta, "AI 已生成候选，请确认后入库。", sizeof(result->meta));
     }
     if (cJSON_IsString(doubt) && doubt->valuestring && doubt->valuestring[0]) {
-        strlcat(result->meta, "\n疑点：", sizeof(result->meta));
-        strlcat(result->meta, doubt->valuestring, sizeof(result->meta));
+        strlcpy(result->doubt, "疑点：", sizeof(result->doubt));
+        strlcat(result->doubt, doubt->valuestring, sizeof(result->doubt));
     }
     if (cJSON_IsString(safety) && safety->valuestring && safety->valuestring[0]) {
-        strlcat(result->meta, "\n", sizeof(result->meta));
-        strlcat(result->meta, safety->valuestring, sizeof(result->meta));
+        if (result->doubt[0]) {
+            strlcat(result->doubt, "\n", sizeof(result->doubt));
+        }
+        strlcat(result->doubt, safety->valuestring, sizeof(result->doubt));
+    }
+    if (is_uncertain_object_name(result->name)) {
+        char preview[128] = {0};
+        make_reply_preview(reply, preview, sizeof(preview));
+        strlcpy(result->name, best_guess_name_from_text(reply, result->doubt), sizeof(result->name));
+        if (result->doubt[0]) {
+            strlcat(result->doubt, "\n", sizeof(result->doubt));
+        }
+        strlcat(result->doubt, "诊断：AI 返回了不确定名称，已自动改为具体物品猜测。AI 原文摘要：", sizeof(result->doubt));
+        strlcat(result->doubt, preview, sizeof(result->doubt));
     }
     strlcpy(result->raw_reply, reply ? reply : "", sizeof(result->raw_reply));
     cJSON_Delete(root);
+    free(json_text);
 }
 
 static void analyze_done_async(void *user_data)
@@ -362,9 +579,10 @@ static void show_analyze_start_failed(const char *error)
 
 static void analyze_task(void *arg)
 {
-    uint32_t generation = (uint32_t)(uintptr_t)arg;
-    camera_analyze_done_t *done = calloc(1, sizeof(*done));
-    fridge_ai_image_result_t *ai = calloc(1, sizeof(*ai));
+    camera_analyze_job_arg_t *job = (camera_analyze_job_arg_t *)arg;
+    uint32_t generation = job ? job->generation : 0;
+    camera_analyze_done_t *done = heap_caps_calloc(1, sizeof(*done), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    fridge_ai_image_result_t *ai = heap_caps_calloc(1, sizeof(*ai), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!done) {
         memset(&s_emergency_done, 0, sizeof(s_emergency_done));
         done = &s_emergency_done;
@@ -400,16 +618,33 @@ static void analyze_task(void *arg)
             .height = frame.height,
         };
         strlcpy(request.task_type, "recognize_ingredients", sizeof(request.task_type));
-        done->err = fridge_ai_client_analyze_image(&request, ai);
+        if (job && job->config) {
+            done->err = fridge_ai_client_analyze_image_with_config(job->config, &request, ai);
+        } else {
+            done->err = ESP_ERR_INVALID_STATE;
+            strlcpy(ai->chat.error, "AI 配置预加载失败，请稍后重拍", sizeof(ai->chat.error));
+        }
     }
 
-    if (done->err == ESP_OK) {
-        done->result.ok = true;
+    if (ai) {
         done->result.width = ai->width;
         done->result.height = ai->height;
         done->result.jpeg_bytes = ai->jpeg_bytes;
         done->result.latency_ms = ai->chat.latency_ms;
+        done->result.http_status = ai->chat.http_status;
+        strlcpy(done->result.ai_model, ai->chat.model, sizeof(done->result.ai_model));
+    }
+
+    if (done->err == ESP_OK) {
+        done->result.ok = true;
         parse_ai_candidate(ai->chat.reply, &done->result);
+        ESP_LOGI(TAG,
+                 "AI image parsed: http=%d, model=%s, name=%s, quantity=%s, reply_len=%u",
+                 done->result.http_status,
+                 done->result.ai_model,
+                 done->result.name,
+                 done->result.quantity,
+                 (unsigned)strlen(ai->chat.reply));
     } else {
         fridge_camera_status_t status = {0};
         fridge_camera_get_status(&status);
@@ -425,6 +660,10 @@ static void analyze_task(void *arg)
 finish:
     (void)fridge_camera_clear_frame();
     free(ai);
+    if (job) {
+        free(job->config);
+        free(job);
+    }
     if (lv_async_call(analyze_done_async, done) != LV_RESULT_OK) {
         s_analyzing = false;
         ESP_LOGE(TAG, "post UI camera analyze result failed: %s", esp_err_to_name(done->err));
@@ -433,7 +672,37 @@ finish:
         }
     }
     ESP_LOGI(TAG, "UI camera analyze task done, stack high watermark=%u words", (unsigned)uxTaskGetStackHighWaterMark(NULL));
-    vTaskDelete(NULL);
+    vTaskDeleteWithCaps(NULL);
+}
+
+static camera_analyze_job_arg_t *prepare_analyze_job(uint32_t generation, char *error, size_t error_size)
+{
+    // 在 LVGL/UI 任务中预加载 AI 配置和网络状态，避免后台图片识别任务因内部 SRAM 不足无法创建。
+    // 配置包含 API Key 明文，只在设备内存中传递，禁止写入日志或 UI。
+    camera_analyze_job_arg_t *job = heap_caps_calloc(1, sizeof(*job), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    fridge_ai_config_update_t *config = heap_caps_calloc(1, sizeof(*config), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!job || !config) {
+        free(job);
+        free(config);
+        strlcpy(error, "识别任务内存不足，请稍后重拍", error_size);
+        return NULL;
+    }
+
+    esp_err_t err = fridge_ai_client_load_active_config(config);
+    if (err == ESP_OK) {
+        err = fridge_ai_client_ensure_network_ready(error, error_size);
+    } else {
+        strlcpy(error, esp_err_to_name(err), error_size);
+    }
+    if (err != ESP_OK) {
+        free(config);
+        free(job);
+        return NULL;
+    }
+
+    job->generation = generation;
+    job->config = config;
+    return job;
 }
 
 static void shutter_cb(lv_event_t *event)
@@ -461,16 +730,29 @@ static void shutter_cb(lv_event_t *event)
     set_status_text("正在拍照并上传 AI...");
     set_shutter_enabled(false, "识别中");
 
-    BaseType_t ok = create_camera_task(analyze_task,
-                                       "ui_cam_ai",
-                                       CAMERA_ANALYZE_TASK_STACK,
-                                       (void *)(uintptr_t)s_generation,
-                                       NULL);
-    if (ok != pdPASS) {
+    char start_error[160] = {0};
+    camera_analyze_job_arg_t *job = prepare_analyze_job(s_generation, start_error, sizeof(start_error));
+    if (!job) {
         s_analyzing = false;
         set_status_text("识别任务创建失败");
         set_shutter_enabled(true, "重拍");
-        show_analyze_start_failed("识别任务创建失败：内存不足或 PSRAM 栈不可用，请稍后重拍");
+        show_analyze_start_failed(start_error[0] ? start_error : "识别任务创建失败：内存不足或网络未就绪，请稍后重拍");
+        return;
+    }
+
+    BaseType_t ok = create_camera_task(analyze_task,
+                                       "ui_cam_ai",
+                                       CAMERA_ANALYZE_TASK_STACK,
+                                       job,
+                                       NULL,
+                                       false);
+    if (ok != pdPASS) {
+        free(job->config);
+        free(job);
+        s_analyzing = false;
+        set_status_text("识别任务创建失败");
+        set_shutter_enabled(true, "重拍");
+        show_analyze_start_failed("识别任务创建失败：PSRAM 栈不可用，请稍后重拍");
     }
 }
 
@@ -527,7 +809,7 @@ void fridge_ui_page_camera_create(lv_obj_t *parent)
     lv_obj_set_style_radius(rail, 8, 0);
 
     lv_obj_t *tip = lv_label_create(rail);
-    lv_label_set_text(tip, "对准食材后轻触快门");
+    lv_label_set_text(tip, "对准主体物体后轻触快门");
     lv_obj_set_style_text_color(tip, lv_color_hex(0xD7E7CF), 0);
     lv_obj_set_style_text_font(tip, fridge_ui_font_body(), 0);
     lv_obj_align(tip, LV_ALIGN_LEFT_MID, 24, 0);

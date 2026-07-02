@@ -32,10 +32,14 @@ import {
   deleteCustomFridgeZone,
   displayPlace,
   getFridgeZones,
+  saveFridgeZonesToCloud,
+  syncFridgeZonesFromCloud,
   updateCustomFridgeZone,
   updateStandardFridgeZone,
 } from "../../utils/fridgeZones";
+import { enqueueSyncOp, syncNow } from "../../services/sync";
 import { updateOfflineSnapshot } from "../../utils/localFeatures";
+import { formatInventoryQuantity } from "../../utils/quantity";
 
 interface ZoneCardView {
   key: string;
@@ -58,6 +62,8 @@ interface ExpiringView {
   expireText: string;
   level: "warn" | "danger";
 }
+
+const HOME_AUTO_REFRESH_INTERVAL_MS = 15_000;
 
 /** 计算某条目临期等级：<=1 天 danger，<=3 天 warn，其它 normal。 */
 function freshness(item: InventoryItem): "normal" | "warn" | "danger" {
@@ -99,6 +105,7 @@ Page({
     /** zone 卡片 + 临期清单 */
     standardZones: [] as ZoneCardView[],
     customZones: [] as ZoneCardView[],
+    zoneCountItems: [] as InventoryItem[],
     expiringList: [] as ExpiringView[],
 
     /** 错误态 */
@@ -109,6 +116,8 @@ Page({
     loading: false,
     binding: false,
     refreshing: false,
+    syncBusy: false,
+    syncErrorText: "",
 
     /** 状态抽屉 */
     statusPanelOpen: false,
@@ -123,6 +132,7 @@ Page({
 
   /** 时钟更新句柄；离开时清掉 */
   clockTimer: 0,
+  autoRefreshTimer: 0,
 
   onLoad() {
     this.tickClock();
@@ -134,10 +144,12 @@ Page({
       clearInterval(this.clockTimer);
       this.clockTimer = 0;
     }
+    this.stopAutoRefresh();
     this.setTabBarHidden(false);
   },
 
   onHide() {
+    this.stopAutoRefresh();
     this.setTabBarHidden(false);
   },
 
@@ -162,10 +174,16 @@ Page({
 
     // 2) 异步 refresh：先确保 session，再并行拉数据
     void this.refresh();
+    this.startAutoRefresh();
   },
 
   onPullDownRefresh() {
     this.refresh().finally(() => wx.stopPullDownRefresh());
+  },
+
+  onCloudSyncApplied() {
+    if (this.data.loading || this.data.spaceEditing || this.data.statusPanelOpen) return;
+    void this.refresh();
   },
 
   tickClock() {
@@ -205,14 +223,17 @@ Page({
     this.setData({ loginErrorText: "" });
 
     try {
-      // overview + inventory 并行
+      // overview / inventory / zones 并行。首页不能只等 App.onShow 的后台同步，
+      // 否则自定义分区缓存可能在 applyZoneCounts 之后才更新，表现为设置页有、首页没有。
       const [overview, inventoryData] = await Promise.all([
         getHomeOverview(),
         getInventory().catch(() => ({ items: [] as InventoryItem[] })),
+        syncFridgeZonesFromCloud().catch(() => getFridgeZones()),
       ]);
 
       app.setOverview(overview);
       updateOfflineSnapshot({ overview, inventoryItems: inventoryData.items || [] });
+      this.setData({ zoneCountItems: inventoryData.items || [] });
       if (overview.device) {
         app.setActiveDevice(overview.device);
       }
@@ -229,6 +250,22 @@ Page({
     } finally {
       this.setData({ loading: false });
     }
+  },
+
+  startAutoRefresh() {
+    if (this.autoRefreshTimer) return;
+    this.autoRefreshTimer = setInterval(() => {
+      if (this.data.loading || this.data.syncBusy || this.data.spaceEditing || this.data.statusPanelOpen) {
+        return;
+      }
+      void this.refresh();
+    }, HOME_AUTO_REFRESH_INTERVAL_MS) as unknown as number;
+  },
+
+  stopAutoRefresh() {
+    if (!this.autoRefreshTimer) return;
+    clearInterval(this.autoRefreshTimer);
+    this.autoRefreshTimer = 0;
   },
 
   applyOverview(overview: HomeOverview) {
@@ -337,7 +374,7 @@ Page({
     return {
       id: item.id,
       name: item.name,
-      quantityText: `${item.quantity}${item.unit}`,
+      quantityText: formatInventoryQuantity(item),
       locationText: loc,
       expireText,
       level,
@@ -455,7 +492,8 @@ Page({
     if (added) {
       this.selectZone({ ...added, count: 0, warnCount: 0 });
     }
-    void this.refresh();
+    this.applyZoneCounts(this.data.zoneCountItems || []);
+    void this.persistZonesFromHome(zones, "已添加区域");
   },
 
   onSelectCustomZone(event: WechatMiniprogram.BaseEvent) {
@@ -546,6 +584,7 @@ Page({
       selectedZoneHeight: selected?.height || this.data.selectedZoneHeight,
       selectedZoneIsCustom: !!selected?.custom,
     });
+    void this.persistZonesFromHome(updatedZones, "已保存区域");
   },
 
   onDeleteZone(event: WechatMiniprogram.BaseEvent) {
@@ -568,7 +607,8 @@ Page({
           selectedZoneKey: this.data.selectedZoneKey === key ? "" : this.data.selectedZoneKey,
           selectedZoneIsCustom: this.data.selectedZoneKey === key ? false : this.data.selectedZoneIsCustom,
         });
-        void this.refresh();
+        this.applyZoneCounts(this.data.zoneCountItems || []);
+        void this.persistZonesFromHome(getFridgeZones(), "已删除区域");
       },
     });
   },
@@ -641,6 +681,41 @@ Page({
       wx.showToast({ title: "刷新失败", icon: "none" });
     } finally {
       this.setData({ refreshing: false });
+    }
+  },
+
+  async persistZonesFromHome(zones: ReturnType<typeof getFridgeZones>, successTitle: string) {
+    try {
+      const synced = await saveFridgeZonesToCloud(zones);
+      this.applyZoneCounts(this.data.zoneCountItems || []);
+      if (successTitle) {
+        wx.showToast({ title: successTitle, icon: "success" });
+      }
+      void syncNow().catch(() => {
+        // 保存分区的 REST 请求已经成功；同步失败会在设置页同步状态中展示。
+      });
+      return synced;
+    } catch {
+      enqueueSyncOp("fridge_zones", "replace_pending", { zones });
+      wx.showToast({ title: "已本地保存，待同步", icon: "none" });
+      return zones;
+    }
+  },
+
+  async onTapSyncNow() {
+    if (this.data.syncBusy) return;
+    this.setData({ syncBusy: true, syncErrorText: "" });
+    try {
+      await syncNow({ forceDeviceRefresh: true });
+      await this.refresh();
+      this.applyZoneCounts(this.data.zoneCountItems || []);
+      wx.showToast({ title: "同步完成", icon: "success" });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "同步失败";
+      this.setData({ syncErrorText: message });
+      wx.showToast({ title: message, icon: "none" });
+    } finally {
+      this.setData({ syncBusy: false });
     }
   },
 

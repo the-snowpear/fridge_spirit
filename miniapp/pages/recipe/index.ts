@@ -8,6 +8,7 @@ import { getInventory, sendAiChat } from "../../services/api";
 import { enqueueSyncOp, syncNow } from "../../services/sync";
 import type { InventoryItem, RecipeRecommendation, ShoppingItem } from "../../types/models";
 import { addShoppingItems, getRecipeRecommendations, saveRecipeRecommendations, makeLocalId } from "../../utils/localFeatures";
+import { formatInventoryQuantity } from "../../utils/quantity";
 
 type RecipeView = RecipeRecommendation & {
   missingCount: number;
@@ -34,6 +35,12 @@ Page({
     if (cached.length) this.applyCards(cached);
   },
 
+  onCloudSyncApplied() {
+    if (this.data.loading) return;
+    const cached = getRecipeRecommendations();
+    this.applyCards(cached);
+  },
+
   async onTapRefresh() {
     if (this.data.loading) return;
     this.setData({ loading: true, errorText: "", rawReply: "" });
@@ -57,7 +64,8 @@ Page({
   },
 
   applyCards(cards: RecipeRecommendation[]) {
-    const views: RecipeView[] = cards.map((card) => ({
+    const normalized = cards.map((card, index) => normalizeRecipe(card, index));
+    const views: RecipeView[] = normalized.map((card) => ({
       ...card,
       missingCount: card.ingredients.filter((it) => it.missing).length,
       ingredientText: card.ingredients.map((it) => `${it.name}${it.missing ? "（缺）" : ""}`).join("、"),
@@ -109,7 +117,10 @@ Page({
 
   queueRecipeSync(cards: RecipeRecommendation[]) {
     enqueueSyncOp("recipe_cache", "replace", {
-      items: cards,
+      schema_version: 1,
+      source: "miniapp_ai",
+      generated_at: Math.floor(Date.now() / 1000),
+      items: cards.map(toDeviceRecipeItem),
       updatedAt: new Date().toISOString(),
     });
     void syncNow().catch(() => {
@@ -137,7 +148,7 @@ function buildRecipePrompt(items: InventoryItem[]): string {
   const inventoryText = items.length
     ? items
         .slice(0, 30)
-        .map((it) => `${it.name} ${it.quantity}${it.unit}${it.expireDate ? ` 到期:${it.expireDate}` : ""}${it.category ? ` 类别:${it.category}` : ""}`)
+        .map((it) => `${it.name} ${formatInventoryQuantity(it)}${it.expireDate ? ` 到期:${it.expireDate}` : ""}${it.category ? ` 类别:${it.category}` : ""}`)
         .join("\n")
     : "暂无库存";
   return [
@@ -177,26 +188,83 @@ function parseRecipeReply(reply: string): RecipeRecommendation[] {
 }
 
 function extractJsonArray(text: string): string {
+  const objectText = extractJsonObject(text);
+  if (objectText) {
+    try {
+      const parsed = JSON.parse(objectText) as { items?: unknown; recipes?: unknown };
+      const items = Array.isArray(parsed.items) ? parsed.items : parsed.recipes;
+      if (Array.isArray(items)) {
+        return JSON.stringify(items);
+      }
+    } catch {
+      // 继续兼容直接数组输出。
+    }
+  }
   const start = text.indexOf("[");
   const end = text.lastIndexOf("]");
   return start >= 0 && end > start ? text.slice(start, end + 1) : "";
 }
 
+function extractJsonObject(text: string): string {
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  return start >= 0 && end > start ? text.slice(start, end + 1) : "";
+}
+
 function normalizeRecipe(item: Partial<RecipeRecommendation>, index: number): RecipeRecommendation {
+  const raw = item as Partial<RecipeRecommendation> & {
+    tag?: unknown;
+    time_minutes?: unknown;
+    timeMinutes?: unknown;
+    reason?: unknown;
+    use_inventory?: unknown;
+    useInventory?: unknown;
+    missing?: unknown;
+  };
+  const useInventory = normalizeStringArray(raw.use_inventory || raw.useInventory);
+  const missing = normalizeStringArray(raw.missing);
+  const steps = Array.isArray(item.steps) ? item.steps.map(String).filter(Boolean).slice(0, 8) : [];
   return {
     id: item.id || makeLocalId(`recipe${index}`),
     title: String(item.title || `推荐菜 ${index + 1}`),
-    desc: String(item.desc || "基于当前库存生成。"),
-    durationText: String(item.durationText || "约 20 分钟"),
-    tags: Array.isArray(item.tags) ? item.tags.map(String).slice(0, 4) : ["家常"],
+    desc: String(item.desc || raw.reason || "基于当前库存生成。"),
+    durationText: String(item.durationText || (raw.time_minutes || raw.timeMinutes ? `约 ${raw.time_minutes || raw.timeMinutes} 分钟` : "约 20 分钟")),
+    tags: Array.isArray(item.tags) ? item.tags.map(String).slice(0, 4) : [String(raw.tag || "家常")],
     ingredients: Array.isArray(item.ingredients)
       ? item.ingredients.map((it) => ({
           name: String(it.name || ""),
           quantityText: String(it.quantityText || "适量"),
           missing: !!it.missing,
         })).filter((it) => it.name)
-      : [],
-    steps: Array.isArray(item.steps) ? item.steps.map(String).filter(Boolean).slice(0, 8) : [],
+      : [
+          ...useInventory.map((name) => ({ name, quantityText: "库存", missing: false })),
+          ...missing.map((name) => ({ name, quantityText: "需补充", missing: true })),
+        ],
+    steps: steps.length ? steps : [String(raw.reason || "按日常做法完成烹饪。")],
     rawText: item.rawText,
+  };
+}
+
+function normalizeStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.map(String).map((it) => it.trim()).filter(Boolean).slice(0, 8);
+}
+
+function parseDurationMinutes(text: string): number {
+  const match = text.match(/(\d+)/);
+  return match ? Number(match[1]) : 20;
+}
+
+function toDeviceRecipeItem(card: RecipeRecommendation): Record<string, unknown> {
+  const available = card.ingredients.filter((it) => !it.missing).map((it) => it.name);
+  const missing = card.ingredients.filter((it) => it.missing).map((it) => it.name);
+  return {
+    title: card.title,
+    tag: card.tags[0] || "AI 推荐",
+    time_minutes: parseDurationMinutes(card.durationText),
+    use_inventory: available.length ? available : ["按当前库存选择"],
+    missing,
+    steps: card.steps.slice(0, 4),
+    reason: card.desc,
   };
 }

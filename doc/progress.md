@@ -461,3 +461,124 @@ pm run build 和 idf.py build。- 2026-05-21 02:06:48 补充：USB JSON Lines �
 - 追加修复 14:09：重启/重新烧录后默认页改为首页，离线状态只作为 `offline` 标志和状态栏/USB/Web 上报信息，不再把 UI 自动切到离线整页；离线页仍可从“更多”页面手动进入。状态机在网络未连接且本地传感无事件时保持 `SLEEP` 主状态，避免 Wi-Fi 尚未连上时抢占本地首页流程。
 - 追加修复 14:17：修复 2 分钟退到颜文字页后，点击唤醒到首页又被立即拉回颜文字的问题。触摸/页面操作现在会同步刷新雷达人体上下文计时，并把触摸唤醒保护窗口扩展到一个完整 idle 周期，避免雷达缺席或旧的“无人已超时”状态抢占用户操作。
 - 追加修复 14:34：网络组件新增已保存 Wi-Fi 自动恢复任务。设备未连接且不在手动连接中时，会每 45 秒定向扫描 NVS 中保存的 SSID，扫描到后复用现有 `fridge_network_connect()` 自动连接；同时新增扫描互斥，避免 UI/USB 扫描、后台扫描和连接流程抢占 Wi-Fi driver。`idf.py build` 通过并已烧录 COM16；`ota_1` 小 recovery 分区过小提示仍为当前分区策略下的既有预期。
+
+----
+完成时间：2026-05-29 21:12:59 +08:00
+
+- 新增 Google (Gemini) 原生 API 格式兼容，可在 Web 面板按配置槽选择"接口格式"（OpenAI 兼容 / Google Gemini），与现有 base_url/model/key 一样按 profile 持久化到 NVS。
+- 固件 `components/ai_client`：新增 `fridge_ai_api_format_t` 枚举与 `api_format` 字段；NVS 增加 `api_format` key（0 号槽固定 key、其余槽前缀 'f'），缺省 0=OpenAI 保证旧配置兼容。
+- 请求构造按格式分发：保留原 OpenAI builder（重命名为 `_openai`）不动，新增 `build_chat_request_google` / `build_assistant_request_google` / `build_image_request_google`。Google 走 `{base}/models/{model}:generateContent`、`x-goog-api-key` 头、`system_instruction`+`contents[{role,parts}]`+`generationConfig` 请求体，历史助手角色映射为 `model`，图片用 `inline_data{mime_type,data}`。assistant 策略提示词与图片系统提示词提取为公共函数，两种格式共用避免行为漂移。
+- 响应解析未改动：现有 `parse_chat_response()` 的 `text` 回退正好命中 Gemini 的 `candidates[].content.parts[].text`，错误体 `{"error":{"message"}}` 已被 `set_http_status_error()` 覆盖。
+- USB 协议 `print_ai_config_payload` 输出 `apiFormat`，`set_ai_config` 读入 `apiFormat`；Web `App.tsx` 加"接口格式"下拉、切到 Google 时自动建议 `https://generativelanguage.googleapis.com/v1beta` 端点、base URL/模型 placeholder 联动、配置槽列表项加格式标签；`types.ts`/`mockData.ts`/MockTransport 同步 `apiFormat`。
+- 覆盖链路：文字测试聊天、AI 助手对话（含语音复用）、摄像头图片识别三条链路都按格式分发；UI 页(page_ai/page_camera)与 voice_session 经统一入口自动继承。
+- 验证：`web` `npm run build` 通过；`idf.py build` 通过，主固件 0x261d20，ota_0(3584K) 仍有约 31.9% 余量，`ota_1` recovery 小分区过小提示为既有分区策略预期。真机 COM16 烧录与 Google/OpenAI 双格式二轮对话、识图端到端回归待在硬件侧执行。
+- 编辑前备份：`tmp/backups/manual/20260529-205750_google_api_format/`（含 ai_client 头/源、usb_protocol、web types/App/MockTransport/mockData）。
+
+----
+完成时间：2026-05-30 02:30:00 +08:00
+
+### 三端同步 7 个数据互相覆盖/丢失问题修复
+
+修复用户报告的 P0/P1/P2 共 7 个同步缺陷，核心是把"后写覆盖"从"服务器到达顺序"改为基于真实编辑信号判定，并阻止旧设备数据反向覆盖新云端数据。涉及后端 Python、小程序 TypeScript，固件侧无需改动。
+
+- P0（设备重连用旧数据反向覆盖云端）：`sync_service._replace_inventory_from_device_snapshot` 新增结构变更门槛 `allow_structural = device_dirty or device_revision >= cloud_revision`。设备 `updatedAtMs` 来自 `esp_timer_get_time()`（自启动相对毫秒），与云端 epoch 不同源**不能直接比大小**，因此改用固件 `dirty` 标志（本地编辑置 true、同步成功置 false）+ 设备上报的 `serverRevision` 是否落后于云端 `SyncState.current_revision` 判定。设备未脏且 revision 落后时只刷新已匹配的活跃条目值，绝不新增/删除/复活条目；首次绑定（cloud_revision=0）或设备真有本地修改时才允许整快照对齐。新增 `_home_current_revision()`。
+- P1 #2（命令 publish-and-forget）：`sync_device_bridge.push_cloud_snapshot_to_devices` 新增 `wait_for_ack`，只对 `status=='online'` 的设备实际下发，逐条注册 ack waiter 并 `asyncio.wait_for` 等 completed ACK（`DEVICE_ACK_TIMEOUT_SECONDS=8`），区分 `queued_count`/`acked_count`/`skipped_offline`。**仅 HTTP `/sync/device-push` 传 `wait_for_ack=True`**；MQTT `_on_message` 回调链里调用保持 False，避免 gmqtt 串行 dispatch 下等 ACK 自我死锁。`SyncDevicePushData` + 小程序类型扩字段。不建持久 outbox，离线补发仍靠固件重连。
+- P1 #3（在线 REST 成功后又入队造成重复投影）：`inventory-detail`/`scan`/`reminders` 页 REST 成功后不再 `enqueueSyncOp`，只在失败/离线走 `*_pending` 入队；后端 `push_events`/`_apply_event` 的后写覆盖作为旧 payload 回放的兜底。
+- P1 #4（设置双存储分叉）：`settings_route.settings_update` 加 `get_active_home` 依赖，写完 `UserSettings` 后同事务镜像到 `SystemConfig('settings')`（merge 合并 privacy/preferences）+ `record_server_event` + 推设备，使 `/sync/snapshot` 与设备拿到同一份设置。
+- P1 #5（AI/API Key 普通同步通道不真正同步）：小程序 `maskAiSyncPayload`→`buildAiSyncPayload`，保留真实 `apiKey/asrApiKey/ttsApiKey` 并附 `configUpdatedAt`；清 key 改发空串 `{apiKey:""}` 等，与后端"空串=清空"对齐。**安全权衡：明文 Key 会进小程序本地 syncQueue 与 `sync_events.payload`，仅适用于受控比赛环境，公开部署需改加密通道。**
+- P2 #6（固件非库存文档无本地编辑→上报闭环）：经核查固件当前无购物/菜谱/提醒/偏好的本地 UI 编辑器（只从云端接收），不存在实际 bug，按"不提前堆抽象"暂缓。未来新增本地编辑器时应参照 `fridge_ui_model.c` 的 `model_persist_snapshot → fridge_mqtt_request_inventory_publish` 模式，为各 `fridge_storage_set_*` 加 local-write 触发上报。
+- P2 #7（后写覆盖按到达顺序而非编辑时间）：新增 `_coerce_updated_at_ms`/`_event_updated_at_ms` 统一解析毫秒/ISO/datetime；`_upsert_inventory_item` 与 `_upsert_config_doc` 对**小程序来源**事件按 `updatedAtMs` 做后写覆盖（旧的跳过覆盖，事件仍记录供审计）。小程序 `enqueueSyncOp` 自动注入 `updatedAtMs`，后端 inventory/fridge_zone/ai_config REST 的 `record_server_event` 与库存行 `extra.syncUpdatedAtMs` 补编辑时间。设备快照因时钟不同源关闭单条数值比较（传 `updated_at_ms=0`），由 P0 结构门槛兜底。
+- 数据库：全部用既有 JSONB 字段（`InventoryItem.extra.syncUpdatedAtMs`、`SystemConfig.value.updatedAtMs`）承载编辑时间，**零 schema 迁移**，不新增表/列。
+- 验证：所有改动后端文件 `py_compile` 通过；纯函数单测（`_coerce_updated_at_ms`/`_event_updated_at_ms` 含 bool/ISO/Z/嵌套 item 边界）通过；P0 门槛用 fake DB 三场景单测通过（旧 clean 快照保留云端不删/不增、脏设备正常增删、首绑种子导入）；小程序 `tsc --noEmit`（strict）零错误。真机 COM16 端到端回归（设备离线改库存→上线不反覆盖、立即同步 acked_count、离线存/清 Key 恢复后生效）待硬件侧执行。
+- 编辑前备份：`tmp/backups/manual/20260530-022129_sync_fixes/`（含后端 services/routes/schemas、小程序 services/pages/types 共 16 文件）。
+
+----
+完成时间：2026-05-30 03:30:00 +08:00
+
+### 语音链路去重 + 对话历史上行同步打通 + 散落备份整理
+
+消除屏幕 AI 页与公共组件之间重复的语音链路实现，并补齐"设备语音对话历史 → 云端 → 小程序"上行缺口（此前固件从不上报对话历史，云端 `ai_history` 落库分支与小程序 `ai-chat` 页是无数据触发的活代码）。固件改动，后端/小程序无需改动。
+
+- 重构（消除重复）：`page_ai.c` 此前手写了一整套 `ai_voice_task`+`ui_ai_convert_history`（ASR→上下文→AI→剥离指令→存历史），与公共组件 `voice_session` 近乎逐行重复。把 `voice_session` 扩展为可复用全链路：新增 `fridge_voice_session_options_t{play_tts, manage_wake_word}` 和带 options 的入口 `fridge_voice_session_run_latest_recording_ex()`，旧入口 `_run_latest_recording()` 包装为全 false（USB/状态机不变）。result 增加 `visible_reply`（剥离 MEMORY_OP/工具指令后的可展示文本）与 `tts_played`。把 page_ai 独有的 **TTS 播报**和**唤醒词暂停/恢复**收口进 voice_session 用 options 控制——避免简单删除 page_ai 导致丢 TTS。page_ai 改为瘦 worker 调 `_ex({play_tts=true})`，删除约 180 行重复代码；唤醒词围绕"录音窗口"仍由 page_ai 自行管理（录音早于 voice_session 调用），故传 `manage_wake_word=false`。三个调用方（page_ai/USB/状态机）现共享同一套历史裁剪逻辑。
+- 上行同步（增量 + miniapp-default + 每轮触发 + 重连补发）：
+  - `storage` 新增上行游标（NVS `fridge_store` namespace，key `chat_sync_at`，存"最近已上报消息的 created_at 秒"）：`fridge_storage_get/set_chat_synced_at()` 与增量查询 `fridge_storage_get_chat_history_since(after_ms)`（复用 get_chat_history 的过期/超量裁剪，只回 created_at 更新且非空的消息）。`clear_chat_history` 时游标归零，避免清空后残留游标漏发后续对话。
+  - `mqtt_protocol` 新增 `fridge_mqtt_publish_chat_history_delta()`：读游标→取增量→构造 `{"sessionId":"miniapp-default","messages":[{role,content}]}`、域 `ai_history`、op `append`（复用 `add_storage_doc_event` + `make_topic(MQTT_TOPIC_SYNC)` + publish 结构）；**publish 成功后才推进游标**，失败保持游标靠重连补发。messages 只放后端读取的 role/content。
+  - 触发点：voice_session 写完本地历史后立即调上报（每轮）；`publish_reconnect_sync_seed()` 末尾追加调用（离线攒下的增量重连补发）。增量保证每条只发一次，后端 `ai_history` 分支天然不重复落库（无需改后端）。sessionId 固定 `miniapp-default`，与小程序 `/ai/history` 同 session，设备对话直接在小程序可见。
+- 依赖：`voice_session` CMakeLists REQUIRES 增加 `speaker wake_word mqtt_protocol`。voice_session→这三者均为单向，mqtt_protocol 不反向依赖 voice_session，无循环依赖。
+- 散落备份整理：按 AGENTS.md 第 4 条，把散落在 `components/`、`web/src/`、`tmp/` 根目录的 16 个 `.bak`（此前被 git 跟踪，污染源码树）**移动**到 gitignored 的 `tmp/backups/archive/scattered_bak_cleanup_20260530/`（保持相对路径，不删除）。`doc/memory.md.bak-*` 两个文件用户本会话前已自行删除，未触碰。移动后 `git status` 显示对应 .bak 为删除（内容安全保存在归档目录）。
+- 验证：`idf.py build` 通过，voice_session/ui(page_ai)/mqtt_protocol 三组件均编译链接成功、无循环依赖报错；`idf.py size` 主固件镜像约 2.45MB，`ota_0`(3584K) 余量充足；`ota_1` 小分区过小提示为既有非对称分区策略预期。真机 COM16 端到端回归（屏幕 AI 页录音→识别→显示干净回复→TTS 开关 ON/OFF 行为、USB voice_chat_stop 仍正常、设备说话后小程序 ai-chat 页可见且增量不重复、断网说话重连补发）待硬件侧执行。
+- 编辑前备份：`tmp/backups/manual/20260530-000000_voice_chat_sync/`（含 voice_session 头/源/CMakeLists、page_ai、mqtt_protocol 头/源、storage 头/源共 8 文件）。
+
+----
+完成时间：2026-05-30 19:30:00 +08:00
+
+### 开关门状态机改为运动事件翻转模型 + 修复 vibration_peak 重力 bug
+
+把门状态机从"超时关门模型"重构为用户预期的"运动事件翻转模型"，并修掉一个会让关门后自动语音几乎永远触发不了的根因 bug。涉及固件 `sensors`、`state_machine` 与 `web/` mock，后端/小程序无需改动。
+
+- 根因 bug（vibration_peak 含重力）：`fridge_sensors.c` 原本 `vibration_peak = max(|ax|,|ay|,|az|)`，静止时约等于 1g（实测 `MPU6050_IMU_TEST_SUMMARY.md` 记录静止值 1.12），远高于状态机运动阈值 0.12g，导致 `imu_moving` 恒真、门态永远卡在运动态、关门后 `maybe_start_auto_voice()` 几乎不可达。改为去重力动态加速度 `|‖a‖ - 1g|`，静止时约等于 0，与架构文档"加速度模长短时峰值 > 0.15g"的原始定义一致。`web/src/data/mockData.ts` 同步改为同一公式，Web"震动峰值"读数从约 1.0 变为静止约 0。
+- 事件翻转模型（符合用户预期）：`update_door_state()` 重写为 `关门 --运动事件--> 开门 --运动事件--> 已关门(POST_CLOSE，触发自动语音) --超时--> 关门`。每检测到一次开关门运动翻转一次门态，第二次翻转（回到关门）时调 `maybe_start_auto_voice()`。删除旧的"运动停止后静置 close_stable_ms 即判关门"逻辑。
+- 运动检测可靠性增强（`detect_motion_event()`）：① 以陀螺仪三轴角速度之和为主信号（开关门必带门体转动，压缩机震动几乎无角速度，天然过滤）；② 去重力动态加速度为辅（捕捉关门撞击）；③ 进/出运动用不同阈值形成迟滞，避免阈值附近抖动；④ 只在"静止→运动"上升沿且"事件前已静止 SM_MOTION_QUIET_HOLD_MS=500ms""距上次事件 ≥ close_stable_ms"才采纳事件，保证一次物理开关门只产生一次事件；⑤ 多信号佐证（强角速度/撞击/光照突变/雷达有人任一），弱转动无佐证按噪声丢弃。雷达只作佐证之一，不单独判开关门，遵守 AGENTS.md 硬约束。
+- 开机防误触：`fridge_state_machine_init()` 把运动计时基线设为当前时刻，要求上电后先静止一段并满足间隔才允许首次事件，避免安装/上电晃动误翻转。
+- 配置契约不变：阈值用编译期 `#define`（沿用既有 `SM_*` 风格），未改 USB/web 的 get/set state machine config JSON 字段，Web 面板无需改动。
+- 验证：`idf.py build` 通过，`libstate_machine.a` 与 `fridge_spirit.elf` 链接成功，无错误/新警告；`ota_1` 过小提示为既有非对称分区策略预期。真机 COM16 回归（静止时 `get_sensors` 的 `vibrationPeak` 应约 0；开门一次→`doorState=OPEN`、再动一次→`POST_CLOSE` 且 `autoVoiceState` 进入 RECORDING）与 IMU/光照/雷达阈值标定待硬件侧执行。
+- 编辑前备份：`tmp/backups/manual/20260530-191907_door_state_event_toggle/`（含 sensors、state_machine、web mock 共 3 文件）。
+
+----
+完成时间：2026-05-30 20:35:00 +08:00
+
+### 手动同步改为设备全量文档上行 + MQTT UTF-8 兜底
+
+修复小程序“点击同步只取库存，分区/AI 模型/API URL/Key 不更新”的问题，并处理后端日志中 `MQTT bad payload ... ai_config: invalid UTF-8` 导致设备 retained 配置整包被丢弃的根因。
+
+- 小程序 `miniapp/services/sync.ts`：`requestInitialDeviceSeed()` 和手动 `syncNow({ forceDeviceRefresh: true })` 的 `/sync/device-push` 请求从 `domains:["inventory"]` 改为全量设备域：`inventory/fridge_zones/ai_config/asr_config/tts_config/shopping_list/recipe_cache/reminder/settings`。修复后预期返回不再是 `commandCount:1 domains:["inventory"]`，而应至少包含库存刷新 + `sync_documents_refresh`。
+- 后端 `ai_config_service.should_accept_device_config()`：普通 `/sync` 事件通道与 retained `merge_from_device()` 对齐，支持服务端空表用设备配置作为种子，并识别 `forceImport/acceptCleanSnapshot`，让手动同步可强制把设备当前 AI/ASR/TTS 配置导入云端（比赛版允许 Key 走普通通道）。种子判断补齐 ASR/TTS URL、模型、音色、超时字段。
+- 后端 `mqtt_client._on_message()`：MQTT payload 遇到非法 UTF-8 时用 replacement decode 继续 JSON 解析并限频告警，避免半个中文字符让整包配置失效。
+- 固件 `components/ai_client/fridge_ai_client.c`：`fridge_ai_client_get_sync_payload()` 在生成 MQTT 同步 payload 前清洗 `apiBaseUrl/apiKey/chatModel/systemPrompt/profileName`，把 NVS 中可能被固定缓冲截断的非法 UTF-8 字节替换为 `?`。
+- 固件 `components/mqtt_protocol/fridge_mqtt_protocol.c`：`sync_documents_refresh` 读取 `acceptCleanSnapshot/forceImport` 并透传到非库存文档 payload；`publish_device_sync_documents()` 与 retained `publish_ai_config_retained()` 发布前递归清洗 cJSON 字符串，兜住购物清单/菜谱/提醒/设置/AI 配置中的脏 UTF-8。
+- 验证：后端相关 Python 文件 `py_compile` 通过；`idf.py build` 通过；已执行 `idf.py -p COM16 flash`，esptool 写入与 hash verify 均成功，设备已 hard reset。小程序本地没有 `package.json/typescript`，`npx tsc -p miniapp/tsconfig.json --noEmit` 无法执行有效类型检查（只提示需安装 TypeScript）。
+- 已知非本次问题：构建仍提示 ESP-IDF 6.0 legacy I2C driver EOL 警告，以及 `ota_1` recovery 小分区装不下主固件，均为既有项目状态。
+- 编辑前备份：`tmp/backups/manual/20260530-202205_sync_full_device_docs/`、`tmp/backups/manual/20260530-202507_firmware_ai_utf8_sync/`、`tmp/backups/manual/20260530-202642_mqtt_utf8_publish_guard/`、`tmp/backups/manual/20260530-203348_progress_sync_full_docs/`；构建前备份：`tmp/backups/before_run/20260530-202548_sync_verify_build/`。
+
+----
+
+## 2026-05-30 ????????????????
+
+- ??????????????App ??? 15 ????? `syncNow()`??? `serverRevision` ????????????????????????????? `onCloudSyncApplied()`???????????????????
+- ??????????????????? overview / inventory / fridge zones????????????????????
+- ???????????????????????????????? `zones` ???????????? AI/????/???????????
+- ?? MQTT `inventory_refresh` ?????????????`sync_documents_refresh` ? MQTT ??????????????????? MQTT command worker ? MQTT event task ????? JSON/cJSON ???
+- ??? `idf.py build` ? `idf.py -p COM16 flash`?????? `get_status` ?? Wi-Fi/MQTT ?? ok???????? `ota_1` ???????????????
+
+----
+完成时间：2026-05-30 23:55:00 +08:00
+
+### 摄像头 PSRAM DMA、共享 I2C 锁与 UI 图片识别栈修复
+
+修复 OV3660 在完整 UI/Wi-Fi/MQTT 场景下拍照失败、Web/屏幕识别任务创建失败的问题。核心原因是摄像头 DMA/任务栈仍抢内部 SRAM，以及 GPIO4/5 上 OV3660 SCCB、MPU6050、FT6336U 共用 I2C 时缺少统一总线锁。
+
+- `sdkconfig.defaults` 开启 `CONFIG_CAMERA_PSRAM_DMA=y`，让 esp32-camera 在 ESP32-S3 上走 PSRAM DMA，避免 `DMA buffer 15360 Byte malloc failed`。
+- `sensors` 增加共享递归 I2C 锁接口，IMU、触摸和摄像头初始化/控制统一串行访问 GPIO4/5，降低 OV3660 SCCB 初始化被传感器轮询插队导致 `esp_camera_init failed` 的概率。
+- 摄像头初始化失败后统一 `esp_camera_deinit()` 并清理半初始化状态，重试前短延迟，避免残留 DMA/LEDC/SCCB 状态影响下一次初始化。
+- UI 图片识别和 USB `camera_analyze` 都改为预加载 AI 配置与网络状态，然后用 PSRAM 栈创建后台 worker；修复 `ui_cam_ai internal stack create failed` 和 `camera analyze worker create failed`。
+- AI 抓拍路径收敛为完整 UI 场景实测稳定的 QVGA YUV422 采集后软件 JPEG，避免 XGA/VGA 在内部 DMA 连续块只有 4KB 时先失败再降级；同时在抓拍前内置 19ms 级 XCLK/SCCB PID 唤醒探测，并保留 QVGA 同档 3 次重试，解决开机后不先 `camera_probe` 就直接 `camera_analyze` 时首轮初始化偶发失败的问题。
+- 验证：`idf.py build` 通过；`idf.py -p COM16 app-flash` 成功写入并 hash verify；COM16 回归 `get_status`、`camera_probe`、`camera_capture`、`camera_analyze` 全部 `ok=true`，AI 图片识别 HTTP 200。屏幕端手动进入相机页验证 `ui_cam_preview task created with PSRAM stack=6144`、`ui_cam_ai task created with PSRAM stack=20480`、`AI image HTTP done: status=200`、`UI camera analyze task done`。最终冷启动后不预先发送 `camera_probe`，直接 `camera_analyze` 也验证通过：日志出现 `AI capture wake probe ok: pid=0x3660`，随后 QVGA 抓拍和 HTTP 200 成功。构建仍有既有 legacy I2C driver EOL 提示和 `ota_1` recovery 小分区过小警告，非本次阻塞项。
+- 编辑前备份：`tmp/backups/manual/20260530-233438_camera_ai_psram_worker/`、`tmp/backups/manual/20260530-234828_usb_camera_ai_retry_fix/`、`tmp/backups/manual/20260530-235517_camera_ai_skip_unstable_modes/`；运行前备份：`tmp/backups/before_run/20260530-234401_camera_ai_flash_test/`、`tmp/backups/before_run/20260530-234925_usb_camera_ai_retry_build_flash/`。
+
+- 2026-05-31 小修复：食材编辑页修改到期时间后“默认 7 天”被显示成“2026 天后”。根因是 `components/ui/pages/page_edit_food.c` 的 `normalize_expire_days()` 对所有非“今天/明天”文本直接 `atoi`，而后端 `expire_date` 是 ISO 日期（如 `2026-06-07`），`atoi` 取到年份 `2026`；且 `save_cb` 每次保存都会调用，导致云端同步来的 `days_left` 被覆盖。修复：新增 `parse_iso_date()` 严格匹配 `YYYY-MM-DD`，命中则用当前 SNTP 时间求剩余天数（未对时则保留后端 `days_left` 不破坏），否则回退原“今天/明天/N天后”相对文本逻辑。仅改一个 UI 文件，`idf.py build` 通过。编辑前备份：`tmp/backups/manual/20260531-003426_fix_expire_days/`。真机 COM16 验证（编辑云端食材→改到期→保存后区域页/门页显示正确天数）待硬件侧执行。
+- 2026-05-31 小修复：首页“临期 N”数量与点开后的临期提醒页对不上。根因是临期窗口阈值不一致——首页徽标 `count_expiring_items()` 用 `days_left<=2` 统计，但点开的临期页(page_door)、营养页、设置页“提前 3 天”以及后端 home overview(`today+3`) 都用 `<=3`，于是首页少算一项。修复：`components/ui/pages/page_home.c` 的 `count_expiring_items()` 改为 `fridge_ui_model_count_expiring_days(3)`，与全局 3 天定义统一。仅改一个 UI 文件，`idf.py build` 通过。编辑前备份：`tmp/backups/manual/20260531-022341_fix_expiring_count/`。真机 COM16 验证（首页“临期 N”与临期页列表条数一致）待硬件侧执行。
+- 2026-05-31 小修复：MQTT 重连后三端同步补发失败，串口出现 `queue inventory seed on reconnect failed: ESP_ERR_NO_MEM` 和 `create sync docs publish task failed, largest_internal=3456 bytes`。根因是重连回调里为库存 seed 与同步文档各临时 `xTaskCreate(..., 8192)`，完整 UI/音频/网络场景下内部 SRAM 最大连续块不足。修复：删除运行期临时 `mqtt_inv_pub` / `mqtt_sync_docs` 任务，改为只置 pending/force 标志并通知已在初始化早期创建的 `mqtt_cmd` 内部栈 worker 串行 drain 发布请求；保持 NVS/LittleFS/Flash 路径使用内部 SRAM 栈，不改 PSRAM 栈，避免 cache 关闭窗口风险。补充成功日志 `publish sync documents queued` 便于后续现场判断。验证：`idf.py build` 通过；`idf.py -p COM16 flash` 成功；COM16 90 秒日志确认 `INMP441 ready`、`MQTT connected`、`publish inventory snapshot queued msg_id=0 len=3962 force=false`、`publish sync documents queued msg_id=0 len=7253 force=false`、`MQTT command worker high watermark=5260/5340 words`，未再出现 `ESP_ERR_NO_MEM`、brownout、watchdog。编辑前备份：`tmp/backups/manual/20260531-121707_mqtt_reconnect_publish_worker/`；运行前备份：`tmp/backups/before_run/20260531-121915_mqtt_build_check/`。已知非本次问题：构建仍提示 legacy I2C driver EOL 与 `ota_1` recovery 小分区过小。
+
+----
+完成时间：2026-05-31 16:55:00 +08:00
+
+### 小程序移植 AI 菜谱与营养助手，并补齐 nutrition_cache 云同步
+
+把固件侧厨房 AI 的菜谱缓存与营养助手缓存接入小程序“更多”，并让 `nutrition_cache` 成为和 `recipe_cache` 同级的三端同步文档域。
+
+- 小程序：新增 `pages/nutrition/`，展示 `score/summary/focus/suggestions/restrict_note`，支持按当前库存调用 `/ai/chat` 生成营养建议并入队 `nutrition_cache`；“更多”页新增 `AI 菜谱` 与 `营养助手` 入口；`app.json` 注册营养页。菜谱页新增固件缓存结构兼容，把 `tag/time_minutes/use_inventory/missing/reason` normalize 为小程序卡片视图，同时小程序生成的菜谱同步回云端时按固件 `recipe_cache` 文档结构写入。
+- 小程序同步：`types/models.ts` 新增 `NutritionCache` 与 `nutrition_cache` 域；`utils/localFeatures.ts` 新增 `NUTRITION_CACHE_KEY/getNutritionCache/saveNutritionCache`；`services/sync.ts` 拉取快照后回填 `nutritionCache`，手动/初次同步域加入 `shopping_list/recipe_cache/nutrition_cache/reminder/settings`，确保设备端厨房 AI 文档能上行到云端再落到小程序。
+- 后端与固件同步：后端 schema/service/device bridge/MQTT 过滤/同步路由均加入 `nutrition_cache`；云端快照返回 `nutritionCache`；设备下发新增 `nutrition_cache_update`。固件 MQTT 同步文档上报新增读取 `fridge_storage_get_nutrition_cache()`，并支持接收 `nutrition_cache_update` 写回 `fridge_storage_set_nutrition_cache()`。
+- 类型补齐：小程序自带 typings 增加 `getCurrentPages`，并收窄 `app.ts` 云同步页面通知的 null 类型，保证 strict TS 检查可过。
+- 验证：`web/node_modules/.bin/tsc.cmd -p miniapp/tsconfig.json --noEmit` 通过；`python -m compileall backend/app` 通过；`idf.py build` 通过。构建仍有既有 legacy I2C driver EOL 提示和 `ota_1` recovery 小分区过小警告，非本次改动引入。真机 COM16 端到端验证（固件生成营养/菜谱→MQTT 上行→小程序同步显示；小程序生成营养/菜谱→云端→设备屏幕缓存更新）待硬件侧执行。
+- 编辑前备份：`tmp/backups/manual/20260531-164159_miniapp_kitchen_ai_sync/`。

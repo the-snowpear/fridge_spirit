@@ -78,6 +78,14 @@ esp_err_t fridge_mqtt_publish_sensor_snapshot(void);
 // 仅在用户确认保存、云端请求刷新或调试命令触发时调用；未连接时返回 ESP_ERR_INVALID_STATE。
 esp_err_t fridge_mqtt_publish_inventory_snapshot(bool force_import);
 
+// 请求后台发布当前 UI 库存同步快照。
+// 注意：该接口只投递后台任务，避免 LVGL 触摸回调里直接执行大 JSON 序列化和 MQTT publish。
+esp_err_t fridge_mqtt_request_inventory_publish(bool force_import);
+
+// 把本地未上报的会话历史增量作为 ai_history 域事件 push 到云端；无增量时返回 ESP_OK 跳过。
+// 由语音会话每轮结束和 MQTT 重连补发两处调用；未连接时返回 ESP_ERR_INVALID_STATE。
+esp_err_t fridge_mqtt_publish_chat_history_delta(void);
+
 // 发布命令回执；request_id 必须来自云端命令，便于后端幂等处理。
 esp_err_t fridge_mqtt_publish_command_ack(const char *request_id, const char *command, bool ok, const char *message);
 

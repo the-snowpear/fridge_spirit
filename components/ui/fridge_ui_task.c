@@ -16,6 +16,7 @@
 #include "fridge_display.h"
 #include "fridge_state_machine.h"
 #include "fridge_touch.h"
+#include "fridge_wake_word.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -27,6 +28,7 @@
 #define UI_TOAST_MS 1800
 #define UI_IDLE_SLEEP_MS 120000
 #define UI_TOUCH_WAKE_GRACE_MS UI_IDLE_SLEEP_MS
+#define UI_NOTIFY_ACTIVITY (1UL << 0)
 
 static const char *TAG = "fridge_ui";
 
@@ -52,6 +54,17 @@ typedef struct {
     fridge_ui_page_t page;
     char toast[96];
 } ui_page_async_request_t;
+
+static void ui_apply_activity(void)
+{
+    s_last_activity_ms = esp_timer_get_time() / 1000;
+    s_touch_wake_until_ms = s_last_activity_ms + UI_TOUCH_WAKE_GRACE_MS;
+    // 触摸或 Web 面板命令都是明确的人机互动：即使雷达缺席，也给用户一个完整操作窗口。
+    s_last_radar_seen_ms = s_last_activity_ms;
+    if (fridge_display_get_brightness() == 0) {
+        (void)fridge_display_set_brightness(65);
+    }
+}
 
 static void ui_tick_cb(void *arg)
 {
@@ -355,10 +368,20 @@ static void ui_task(void *arg)
 
     while (true) {
         int64_t now_ms = esp_timer_get_time() / 1000;
+        uint32_t notify_bits = 0;
+        if (xTaskNotifyWait(0, UI_NOTIFY_ACTIVITY, &notify_bits, 0) == pdTRUE &&
+            (notify_bits & UI_NOTIFY_ACTIVITY)) {
+            ui_apply_activity();
+        }
         if (now_ms - s_last_model_poll_ms >= UI_MODEL_POLL_MS) {
             fridge_ui_model_poll();
             apply_state_machine_ui_policy();
             update_current_page();
+            // 语音唤醒自动策略：仅在屏幕已就绪且亮屏（非待机、背光>0）时允许监听。
+            // policy_update 内部不阻塞（停止动作交给 wake 自己的管理任务），不会拖住 LVGL 刷新。
+            bool screen_awake = fridge_display_get_brightness() > 0 &&
+                                g_ui_page != FRIDGE_UI_PAGE_STANDBY;
+            fridge_wake_word_policy_update(fridge_display_is_ready(), screen_awake);
             s_last_model_poll_ms = now_ms;
         }
         if (s_toast && s_toast_until_ms > 0 && now_ms >= s_toast_until_ms) {
@@ -558,13 +581,15 @@ void fridge_ui_toast(const char *text)
 
 void fridge_ui_note_activity(void)
 {
-    s_last_activity_ms = esp_timer_get_time() / 1000;
-    s_touch_wake_until_ms = s_last_activity_ms + UI_TOUCH_WAKE_GRACE_MS;
-    // 触摸是明确的人机互动：即使雷达缺席或仍处于 2 分钟无人状态，也给用户一个完整操作窗口。
-    s_last_radar_seen_ms = s_last_activity_ms;
-    if (fridge_display_get_brightness() == 0) {
-        (void)fridge_display_set_brightness(65);
+    if (!s_ui_task) {
+        return;
     }
+    if (xTaskGetCurrentTaskHandle() == s_ui_task) {
+        ui_apply_activity();
+        return;
+    }
+    // 外部任务（例如 USB/Web Serial）只投递活动事件；亮度和 LVGL 相关动作统一回到 UI 任务执行。
+    (void)xTaskNotify(s_ui_task, UI_NOTIFY_ACTIVITY, eSetBits);
 }
 
 void fridge_ui_label_set_text_if_changed(lv_obj_t *label, const char *text)

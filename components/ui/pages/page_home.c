@@ -38,6 +38,7 @@ static lv_obj_t *s_height_inc_btn;
 static lv_obj_t *s_delete_btn;
 static lv_obj_t *s_scroll_hint;
 static bool s_space_editing;
+static bool s_update_pending;
 static uint8_t s_selected_zone = UINT8_MAX;
 
 typedef struct {
@@ -67,16 +68,32 @@ static uint8_t clamp_span(uint8_t value)
 
 static uint8_t count_expiring_items(const fridge_ui_model_t *model)
 {
-    uint8_t count = 0;
-    if (!model) {
-        return 0;
+    (void)model;
+    // 临期窗口统一为“3 天内到期”：与设置页“提前 3 天”、临期提醒页(page_door)的 days_left<=3
+    // 列表以及后端 home overview(today+3) 保持一致。此前用 2 会让首页“临期 N”少算一项，
+    // 点开后临期页却列出 3 天内的食材，导致数量对不上。
+    return fridge_ui_model_count_expiring_days(3);
+}
+
+static void home_update_async_cb(void *user_data)
+{
+    (void)user_data;
+    s_update_pending = false;
+    if (g_ui_page == FRIDGE_UI_PAGE_HOME) {
+        fridge_ui_page_home_update();
     }
-    for (size_t i = 0; i < model->food_count; i++) {
-        if (model->foods[i].days_left <= 2) {
-            count++;
-        }
+}
+
+static void request_home_update(void)
+{
+    if (s_update_pending) {
+        return;
     }
-    return count;
+    s_update_pending = true;
+    if (lv_async_call(home_update_async_cb, NULL) != LV_RESULT_OK) {
+        s_update_pending = false;
+        fridge_ui_page_home_update();
+    }
 }
 
 static bool is_custom_zone_visible(const fridge_ui_model_t *model, uint8_t zone)
@@ -122,23 +139,24 @@ static void select_zone_for_edit(uint8_t zone)
     }
     s_selected_zone = zone;
     fridge_ui_model_set_active_zone(zone);
-    fridge_ui_page_home_update();
+    request_home_update();
 }
 
 static void update_zone_from_editor(const char *name, const char *note, uint8_t width, uint8_t height)
 {
-    fridge_ui_model_t model = {0};
-    fridge_ui_model_get(&model);
     if (s_selected_zone >= FRIDGE_UI_ZONE_COUNT) {
         return;
     }
-    const fridge_ui_zone_summary_t *zone = &model.zones[s_selected_zone];
+    fridge_ui_zone_summary_t zone = {0};
+    if (!fridge_ui_model_get_zone_summary(s_selected_zone, &zone)) {
+        return;
+    }
     fridge_ui_model_update_zone(s_selected_zone,
-                                name && name[0] ? name : zone->name,
-                                width ? width : zone->width,
-                                height ? height : zone->height,
-                                note ? note : zone->note);
-    fridge_ui_page_home_update();
+                                name && name[0] ? name : zone.name,
+                                width ? width : zone.width,
+                                height ? height : zone.height,
+                                note ? note : zone.note);
+    request_home_update();
 }
 
 static void name_done_cb(const char *text)
@@ -180,53 +198,53 @@ static void edit_space_cb(lv_event_t *event)
     if (s_space_editing && s_selected_zone >= FRIDGE_UI_ZONE_COUNT) {
         s_selected_zone = 0;
     }
-    fridge_ui_page_home_update();
+    request_home_update();
 }
 
 static void add_zone_cb(lv_event_t *event)
 {
     (void)event;
     if (fridge_ui_model_add_custom_zone()) {
-        fridge_ui_model_t model = {0};
-        fridge_ui_model_get(&model);
-        s_selected_zone = model.active_zone;
+        s_selected_zone = fridge_ui_model_get_active_zone();
         fridge_ui_toast("已添加自定义区域");
     } else {
         fridge_ui_toast("最多两个自定义区域");
     }
     s_space_editing = true;
-    fridge_ui_page_home_update();
+    request_home_update();
 }
 
 static void name_cb(lv_event_t *event)
 {
     (void)event;
-    fridge_ui_model_t model = {0};
-    fridge_ui_model_get(&model);
     if (s_selected_zone < FRIDGE_UI_ZONE_COUNT) {
-        fridge_ui_keyboard_open_text("区域名称", model.zones[s_selected_zone].name, name_done_cb);
+        fridge_ui_zone_summary_t zone = {0};
+        (void)fridge_ui_model_get_zone_summary(s_selected_zone, &zone);
+        fridge_ui_keyboard_open_text("区域名称", zone.name, name_done_cb);
     }
 }
 
 static void note_cb(lv_event_t *event)
 {
     (void)event;
-    fridge_ui_model_t model = {0};
-    fridge_ui_model_get(&model);
     if (s_selected_zone < FRIDGE_UI_ZONE_COUNT) {
-        fridge_ui_keyboard_open_text("备注", model.zones[s_selected_zone].note, note_done_cb);
+        fridge_ui_zone_summary_t zone = {0};
+        (void)fridge_ui_model_get_zone_summary(s_selected_zone, &zone);
+        fridge_ui_keyboard_open_text("备注", zone.note, note_done_cb);
     }
 }
 
 static void width_cb(lv_event_t *event)
 {
     intptr_t delta = (intptr_t)lv_event_get_user_data(event);
-    fridge_ui_model_t model = {0};
-    fridge_ui_model_get(&model);
     if (s_selected_zone >= FRIDGE_UI_ZONE_COUNT) {
         return;
     }
-    int width_next = (int)model.zones[s_selected_zone].width + (int)delta;
+    fridge_ui_zone_summary_t zone = {0};
+    if (!fridge_ui_model_get_zone_summary(s_selected_zone, &zone)) {
+        return;
+    }
+    int width_next = (int)zone.width + (int)delta;
     uint8_t max_width = s_selected_zone < 4 ? STANDARD_ZONE_SLOTS[s_selected_zone].max_width : 3;
     uint8_t width = clamp_span((uint8_t)(width_next < 1 ? 1 : width_next));
     if (width > max_width) {
@@ -238,12 +256,14 @@ static void width_cb(lv_event_t *event)
 static void height_cb(lv_event_t *event)
 {
     intptr_t delta = (intptr_t)lv_event_get_user_data(event);
-    fridge_ui_model_t model = {0};
-    fridge_ui_model_get(&model);
     if (s_selected_zone >= FRIDGE_UI_ZONE_COUNT) {
         return;
     }
-    int height_next = (int)model.zones[s_selected_zone].height + (int)delta;
+    fridge_ui_zone_summary_t zone = {0};
+    if (!fridge_ui_model_get_zone_summary(s_selected_zone, &zone)) {
+        return;
+    }
+    int height_next = (int)zone.height + (int)delta;
     uint8_t max_height = s_selected_zone < 4 ? STANDARD_ZONE_SLOTS[s_selected_zone].max_height : 3;
     uint8_t height = clamp_span((uint8_t)(height_next < 1 ? 1 : height_next));
     if (height > max_height) {
@@ -262,7 +282,7 @@ static void delete_cb(lv_event_t *event)
     } else {
         fridge_ui_toast("标准分区暂不删除");
     }
-    fridge_ui_page_home_update();
+    request_home_update();
 }
 
 static lv_obj_t *create_action_button(lv_obj_t *parent, const char *text, int16_t x, int16_t w, lv_event_cb_t cb)

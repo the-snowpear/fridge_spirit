@@ -56,6 +56,13 @@ esp_err_t fridge_asr_get_sync_payload(char *out, size_t out_size);
 // 将 audio 组件中最近一次录音封装为 16k/16bit/mono WAV，并上传到 ASR API。
 esp_err_t fridge_asr_transcribe_latest_recording(fridge_asr_result_t *out);
 
+// 读取当前激活的 ASR 配置；包含 API Key 明文，仅供设备内部任务预加载后调用，禁止回显到日志/串口。
+esp_err_t fridge_asr_load_active_config(fridge_asr_config_update_t *out);
+
+// 使用已预加载的 ASR 配置转写最近录音；不会读取 NVS，适合 PSRAM 栈 HTTPS worker。
+esp_err_t fridge_asr_transcribe_latest_recording_with_config(const fridge_asr_config_update_t *config,
+                                                             fridge_asr_result_t *out);
+
 #ifdef __cplusplus
 }
 #endif

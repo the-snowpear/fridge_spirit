@@ -32,7 +32,7 @@ void fridge_ui_page_offline_create(lv_obj_t *parent)
 
 void fridge_ui_page_offline_update(void)
 {
-    fridge_ui_model_t model = {0};
-    fridge_ui_model_get(&model);
-    fridge_ui_label_set_text_fmt_if_changed(s_status, "网络：%s", model.network.connected ? "已恢复" : "离线/重连中");
+    fridge_ui_network_model_t network = {0};
+    (void)fridge_ui_model_get_network(&network);
+    fridge_ui_label_set_text_fmt_if_changed(s_status, "网络：%s", network.connected ? "已恢复" : "离线/重连中");
 }

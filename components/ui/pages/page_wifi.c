@@ -168,16 +168,22 @@ void fridge_ui_page_wifi_update(void)
         lv_obj_set_style_bg_color(current, theme->surface_soft, 0);
         lv_obj_set_style_border_color(current, theme->accent, 0);
 
-        lv_obj_t *ssid = lv_label_create(current);
+        lv_obj_t *content = lv_obj_create(current);
+        lv_obj_remove_style_all(content);
+        lv_obj_set_size(content, 596, 54);
+        lv_obj_align(content, LV_ALIGN_CENTER, 0, 0);
+        lv_obj_remove_flag(content, LV_OBJ_FLAG_SCROLLABLE);
+
+        lv_obj_t *ssid = lv_label_create(content);
         lv_label_set_text(ssid, model.network.ssid);
         lv_obj_set_style_text_color(ssid, theme->text, 0);
         lv_obj_set_style_text_font(ssid, fridge_ui_font_body(), 0);
         lv_label_set_long_mode(ssid, LV_LABEL_LONG_DOT);
         lv_obj_set_width(ssid, 300);
-        lv_obj_align(ssid, LV_ALIGN_TOP_LEFT, 14, 14);
-        create_connected_badge(current, ssid);
+        lv_obj_align(ssid, LV_ALIGN_TOP_LEFT, 0, 0);
+        create_connected_badge(content, ssid);
 
-        lv_obj_t *meta = lv_label_create(current);
+        lv_obj_t *meta = lv_label_create(content);
         lv_label_set_text_fmt(meta,
                               "当前网络  %ddBm  IP %s",
                               model.network.rssi,
@@ -186,7 +192,7 @@ void fridge_ui_page_wifi_update(void)
         lv_obj_set_style_text_font(meta, fridge_ui_font_small(), 0);
         lv_label_set_long_mode(meta, LV_LABEL_LONG_DOT);
         lv_obj_set_width(meta, 470);
-        lv_obj_align(meta, LV_ALIGN_TOP_LEFT, 14, 52);
+        lv_obj_align(meta, LV_ALIGN_BOTTOM_LEFT, 0, 0);
     }
 
     if (model.wifi_ap_count == 0) {

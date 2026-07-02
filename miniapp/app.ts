@@ -28,6 +28,9 @@ import type {
 import { getStorage, setStorage } from "./utils/storage";
 import { updateOfflineSnapshot } from "./utils/localFeatures";
 import { syncNow } from "./services/sync";
+import type { SyncSnapshotData } from "./types/models";
+
+const FOREGROUND_SYNC_INTERVAL_MS = 15_000;
 
 /** 全局状态。所有 setX 方法都会同步写 storage（缓存 key 与 storage 函数对齐）。 */
 export interface MiniAppGlobalData {
@@ -46,6 +49,10 @@ export interface MiniAppGlobalData {
   lastLoginError?: string;
   /** 从库存分区进入拍照页时暂存推荐 zone；scan 是 tabBar 页，不能用 navigateTo query 传参。 */
   pendingScanZone?: string;
+  /** 前台轻量同步定时器：用于接收设备端主动修改，不需要用户每次点同步。 */
+  foregroundSyncTimer?: number;
+  /** 最近一次已通知页面刷新的同步版本，避免 15 秒轮询反复重绘。 */
+  notifiedSyncRevision?: number;
 }
 
 /** 小程序 App 实例公开方法签名，方便页面 getApp 后类型推断。 */
@@ -59,6 +66,10 @@ export interface MiniAppInstance {
   /** 首页 / 设置页可主动调；内部带串行锁，重复调用会复用已在跑的 promise。 */
   ensureSession(force?: boolean): Promise<AuthSession | null>;
   bootstrap(force?: boolean): Promise<HomeOverview | null>;
+  startForegroundSync(): void;
+  stopForegroundSync(): void;
+  runForegroundSyncOnce(): Promise<void>;
+  notifyActivePageIfChanged(snapshot: SyncSnapshotData | null): void;
 }
 
 App<MiniAppGlobalData>({
@@ -108,11 +119,50 @@ App<MiniAppGlobalData>({
   },
 
   onShow() {
+    this.startForegroundSync();
     if (this.globalData.session?.token) {
-      void syncNow().catch((err) => {
+      void this.runForegroundSyncOnce().catch((err) => {
         console.warn("foreground sync failed", err);
       });
     }
+  },
+
+  onHide() {
+    this.stopForegroundSync();
+  },
+
+  startForegroundSync() {
+    if (this.globalData.foregroundSyncTimer) return;
+    this.globalData.foregroundSyncTimer = setInterval(() => {
+      if (!this.globalData.session?.token) return;
+      void this.runForegroundSyncOnce().catch((err) => {
+        console.warn("foreground periodic sync failed", err);
+      });
+    }, FOREGROUND_SYNC_INTERVAL_MS) as unknown as number;
+  },
+
+  stopForegroundSync() {
+    if (!this.globalData.foregroundSyncTimer) return;
+    clearInterval(this.globalData.foregroundSyncTimer);
+    this.globalData.foregroundSyncTimer = 0;
+  },
+
+  async runForegroundSyncOnce() {
+    const snapshot = await syncNow();
+    this.notifyActivePageIfChanged(snapshot);
+  },
+
+  notifyActivePageIfChanged(snapshot: SyncSnapshotData | null) {
+    const revision = snapshot?.serverRevision || 0;
+    if (!snapshot || revision <= 0 || revision <= (this.globalData.notifiedSyncRevision || 0)) {
+      return;
+    }
+    this.globalData.notifiedSyncRevision = revision;
+    const pages = getCurrentPages();
+    const current = pages[pages.length - 1] as unknown as {
+      onCloudSyncApplied?: (snapshot: SyncSnapshotData) => void;
+    };
+    current?.onCloudSyncApplied?.(snapshot);
   },
 
   /** 静默微信登录：仅 wx.login 拿 code，不调 wx.getUserProfile（避免任何二次确认弹窗）。
@@ -180,9 +230,6 @@ App<MiniAppGlobalData>({
     try {
       const overview = await getHomeOverview();
       this.setOverview(overview);
-      void syncNow().catch((err) => {
-        console.warn("bootstrap sync failed", err);
-      });
       if (overview.device) {
         this.setActiveDevice(overview.device);
       }

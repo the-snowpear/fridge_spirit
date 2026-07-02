@@ -1,0 +1,165 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="1200" viewBox="0 0 900 1200" font-family="'Microsoft YaHei','PingFang SC','Hiragino Sans GB',Arial,sans-serif">
+  <defs>
+    <filter id="softShadow" x="-12%" y="-12%" width="124%" height="130%">
+      <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#1f2937" flood-opacity="0.10"/>
+    </filter>
+    <marker id="arrowTeal" viewBox="0 0 12 12" refX="10.5" refY="6" markerWidth="9" markerHeight="9" orient="auto">
+      <path d="M1 1 L11 6 L1 11 Z" fill="#247875"/>
+    </marker>
+    <marker id="arrowDark" viewBox="0 0 12 12" refX="10.5" refY="6" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M1 1 L11 6 L1 11 Z" fill="#4b5563"/>
+    </marker>
+    <style>
+      .title { fill:#202033; font-weight:800; font-size:36px; letter-spacing:0; }
+      .subtitle { fill:#667085; font-size:18px; font-weight:500; }
+      .sectionTitle { fill:#247875; font-size:22px; font-weight:800; }
+      .cardTitle { fill:#202033; font-size:18px; font-weight:800; }
+      .body { fill:#667085; font-size:15px; font-weight:500; }
+      .small { fill:#667085; font-size:13px; font-weight:500; }
+      .code { fill:#1f6f6b; font-size:16px; font-weight:800; font-family:'Cascadia Mono','Consolas','Microsoft YaHei',monospace; }
+      .pillText { fill:#1f6f6b; font-size:14px; font-weight:800; font-family:'Cascadia Mono','Consolas','Microsoft YaHei',monospace; }
+    </style>
+  </defs>
+
+  <rect width="900" height="1200" fill="#f8f7f4"/>
+  <rect x="28" y="28" width="844" height="1144" rx="28" fill="#ffffff" opacity="0.74"/>
+
+  <!-- 标题区：对应 PPT 右侧竖屏图的独立题头 -->
+  <text x="450" y="74" text-anchor="middle" class="title">设备端软件闭环架构</text>
+  <text x="450" y="108" text-anchor="middle" class="subtitle">组件化固件把输入、AI、校验、展示和本地库存串起来</text>
+
+  <!-- 顶部硬件输入层 -->
+  <g filter="url(#softShadow)">
+    <rect x="56" y="146" width="246" height="104" rx="12" fill="#ffffff"/>
+    <rect x="327" y="146" width="246" height="104" rx="12" fill="#ffffff"/>
+    <rect x="598" y="146" width="246" height="104" rx="12" fill="#ffffff"/>
+  </g>
+  <g>
+    <rect x="76" y="166" width="42" height="42" rx="12" fill="#e4f3f2"/>
+    <path d="M87 181 H107 V195 H87 Z M91 199 H103" fill="none" stroke="#247875" stroke-width="3" stroke-linecap="round"/>
+    <text x="134" y="184" class="cardTitle">屏幕与触摸</text>
+    <text x="134" y="212" class="body">720×720 UI 交互入口</text>
+  </g>
+  <g>
+    <rect x="347" y="166" width="42" height="42" rx="12" fill="#e4f3f2"/>
+    <path d="M356 184 H380 M364 176 H376 M360 184 V198 H384 V184" fill="none" stroke="#247875" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="372" cy="191" r="5" fill="none" stroke="#247875" stroke-width="3"/>
+    <text x="405" y="184" class="cardTitle">OV3660 摄像头</text>
+    <text x="405" y="212" class="body">拍照生成食材上下文</text>
+  </g>
+  <g>
+    <rect x="618" y="166" width="42" height="42" rx="12" fill="#e4f3f2"/>
+    <path d="M639 176 V196 M628 186 H650 M632 199 C636 203 642 203 646 199" fill="none" stroke="#247875" stroke-width="3" stroke-linecap="round"/>
+    <text x="676" y="184" class="cardTitle">语音与传感器</text>
+    <text x="676" y="212" class="body">命令、靠近、开门线索</text>
+  </g>
+
+  <path d="M450 258 V298" stroke="#247875" stroke-width="4" fill="none" marker-end="url(#arrowTeal)"/>
+
+  <!-- 固件中枢层 -->
+  <g filter="url(#softShadow)">
+    <rect x="56" y="306" width="788" height="335" rx="18" fill="#f7fbfb" stroke="#9ccaca" stroke-width="2"/>
+  </g>
+  <text x="84" y="346" class="sectionTitle">ESP32-S3 固件中枢</text>
+  <text x="84" y="375" class="body">FreeRTOS 任务调度 · 事件队列 · PSRAM / LittleFS / NVS</text>
+
+  <g>
+    <rect x="257" y="405" width="386" height="110" rx="18" fill="#247875"/>
+    <text x="450" y="445" text-anchor="middle" fill="#ffffff" font-size="25" font-weight="800">主控编排层</text>
+    <text x="450" y="477" text-anchor="middle" fill="#d9eeee" font-size="16" font-weight="600">main.c 只负责启动顺序和高层串联</text>
+  </g>
+
+  <!-- 组件标签：把左侧清单里的模块转成运行拓扑 -->
+  <g>
+    <rect x="86" y="414" width="150" height="42" rx="10" fill="#ffffff" stroke="#d8e6e6"/>
+    <text x="161" y="432" text-anchor="middle" dominant-baseline="central" class="pillText">display / ui</text>
+    <path d="M236 435 H257" stroke="#8cbdbc" stroke-width="2"/>
+
+    <rect x="86" y="472" width="150" height="42" rx="10" fill="#ffffff" stroke="#d8e6e6"/>
+    <text x="161" y="490" text-anchor="middle" dominant-baseline="central" class="pillText">camera</text>
+    <path d="M236 493 H257" stroke="#8cbdbc" stroke-width="2"/>
+
+    <rect x="86" y="530" width="150" height="42" rx="10" fill="#ffffff" stroke="#d8e6e6"/>
+    <text x="161" y="548" text-anchor="middle" dominant-baseline="central" class="pillText">diagnostics</text>
+    <path d="M236 551 H300" stroke="#8cbdbc" stroke-width="2"/>
+
+    <rect x="664" y="414" width="150" height="42" rx="10" fill="#ffffff" stroke="#d8e6e6"/>
+    <text x="739" y="432" text-anchor="middle" dominant-baseline="central" class="pillText">storage</text>
+    <path d="M664 435 H643" stroke="#8cbdbc" stroke-width="2"/>
+
+    <rect x="664" y="472" width="150" height="42" rx="10" fill="#ffffff" stroke="#d8e6e6"/>
+    <text x="739" y="490" text-anchor="middle" dominant-baseline="central" class="pillText">ai_client</text>
+    <path d="M664 493 H643" stroke="#8cbdbc" stroke-width="2"/>
+
+    <rect x="664" y="530" width="150" height="42" rx="10" fill="#ffffff" stroke="#d8e6e6"/>
+    <text x="739" y="548" text-anchor="middle" dominant-baseline="central" class="pillText">ai_actions</text>
+    <path d="M664 551 H600" stroke="#8cbdbc" stroke-width="2"/>
+  </g>
+
+  <g>
+    <rect x="220" y="583" width="210" height="34" rx="17" fill="#eef2f7"/>
+    <text x="325" y="597" text-anchor="middle" dominant-baseline="central" class="small">network / mqtt 同步状态</text>
+    <rect x="470" y="583" width="210" height="34" rx="17" fill="#eef2f7"/>
+    <text x="575" y="597" text-anchor="middle" dominant-baseline="central" class="small">本地优先，离线可读</text>
+  </g>
+
+  <path d="M450 646 V686" stroke="#247875" stroke-width="4" fill="none" marker-end="url(#arrowTeal)"/>
+
+  <!-- AI 流程层 -->
+  <g filter="url(#softShadow)">
+    <rect x="56" y="694" width="788" height="273" rx="18" fill="#ffffff" stroke="#e1e7ee" stroke-width="1.5"/>
+  </g>
+  <text x="84" y="733" class="sectionTitle">AI 对话与动作闭环</text>
+  <text x="84" y="762" class="body">设备直接通过 HTTPS 调用大模型，返回动作先过白名单，再影响本地状态</text>
+
+  <g>
+    <rect x="86" y="804" width="142" height="82" rx="13" fill="#f7fbfb" stroke="#9ccaca" stroke-width="1.5"/>
+    <text x="157" y="834" text-anchor="middle" dominant-baseline="middle" class="cardTitle">1 输入</text>
+    <text x="157" y="862" text-anchor="middle" dominant-baseline="middle" class="small">说话 / 拍照</text>
+
+    <rect x="251" y="804" width="142" height="82" rx="13" fill="#f7fbfb" stroke="#9ccaca" stroke-width="1.5"/>
+    <text x="322" y="834" text-anchor="middle" dominant-baseline="middle" class="cardTitle">2 上下文</text>
+    <text x="322" y="862" text-anchor="middle" dominant-baseline="middle" class="small">库存 / 偏好 / 历史</text>
+
+    <rect x="416" y="804" width="142" height="82" rx="13" fill="#e7f4f3" stroke="#247875" stroke-width="2"/>
+    <text x="487" y="834" text-anchor="middle" dominant-baseline="middle" class="cardTitle">3 直连 AI</text>
+    <text x="487" y="862" text-anchor="middle" dominant-baseline="middle" class="small">HTTPS API</text>
+
+    <rect x="581" y="804" width="142" height="82" rx="13" fill="#f7fbfb" stroke="#9ccaca" stroke-width="1.5"/>
+    <text x="652" y="834" text-anchor="middle" dominant-baseline="middle" class="cardTitle">4 校验</text>
+    <text x="652" y="862" text-anchor="middle" dominant-baseline="middle" class="small">动作白名单</text>
+  </g>
+  <path d="M228 845 H249" stroke="#4b5563" stroke-width="3" marker-end="url(#arrowDark)"/>
+  <path d="M393 845 H414" stroke="#4b5563" stroke-width="3" marker-end="url(#arrowDark)"/>
+  <path d="M558 845 H579" stroke="#4b5563" stroke-width="3" marker-end="url(#arrowDark)"/>
+
+  <g>
+    <rect x="174" y="913" width="552" height="34" rx="17" fill="#e7f4f3"/>
+    <text x="450" y="927" text-anchor="middle" dominant-baseline="central" fill="#247875" font-size="15" font-weight="800">关键原则：AI 给建议，固件管边界，用户确认后才写入库存</text>
+    <path d="M652 886 C652 918 610 930 727 930" stroke="#247875" stroke-width="3" fill="none" marker-end="url(#arrowTeal)"/>
+  </g>
+
+  <path d="M450 972 V1012" stroke="#247875" stroke-width="4" fill="none" marker-end="url(#arrowTeal)"/>
+
+  <!-- 输出层 -->
+  <g filter="url(#softShadow)">
+    <rect x="56" y="1020" width="788" height="116" rx="18" fill="#e7f4f3" stroke="#86bcbc" stroke-width="2"/>
+  </g>
+  <text x="84" y="1060" class="sectionTitle">可见结果</text>
+  <g>
+    <rect x="246" y="1040" width="156" height="58" rx="12" fill="#ffffff"/>
+    <text x="324" y="1057" text-anchor="middle" dominant-baseline="central" class="cardTitle">屏幕展示</text>
+    <text x="324" y="1081" text-anchor="middle" dominant-baseline="central" class="small">菜谱 / 提醒 / 库存</text>
+
+    <rect x="426" y="1040" width="156" height="58" rx="12" fill="#ffffff"/>
+    <text x="504" y="1057" text-anchor="middle" dominant-baseline="central" class="cardTitle">本地写入</text>
+    <text x="504" y="1081" text-anchor="middle" dominant-baseline="central" class="small">LittleFS JSON</text>
+
+    <rect x="606" y="1040" width="156" height="58" rx="12" fill="#ffffff"/>
+    <text x="684" y="1057" text-anchor="middle" dominant-baseline="central" class="cardTitle">同步诊断</text>
+    <text x="684" y="1081" text-anchor="middle" dominant-baseline="central" class="small">MQTT / USB 面板</text>
+  </g>
+
+  <!-- 底部注记 -->
+  <text x="450" y="1165" text-anchor="middle" fill="#8a94a6" font-size="13" font-weight="600">ESP32-S3 智能冰箱贴 · 端侧直连 AI · 不经过云端中转</text>
+</svg>

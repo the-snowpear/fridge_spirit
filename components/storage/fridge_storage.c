@@ -20,6 +20,9 @@
 
 #define STORAGE_NVS_NAMESPACE "fridge_store"
 #define STORAGE_NVS_KEY_MEMORY "memory"
+// 会话历史上行同步游标：记录"最近一条已成功推送到云端的消息 created_at（秒）"。
+// 用于设备每轮对话后只增量上报新增消息，避免重连时重发整窗导致云端重复落库。
+#define STORAGE_NVS_KEY_CHAT_SYNCED_AT "chat_sync_at"
 #define STORAGE_CACHE_PARTITION_LABEL "cache"
 #define STORAGE_CACHE_BASE_PATH "/cache"
 #define STORAGE_MEMORY_PATH STORAGE_CACHE_BASE_PATH "/memory_summary.json"
@@ -30,6 +33,8 @@
 #define STORAGE_UI_INVENTORY_PATH STORAGE_CACHE_BASE_PATH "/ui_inventory.json"
 #define STORAGE_SHOPPING_LIST_PATH STORAGE_CACHE_BASE_PATH "/shopping_list.json"
 #define STORAGE_RECIPE_CACHE_PATH STORAGE_CACHE_BASE_PATH "/recipe_cache.json"
+#define STORAGE_NUTRITION_CACHE_PATH STORAGE_CACHE_BASE_PATH "/nutrition_cache.json"
+#define STORAGE_KITCHEN_AI_META_PATH STORAGE_CACHE_BASE_PATH "/kitchen_ai_meta.json"
 #define STORAGE_CHAT_HISTORY_SCHEMA_VERSION 1
 #define STORAGE_CACHE_FORMAT_ON_FAIL true
 #define STORAGE_HISTORY_FILE_BUFFER_SIZE 12288
@@ -115,6 +120,20 @@ static const char *RECIPE_CACHE_JSON =
     "{\"schema_version\":1,"
     "\"source\":\"local_seed\","
     "\"items\":[]}";
+
+static const char *NUTRITION_CACHE_JSON =
+    "{\"schema_version\":1,"
+    "\"source\":\"local_seed\","
+    "\"nutrition\":{\"score\":0,\"summary\":\"尚未生成 AI 营养建议\",\"focus\":[],\"suggestions\":[],\"restrict_note\":\"\"}}";
+
+static const char *KITCHEN_AI_META_JSON =
+    "{\"schema_version\":1,"
+    "\"last_auto_day\":0,"
+    "\"auto_attempt_day\":0,"
+    "\"auto_attempt_count\":0,"
+    "\"last_attempt_at\":0,"
+    "\"last_generated_at\":0,"
+    "\"last_error\":\"\"}";
 
 static esp_err_t copy_json(const char *source, char *out, size_t out_size)
 {
@@ -453,6 +472,24 @@ static void storage_fill_inventory_sync_status_from_root(cJSON *root, fridge_sto
     }
 }
 
+static const cJSON *storage_json_get_string_any(const cJSON *root, const char *key, const char *fallback_key)
+{
+    const cJSON *item = cJSON_GetObjectItemCaseSensitive(root, key);
+    if (!cJSON_IsString(item) && fallback_key) {
+        item = cJSON_GetObjectItemCaseSensitive(root, fallback_key);
+    }
+    return cJSON_IsString(item) ? item : NULL;
+}
+
+static const char *storage_json_string_value_any(const cJSON *root,
+                                                 const char *key,
+                                                 const char *fallback_key,
+                                                 const char *fallback)
+{
+    const cJSON *item = storage_json_get_string_any(root, key, fallback_key);
+    return (item && item->valuestring) ? item->valuestring : fallback;
+}
+
 static esp_err_t storage_update_inventory_sync_meta(cJSON *root,
                                                     uint32_t snapshot_version,
                                                     uint32_t server_revision,
@@ -476,6 +513,354 @@ static esp_err_t storage_update_inventory_sync_meta(cJSON *root,
         ESP_RETURN_ON_FALSE(storage_replace_json_item(root, "deviceId", cJSON_CreateString(device_id)), ESP_ERR_NO_MEM, TAG, "set deviceId failed");
     }
     return ESP_OK;
+}
+
+static cJSON *storage_find_zone_by_id(cJSON *zones, int id);
+static bool storage_strip_cloud_prefix_one(char *quantity, size_t quantity_size);
+static bool storage_clean_quantity_text(char *quantity, size_t quantity_size);
+
+static void storage_clean_quantity_copy(const cJSON *item, char *out, size_t out_size)
+{
+    if (!out || out_size == 0) {
+        return;
+    }
+    const char *quantity = storage_json_string_value_any(item, "quantity", NULL, "");
+    strlcpy(out, quantity, out_size);
+    const cJSON *unit = storage_json_get_string_any(item, "unit", NULL);
+    const char *unit_text = (unit && unit->valuestring) ? unit->valuestring : NULL;
+    if (unit_text && unit_text[0] >= '0' && unit_text[0] <= '9') {
+        strlcpy(out, unit_text, out_size);
+    }
+    if (unit_text && strcmp(unit_text, quantity) == 0) {
+        (void)storage_strip_cloud_prefix_one(out, out_size);
+    }
+    (void)storage_clean_quantity_text(out, out_size);
+}
+
+static bool storage_inventory_zones_equivalent(const cJSON *local_root, const cJSON *incoming_root)
+{
+    const cJSON *local_zones = cJSON_GetObjectItemCaseSensitive(local_root, "zones");
+    const cJSON *incoming_zones = cJSON_GetObjectItemCaseSensitive(incoming_root, "zones");
+    if (!cJSON_IsArray(local_zones) || !cJSON_IsArray(incoming_zones)) {
+        return cJSON_GetArraySize(local_zones) == cJSON_GetArraySize(incoming_zones);
+    }
+
+    const cJSON *local_zone = NULL;
+    cJSON_ArrayForEach(local_zone, local_zones) {
+        const cJSON *id_json = cJSON_GetObjectItemCaseSensitive(local_zone, "id");
+        if (!cJSON_IsNumber(id_json)) {
+            return false;
+        }
+        const cJSON *incoming_zone = storage_find_zone_by_id((cJSON *)incoming_zones, id_json->valueint);
+        if (!cJSON_IsObject(incoming_zone)) {
+            return false;
+        }
+        const char *local_name = storage_json_string_value_any(local_zone, "name", "label", "");
+        const char *incoming_name = storage_json_string_value_any(incoming_zone, "name", "label", "");
+        const char *local_note = storage_json_string_value_any(local_zone, "note", "hint", "");
+        const char *incoming_note = storage_json_string_value_any(incoming_zone, "note", "hint", "");
+        uint32_t local_width = storage_json_u32(local_zone, "width", NULL, 1);
+        uint32_t incoming_width = storage_json_u32(incoming_zone, "width", NULL, 1);
+        uint32_t local_height = storage_json_u32(local_zone, "height", NULL, 1);
+        uint32_t incoming_height = storage_json_u32(incoming_zone, "height", NULL, 1);
+        bool local_custom = storage_json_bool(local_zone, "custom", false);
+        bool incoming_custom = storage_json_bool(incoming_zone, "custom", false);
+        if (strcmp(local_name, incoming_name) != 0 ||
+            strcmp(local_note, incoming_note) != 0 ||
+            local_width != incoming_width ||
+            local_height != incoming_height ||
+            local_custom != incoming_custom) {
+            return false;
+        }
+    }
+    return cJSON_GetArraySize(local_zones) == cJSON_GetArraySize(incoming_zones);
+}
+
+static bool storage_inventory_item_equivalent(const cJSON *local_item, const cJSON *incoming_item)
+{
+    if (!cJSON_IsObject(local_item) || !cJSON_IsObject(incoming_item)) {
+        return false;
+    }
+    const char *local_name = storage_json_string_value_any(local_item, "name", NULL, "");
+    const char *incoming_name = storage_json_string_value_any(incoming_item, "name", NULL, "");
+    const char *local_location = storage_json_string_value_any(local_item, "location", NULL, "");
+    const char *incoming_location = storage_json_string_value_any(incoming_item, "location", NULL, "");
+    uint32_t local_zone = storage_json_u32(local_item, "zone", NULL, UINT32_MAX);
+    uint32_t incoming_zone = storage_json_u32(incoming_item, "zone", NULL, UINT32_MAX);
+    uint32_t local_cell = storage_json_u32(local_item, "cell", NULL, UINT32_MAX);
+    uint32_t incoming_cell = storage_json_u32(incoming_item, "cell", NULL, UINT32_MAX);
+    uint32_t local_days = storage_json_u32(local_item, "days_left", "daysLeft", UINT32_MAX);
+    uint32_t incoming_days = storage_json_u32(incoming_item, "days_left", "daysLeft", UINT32_MAX);
+    char local_quantity[64] = {0};
+    char incoming_quantity[64] = {0};
+    storage_clean_quantity_copy(local_item, local_quantity, sizeof(local_quantity));
+    storage_clean_quantity_copy(incoming_item, incoming_quantity, sizeof(incoming_quantity));
+    if (strcmp(local_name, incoming_name) != 0 ||
+        strcmp(local_quantity, incoming_quantity) != 0 ||
+        strcmp(local_location, incoming_location) != 0 ||
+        local_zone != incoming_zone ||
+        local_cell != incoming_cell) {
+        return false;
+    }
+    if (local_days != UINT32_MAX && incoming_days != UINT32_MAX) {
+        return local_days == incoming_days;
+    }
+    const char *local_expire = storage_json_string_value_any(local_item, "expire_date", "expireDate", "");
+    const char *incoming_expire = storage_json_string_value_any(incoming_item, "expire_date", "expireDate", "");
+    return strcmp(local_expire, incoming_expire) == 0;
+}
+
+static bool storage_inventory_items_equivalent(const cJSON *local_root, const cJSON *incoming_root)
+{
+    const cJSON *local_items = cJSON_GetObjectItemCaseSensitive(local_root, "items");
+    const cJSON *incoming_items = cJSON_GetObjectItemCaseSensitive(incoming_root, "items");
+    if (!cJSON_IsArray(local_items) || !cJSON_IsArray(incoming_items)) {
+        return cJSON_GetArraySize(local_items) == cJSON_GetArraySize(incoming_items);
+    }
+    int item_count = cJSON_GetArraySize(local_items);
+    if (item_count != cJSON_GetArraySize(incoming_items)) {
+        return false;
+    }
+
+    bool *matched = calloc((size_t)item_count, sizeof(bool));
+    if (!matched) {
+        return false;
+    }
+    for (int i = 0; i < item_count; i++) {
+        const cJSON *local_item = cJSON_GetArrayItem(local_items, i);
+        bool matched_item = false;
+        for (int j = 0; j < item_count; j++) {
+            if (matched[j]) {
+                continue;
+            }
+            const cJSON *incoming_item = cJSON_GetArrayItem(incoming_items, j);
+            if (storage_inventory_item_equivalent(local_item, incoming_item)) {
+                matched[j] = true;
+                matched_item = true;
+                break;
+            }
+        }
+        if (!matched_item) {
+            free(matched);
+            return false;
+        }
+    }
+    free(matched);
+    return true;
+}
+
+static bool storage_inventory_documents_equivalent(const cJSON *local_root, const cJSON *incoming_root)
+{
+    return storage_inventory_zones_equivalent(local_root, incoming_root) &&
+           storage_inventory_items_equivalent(local_root, incoming_root);
+}
+
+static cJSON *storage_find_zone_by_id(cJSON *zones, int id)
+{
+    cJSON *item = NULL;
+    cJSON_ArrayForEach(item, zones) {
+        const cJSON *zone_id = cJSON_GetObjectItemCaseSensitive(item, "id");
+        if (cJSON_IsNumber(zone_id) && zone_id->valueint == id) {
+            return item;
+        }
+    }
+    return NULL;
+}
+
+static bool storage_zone_is_custom_active(const cJSON *zone)
+{
+    if (!cJSON_IsObject(zone)) {
+        return false;
+    }
+    const cJSON *custom = cJSON_GetObjectItemCaseSensitive(zone, "custom");
+    if (cJSON_IsBool(custom) && !cJSON_IsTrue(custom)) {
+        return false;
+    }
+    const cJSON *name = cJSON_GetObjectItemCaseSensitive(zone, "name");
+    const char *text = cJSON_IsString(name) ? name->valuestring : "";
+    return text && text[0] != '\0' && strcmp(text, "自定义区") != 0 && strcmp(text, "备用区") != 0;
+}
+
+static esp_err_t storage_preserve_local_custom_zones(cJSON *incoming_root)
+{
+    cJSON *incoming_zones = cJSON_GetObjectItemCaseSensitive(incoming_root, "zones");
+    if (!cJSON_IsArray(incoming_zones)) {
+        return ESP_OK;
+    }
+
+    cJSON *local_root = NULL;
+    if (storage_load_ui_inventory_root(&local_root) != ESP_OK || !local_root) {
+        return ESP_OK;
+    }
+    cJSON *local_zones = cJSON_GetObjectItemCaseSensitive(local_root, "zones");
+    if (!cJSON_IsArray(local_zones)) {
+        cJSON_Delete(local_root);
+        return ESP_OK;
+    }
+
+    for (int id = 4; id < 6; id++) {
+        if (storage_find_zone_by_id(incoming_zones, id)) {
+            continue;
+        }
+        cJSON *local_zone = storage_find_zone_by_id(local_zones, id);
+        if (!storage_zone_is_custom_active(local_zone)) {
+            continue;
+        }
+        cJSON *copy = cJSON_Duplicate(local_zone, true);
+        if (!copy || !cJSON_AddItemToArray(incoming_zones, copy)) {
+            cJSON_Delete(copy);
+            cJSON_Delete(local_root);
+            return ESP_ERR_NO_MEM;
+        }
+    }
+
+    cJSON_Delete(local_root);
+    return ESP_OK;
+}
+
+static bool storage_unit_is_repeated_ascii(const char *unit, char ch)
+{
+    if (!unit || unit[0] == '\0' || unit[1] == '\0') {
+        return false;
+    }
+    for (const char *p = unit; *p; p++) {
+        if (*p != ch) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool storage_strip_cloud_prefix_one(char *quantity, size_t quantity_size)
+{
+    if (!quantity || quantity_size == 0) {
+        return false;
+    }
+    size_t len = strlen(quantity);
+    if (len < 3 || quantity[0] != '1') {
+        return false;
+    }
+    char *unit = quantity;
+    while (*unit && ((*unit >= '0' && *unit <= '9') || *unit == '.')) {
+        unit++;
+    }
+    if (!(strcmp(unit, "g") == 0 || strcmp(unit, "克") == 0 || strcmp(unit, "ml") == 0 || strcmp(unit, "毫升") == 0)) {
+        return false;
+    }
+    memmove(quantity, quantity + 1, len);
+    quantity[quantity_size - 1] = '\0';
+    return true;
+}
+
+static bool storage_clean_quantity_text(char *quantity, size_t quantity_size)
+{
+    if (!quantity || quantity_size == 0 || quantity[0] == '\0') {
+        return false;
+    }
+    char original[64] = {0};
+    strlcpy(original, quantity, sizeof(original));
+
+    char number[32] = {0};
+    char unit[32] = {0};
+    size_t number_len = 0;
+    while (quantity[number_len] &&
+           ((quantity[number_len] >= '0' && quantity[number_len] <= '9') || quantity[number_len] == '.')) {
+        number_len++;
+    }
+    if (number_len == 0 || number_len >= sizeof(number)) {
+        return false;
+    }
+    memcpy(number, quantity, number_len);
+    number[number_len] = '\0';
+    strlcpy(unit, quantity + number_len, sizeof(unit));
+    if (storage_unit_is_repeated_ascii(unit, 'g')) {
+        strlcpy(unit, "g", sizeof(unit));
+    } else if (strcmp(unit, "克克") == 0) {
+        strlcpy(unit, "克", sizeof(unit));
+    } else if (strcmp(unit, "个个") == 0) {
+        strlcpy(unit, "个", sizeof(unit));
+    } else if (strcmp(unit, "份份") == 0) {
+        strlcpy(unit, "份", sizeof(unit));
+    } else if (strcmp(unit, "盒盒") == 0) {
+        strlcpy(unit, "盒", sizeof(unit));
+    } else if (strcmp(unit, "瓶瓶") == 0) {
+        strlcpy(unit, "瓶", sizeof(unit));
+    } else if (strcmp(unit, "袋袋") == 0) {
+        strlcpy(unit, "袋", sizeof(unit));
+    }
+
+    bool integer_number = true;
+    for (size_t i = 0; number[i]; i++) {
+        if (number[i] < '0' || number[i] > '9') {
+            integer_number = false;
+            break;
+        }
+    }
+    if (integer_number) {
+        bool gram_like = strcmp(unit, "g") == 0 || strcmp(unit, "克") == 0 || strcmp(unit, "ml") == 0 || strcmp(unit, "毫升") == 0;
+        size_t max_digits = gram_like ? 3 : 2;
+        size_t len = strlen(number);
+        bool polluted_prefix = len > max_digits && number[0] == '1' && number[1] == '1';
+        while (polluted_prefix && len > max_digits && number[0] == '1') {
+            memmove(number, number + 1, len);
+            len--;
+        }
+        bool all_one = len > 1;
+        for (size_t i = 0; i < len; i++) {
+            if (number[i] != '1') {
+                all_one = false;
+                break;
+            }
+        }
+        if (all_one) {
+            strlcpy(number, "1", sizeof(number));
+        }
+    }
+
+    char cleaned[64] = {0};
+    snprintf(cleaned, sizeof(cleaned), "%s%s", number, unit);
+    if (strcmp(cleaned, original) == 0) {
+        return false;
+    }
+    strlcpy(quantity, cleaned, quantity_size);
+    return true;
+}
+
+static size_t storage_repair_inventory_root_quantities(cJSON *root)
+{
+    if (!root) {
+        return 0;
+    }
+    size_t count = 0;
+    cJSON *items = cJSON_GetObjectItemCaseSensitive(root, "items");
+    cJSON *item = NULL;
+    cJSON_ArrayForEach(item, items) {
+        cJSON *quantity = cJSON_GetObjectItemCaseSensitive(item, "quantity");
+        if (!cJSON_IsString(quantity) || !quantity->valuestring) {
+            continue;
+        }
+        char cleaned[64] = {0};
+        const cJSON *unit = cJSON_GetObjectItemCaseSensitive(item, "unit");
+        const char *quantity_text = quantity->valuestring;
+        const char *unit_text = cJSON_IsString(unit) ? unit->valuestring : NULL;
+        if (unit_text && unit_text[0] >= '0' && unit_text[0] <= '9') {
+            // 兼容旧后端污染：云端曾把设备 "200g" 写成 quantity=1, unit="200g"，
+            // 再下发时会拼成 "1200g"。此时 unit 本身才是可信的设备显示数量。
+            quantity_text = unit_text;
+        }
+        strlcpy(cleaned, quantity_text, sizeof(cleaned));
+        if (unit_text && strcmp(unit_text, quantity->valuestring) == 0) {
+            (void)storage_strip_cloud_prefix_one(cleaned, sizeof(cleaned));
+        }
+        if (storage_clean_quantity_text(cleaned, sizeof(cleaned))) {
+            cJSON_SetValuestring(quantity, cleaned);
+            count++;
+        } else if (quantity_text != quantity->valuestring && strcmp(quantity->valuestring, cleaned) != 0) {
+            cJSON_SetValuestring(quantity, cleaned);
+            count++;
+        }
+    }
+    return count;
 }
 
 static bool storage_memory_key_allowed(const char *key)
@@ -826,6 +1211,11 @@ esp_err_t fridge_storage_init(void)
         if (!root) {
             ESP_LOGW(TAG, "ui inventory invalid, recreating");
             err = storage_write_text_file(STORAGE_UI_INVENTORY_PATH, UI_INVENTORY_JSON);
+            s_inventory_version = 1;
+        } else {
+            fridge_storage_inventory_sync_status_t status = {0};
+            storage_fill_inventory_sync_status_from_root(root, &status);
+            s_inventory_version = status.snapshot_version > 0 ? status.snapshot_version : 1;
         }
         cJSON_Delete(root);
     }
@@ -861,6 +1251,7 @@ esp_err_t fridge_storage_set_ui_inventory_snapshot(const char *inventory_json)
     ESP_RETURN_ON_ERROR(fridge_storage_init(), TAG, "storage init failed");
     cJSON *root = cJSON_Parse(inventory_json);
     ESP_RETURN_ON_FALSE(root, ESP_ERR_INVALID_ARG, TAG, "ui inventory json invalid");
+    (void)storage_repair_inventory_root_quantities(root);
     fridge_storage_inventory_sync_status_t old_status = {0};
     cJSON *old_root = NULL;
     if (storage_load_ui_inventory_root(&old_root) == ESP_OK && old_root) {
@@ -891,6 +1282,39 @@ esp_err_t fridge_storage_restore_seed_inventory(void)
     return fridge_storage_set_ui_inventory_snapshot(UI_INVENTORY_JSON);
 }
 
+esp_err_t fridge_storage_repair_inventory_quantities(size_t *repaired_count)
+{
+    ESP_RETURN_ON_ERROR(fridge_storage_init(), TAG, "storage init failed");
+    cJSON *root = NULL;
+    ESP_RETURN_ON_ERROR(storage_load_ui_inventory_root(&root), TAG, "load inventory before repair failed");
+    size_t count = storage_repair_inventory_root_quantities(root);
+    esp_err_t err = ESP_OK;
+    if (count > 0) {
+        fridge_storage_inventory_sync_status_t status = {0};
+        storage_fill_inventory_sync_status_from_root(root, &status);
+        uint32_t next_snapshot = status.snapshot_version > 0 ? status.snapshot_version + 1 : s_inventory_version + 1;
+        err = storage_update_inventory_sync_meta(root,
+                                                 next_snapshot,
+                                                 status.server_revision,
+                                                 storage_now_ms(),
+                                                 status.last_sync_at_ms,
+                                                 true,
+                                                 status.home_id,
+                                                 status.device_id);
+        if (err == ESP_OK) {
+            err = storage_print_json_to_file(root);
+        }
+        if (err == ESP_OK) {
+            s_inventory_version = next_snapshot;
+        }
+    }
+    cJSON_Delete(root);
+    if (repaired_count) {
+        *repaired_count = count;
+    }
+    return err;
+}
+
 esp_err_t fridge_storage_get_inventory_sync_status(fridge_storage_inventory_sync_status_t *out)
 {
     ESP_RETURN_ON_FALSE(out, ESP_ERR_INVALID_ARG, TAG, "inventory sync status output is NULL");
@@ -902,6 +1326,14 @@ esp_err_t fridge_storage_get_inventory_sync_status(fridge_storage_inventory_sync
         out->snapshot_version = s_inventory_version;
     }
     cJSON_Delete(root);
+    return ESP_OK;
+}
+
+esp_err_t fridge_storage_get_inventory_snapshot_version(uint32_t *out_version)
+{
+    ESP_RETURN_ON_FALSE(out_version, ESP_ERR_INVALID_ARG, TAG, "inventory version output is NULL");
+    ESP_RETURN_ON_ERROR(fridge_storage_init(), TAG, "storage init failed");
+    *out_version = s_inventory_version;
     return ESP_OK;
 }
 
@@ -929,7 +1361,6 @@ esp_err_t fridge_storage_apply_inventory_cloud_snapshot(const char *inventory_js
     ESP_RETURN_ON_FALSE(root, ESP_ERR_INVALID_ARG, TAG, "cloud inventory json invalid");
     fridge_storage_inventory_sync_status_t local = {0};
     (void)fridge_storage_get_inventory_sync_status(&local);
-    int64_t incoming_updated_at_ms = storage_json_i64(root, "updatedAtMs", "updated_at_ms", 0);
     if (server_revision == 0 && local.updated_at_ms > 0) {
         // 云端还没有真实同步修订（server_revision==0）时，绝不允许默认/空快照覆盖设备本地数据。
         // 注意：这里不再要求 !local.dirty。即使本地是刚 restore_seed 的 dirty 演示数据，
@@ -941,29 +1372,78 @@ esp_err_t fridge_storage_apply_inventory_cloud_snapshot(const char *inventory_js
         cJSON_Delete(root);
         return ESP_OK;
     }
-    if (local.dirty && incoming_updated_at_ms > 0 && local.updated_at_ms > incoming_updated_at_ms) {
-        // 本地 UI 已确认的新修改比云端快照更新，按后写覆盖策略保留设备侧脏数据。
+    esp_err_t err = storage_preserve_local_custom_zones(root);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "preserve custom zones failed: %s", esp_err_to_name(err));
         cJSON_Delete(root);
+        return err;
+    }
+    (void)storage_repair_inventory_root_quantities(root);
+    if (local.dirty) {
+        // 设备本地 updatedAtMs 是开机相对毫秒，云端 updatedAtMs 是 Unix epoch 毫秒，二者不能比较。
+        // 本地存在未确认修改时，只在云端回写与 UI 可见内容等价时清 dirty；不同内容一律保留设备快照继续上报。
+        cJSON *local_root = NULL;
+        err = storage_load_ui_inventory_root(&local_root);
+        if (err != ESP_OK || !local_root) {
+            cJSON_Delete(root);
+            cJSON_Delete(local_root);
+            return err == ESP_OK ? ESP_ERR_INVALID_STATE : err;
+        }
+        (void)storage_repair_inventory_root_quantities(local_root);
+        if (!storage_inventory_documents_equivalent(local_root, root)) {
+            ESP_LOGW(TAG,
+                     "keep local dirty inventory; reject cloud overwrite server_rev=%" PRIu32 " local_rev=%" PRIu32,
+                     server_revision,
+                     local.server_revision);
+            cJSON_Delete(local_root);
+            cJSON_Delete(root);
+            return ESP_OK;
+        }
+        uint32_t synced_revision = server_revision > local.server_revision ? server_revision : local.server_revision;
+        err = storage_update_inventory_sync_meta(local_root,
+                                                 local.snapshot_version > 0 ? local.snapshot_version : s_inventory_version,
+                                                 synced_revision,
+                                                 local.updated_at_ms,
+                                                 storage_now_ms(),
+                                                 false,
+                                                 (home_id && home_id[0]) ? home_id : local.home_id,
+                                                 (device_id && device_id[0]) ? device_id : local.device_id);
+        if (err == ESP_OK) {
+            err = storage_print_json_to_file(local_root);
+        }
+        cJSON_Delete(local_root);
+        cJSON_Delete(root);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "mark equivalent dirty inventory synced failed: %s", esp_err_to_name(err));
+            return err;
+        }
+        if (applied) {
+            *applied = false;
+        }
         return ESP_OK;
     }
     uint32_t next_snapshot = local.snapshot_version > 0 ? local.snapshot_version + 1 : s_inventory_version + 1;
-    esp_err_t err = storage_update_inventory_sync_meta(root,
-                                                       next_snapshot,
-                                                       server_revision,
-                                                       storage_now_ms(),
-                                                       storage_now_ms(),
-                                                       false,
-                                                       (home_id && home_id[0]) ? home_id : local.home_id,
-                                                       (device_id && device_id[0]) ? device_id : local.device_id);
+    err = storage_update_inventory_sync_meta(root,
+                                             next_snapshot,
+                                             server_revision,
+                                             storage_now_ms(),
+                                             storage_now_ms(),
+                                             false,
+                                             (home_id && home_id[0]) ? home_id : local.home_id,
+                                             (device_id && device_id[0]) ? device_id : local.device_id);
     if (err == ESP_OK) {
         err = storage_print_json_to_file(root);
     }
-    cJSON_Delete(root);
-    ESP_RETURN_ON_ERROR(err, TAG, "apply cloud inventory failed");
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "apply cloud inventory failed: %s", esp_err_to_name(err));
+        cJSON_Delete(root);
+        return err;
+    }
     s_inventory_version = next_snapshot;
     if (applied) {
         *applied = true;
     }
+    cJSON_Delete(root);
     return ESP_OK;
 }
 
@@ -1036,6 +1516,30 @@ esp_err_t fridge_storage_set_recipe_cache(const char *recipe_json)
 {
     // 菜谱缓存来自 AI 推荐结果，保存为 JSON 文档供离线页和后续 UI 页面读取。
     return storage_write_json_document(STORAGE_RECIPE_CACHE_PATH, recipe_json, FRIDGE_STORAGE_MAX_JSON_LEN);
+}
+
+esp_err_t fridge_storage_get_nutrition_cache(char *out, size_t out_size)
+{
+    ESP_RETURN_ON_ERROR(fridge_storage_init(), TAG, "storage init failed");
+    return storage_read_or_create_text_file(STORAGE_NUTRITION_CACHE_PATH, NUTRITION_CACHE_JSON, out, out_size);
+}
+
+esp_err_t fridge_storage_set_nutrition_cache(const char *nutrition_json)
+{
+    // 营养助手缓存仅用于屏幕展示生活化建议，不写入库存，也不替代专业营养判断。
+    return storage_write_json_document(STORAGE_NUTRITION_CACHE_PATH, nutrition_json, FRIDGE_STORAGE_MAX_JSON_LEN);
+}
+
+esp_err_t fridge_storage_get_kitchen_ai_meta(char *out, size_t out_size)
+{
+    ESP_RETURN_ON_ERROR(fridge_storage_init(), TAG, "storage init failed");
+    return storage_read_or_create_text_file(STORAGE_KITCHEN_AI_META_PATH, KITCHEN_AI_META_JSON, out, out_size);
+}
+
+esp_err_t fridge_storage_set_kitchen_ai_meta(const char *meta_json)
+{
+    // 每日生成节流状态写入 Flash，后台任务只在自动尝试或成功生成时更新，避免高频磨损。
+    return storage_write_json_document(STORAGE_KITCHEN_AI_META_PATH, meta_json, FRIDGE_STORAGE_MAX_JSON_LEN);
 }
 
 esp_err_t fridge_storage_get_memory_summary(char *out, size_t out_size)
@@ -1281,11 +1785,18 @@ esp_err_t fridge_storage_append_chat_messages(const fridge_storage_chat_message_
         ESP_RETURN_ON_ERROR(err, TAG, "get chat history before append failed");
     }
 
-    fridge_storage_chat_message_t prepared[FRIDGE_STORAGE_MAX_CHAT_MESSAGES] = {0};
+    // 单条消息接近 1KB，最多 30 条时本地数组会吃掉 20KB+ 任务栈；
+    // USB/语音 AI 返回路径会马上写历史，必须放到堆上，避免栈破坏在 LittleFS flash yield 时暴露。
+    fridge_storage_chat_message_t *prepared = calloc(message_count, sizeof(*prepared));
+    if (!prepared) {
+        free(history);
+        ESP_RETURN_ON_FALSE(false, ESP_ERR_NO_MEM, TAG, "allocate prepared messages failed");
+    }
     for (size_t i = 0; i < message_count; i++) {
         fridge_storage_chat_message_t next = {0};
         err = storage_prepare_message(&messages[i], &next);
         if (err != ESP_OK) {
+            free(prepared);
             free(history);
             ESP_RETURN_ON_ERROR(err, TAG, "prepare chat message failed");
         }
@@ -1307,7 +1818,10 @@ esp_err_t fridge_storage_append_chat_messages(const fridge_storage_chat_message_
     history->time_ready = true;
     err = storage_write_history_file(history);
     free(history);
-    ESP_RETURN_ON_ERROR(err, TAG, "write chat history failed");
+    if (err != ESP_OK) {
+        free(prepared);
+        ESP_RETURN_ON_ERROR(err, TAG, "write chat history failed");
+    }
 
     if (message_count >= 2) {
         fridge_storage_chat_message_t *assistant_message = &prepared[message_count - 1];
@@ -1333,6 +1847,7 @@ esp_err_t fridge_storage_append_chat_messages(const fridge_storage_chat_message_
         }
     }
 
+    free(prepared);
     if (pruned_count) {
         *pruned_count = pruned;
     }
@@ -1352,7 +1867,74 @@ esp_err_t fridge_storage_clear_chat_history(void)
     storage_fill_default_history(history);
     esp_err_t err = storage_write_history_file(history);
     free(history);
+    // 清空本地历史时同步把上行游标归零，避免清空后残留游标把后续新对话误判为"已上报"而漏发。
+    if (err == ESP_OK) {
+        (void)fridge_storage_set_chat_synced_at(0);
+    }
     return err;
+}
+
+esp_err_t fridge_storage_get_chat_synced_at(int64_t *out_ms)
+{
+    ESP_RETURN_ON_FALSE(out_ms, ESP_ERR_INVALID_ARG, TAG, "chat synced cursor output is NULL");
+    *out_ms = 0;
+    ESP_RETURN_ON_ERROR(fridge_storage_init(), TAG, "storage init failed");
+
+    nvs_handle_t handle;
+    esp_err_t err = open_storage_nvs(NVS_READONLY, &handle);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        // 命名空间尚未创建时视为"还没上报过"，返回 0 让首轮对话全量补发。
+        return ESP_OK;
+    }
+    ESP_RETURN_ON_ERROR(err, TAG, "open storage NVS for chat cursor failed");
+    int64_t synced_at = 0;
+    if (nvs_get_i64(handle, STORAGE_NVS_KEY_CHAT_SYNCED_AT, &synced_at) == ESP_OK && synced_at > 0) {
+        *out_ms = synced_at;
+    }
+    nvs_close(handle);
+    return ESP_OK;
+}
+
+esp_err_t fridge_storage_set_chat_synced_at(int64_t ms)
+{
+    ESP_RETURN_ON_ERROR(fridge_storage_init(), TAG, "storage init failed");
+    nvs_handle_t handle;
+    ESP_RETURN_ON_ERROR(open_storage_nvs(NVS_READWRITE, &handle), TAG, "open storage NVS for chat cursor failed");
+    esp_err_t err = nvs_set_i64(handle, STORAGE_NVS_KEY_CHAT_SYNCED_AT, ms > 0 ? ms : 0);
+    if (err == ESP_OK) {
+        err = nvs_commit(handle);
+    }
+    nvs_close(handle);
+    return err;
+}
+
+esp_err_t fridge_storage_get_chat_history_since(int64_t after_ms, fridge_storage_chat_history_t *out)
+{
+    ESP_RETURN_ON_FALSE(out, ESP_ERR_INVALID_ARG, TAG, "chat history since output is NULL");
+
+    // 复用全量读取（含过期/超量裁剪），再按 created_at 过滤出尚未上报的增量，保持原有顺序。
+    fridge_storage_chat_history_t *full = calloc(1, sizeof(*full));
+    ESP_RETURN_ON_FALSE(full, ESP_ERR_NO_MEM, TAG, "allocate chat history since buffer failed");
+    esp_err_t err = fridge_storage_get_chat_history(full, NULL);
+    if (err != ESP_OK) {
+        free(full);
+        ESP_RETURN_ON_ERROR(err, TAG, "read chat history for delta failed");
+    }
+
+    memset(out, 0, sizeof(*out));
+    out->schema_version = full->schema_version;
+    out->updated_at = full->updated_at;
+    out->ttl_seconds = full->ttl_seconds;
+    out->max_messages = full->max_messages;
+    out->time_ready = full->time_ready;
+    out->count = 0;
+    for (size_t i = 0; i < full->count && i < FRIDGE_STORAGE_MAX_CHAT_MESSAGES; i++) {
+        if (full->messages[i].created_at > after_ms && full->messages[i].content[0] != '\0') {
+            out->messages[out->count++] = full->messages[i];
+        }
+    }
+    free(full);
+    return ESP_OK;
 }
 
 esp_err_t fridge_storage_get_offline_queue_summary(char *out, size_t out_size)

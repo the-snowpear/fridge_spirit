@@ -33,6 +33,7 @@ else()
         voice_session
         speaker
         kitchen_tools
+        kitchen_ai
         camera
         wake_word
     )

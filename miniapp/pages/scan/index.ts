@@ -19,9 +19,11 @@ import type {
   ScanResult,
 } from "../../types/models";
 import { RequestError } from "../../utils/request";
+import { formatInventoryQuantity } from "../../utils/quantity";
 
 interface CandidateView extends ScanCandidate {
   viewId: string;
+  quantityText: string;
   busy?: boolean;
   saved?: boolean;
   confidenceClass: "danger" | "warn" | "mint";
@@ -96,6 +98,7 @@ Page({
       const candidates: CandidateView[] = result.candidates.map((c, index) => ({
         ...c,
         viewId: `${c.name}_${c.suggestedZone || "none"}_${c.suggestedSlot || "none"}_${index}`,
+        quantityText: formatInventoryQuantity(c),
         confidenceClass: classifyConfidence(c.confidence),
       }));
       this.setData({
@@ -143,18 +146,15 @@ Page({
       confidence: target.confidence,
     };
     try {
-      const created = await createInventoryItem(payload);
-      enqueueSyncOp("inventory", "scan_create", {
-        item: created,
-        payload,
-        candidate: target,
-      });
+      await createInventoryItem(payload);
+      // 在线 REST 已写库 + 记同步事件 + 推设备，不再入队，避免重复投影。
       void syncNow().catch(() => {
-        // 入库已成功；同步失败时队列保留，离线页可重试。
+        // 入库已成功；同步失败不影响本次入库结果。
       });
       this.patchCandidate(idx, { busy: false, saved: true });
       wx.showToast({ title: "已入库", icon: "success" });
     } catch (err) {
+      // 离线/REST 失败才入队，等待恢复后补写。
       enqueueSyncOp("inventory", "scan_create_pending", {
         payload,
         candidate: target,
@@ -188,15 +188,12 @@ Page({
         confidence: candidate.confidence,
       };
       try {
-        const created = await createInventoryItem(payload);
-        enqueueSyncOp("inventory", "scan_create", {
-          item: created,
-          payload,
-          candidate,
-        });
+        await createInventoryItem(payload);
+        // 在线 REST 已写库 + 记同步事件 + 推设备，不再入队，避免重复投影。
         okCount += 1;
         this.patchCandidate(index, { busy: false, saved: true });
       } catch {
+        // 离线/REST 失败才入队，等待恢复后补写。
         enqueueSyncOp("inventory", "scan_create_pending", {
           payload,
           candidate,

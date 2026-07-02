@@ -15,6 +15,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_psram.h"
+#include "fridge_sensors.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/portmacro.h"
@@ -33,7 +34,9 @@
 #define CAM_LOW_LIGHT_MAX_GAIN_X100 240
 #define CAM_LOW_LIGHT_CHROMA_X100 78
 #define CAM_AI_FULLRES_JPEG_QUALITY 82
+#define CAM_AI_CAPTURE_RETRY_COUNT 3
 #define CAM_LOCK_TIMEOUT_MS 15000
+#define CAM_I2C_LOCK_TIMEOUT_MS 30000
 
 typedef struct {
     framesize_t frame_size;
@@ -43,10 +46,8 @@ typedef struct {
 } cam_ai_capture_option_t;
 
 static const cam_ai_capture_option_t CAM_AI_CAPTURE_OPTIONS[] = {
-    // 成品路径使用当前实测最高稳定档 XGA。QXGA 会 SCCB 寄存器写失败，UXGA/SXGA 首帧超时，
-    // 如果完整 UI 场景下 XGA 临时失败，继续降级到 VGA/QVGA，优先保证“能拍照上传给 AI”。
-    {FRAMESIZE_XGA, "XGA", "ai xga software jpeg", 3U * 1024U * 1024U},
-    {FRAMESIZE_VGA, "VGA", "ai vga software jpeg", 2U * 1024U * 1024U},
+    // 完整 UI + Wi-Fi/MQTT 场景下内部 DMA 最大连续块常只有 4KB；
+    // XGA/VGA 会在 esp32-camera 的 DMA 节点/帧同步阶段不稳定，成品路径先固定 QVGA 保证可用。
     {FRAMESIZE_QVGA, "QVGA", "ai qvga software jpeg", 1U * 1024U * 1024U},
 };
 
@@ -245,6 +246,46 @@ static esp_err_t probe_read_reg16(uint8_t addr, uint16_t reg, uint8_t *value)
         value,
         1,
         pdMS_TO_TICKS(CAM_PROBE_TIMEOUT_MS));
+}
+
+static esp_err_t wake_camera_sensor_for_capture(const char *reason)
+{
+    // 部分 OV3660 模组上电后第一次完整 esp_camera_init 会偶发 ESP_FAIL；
+    // 实机验证：先给 XCLK 并经 SCCB 读一次 PID，可让后续 DVP 初始化稳定成功。
+    esp_err_t err = probe_xclk_start();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "%s wake XCLK failed: %s", reason ? reason : "camera", esp_err_to_name(err));
+        return err;
+    }
+    vTaskDelay(pdMS_TO_TICKS(20));
+
+    err = probe_i2c_start();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "%s wake SCCB start failed: %s", reason ? reason : "camera", esp_err_to_name(err));
+        probe_xclk_stop();
+        return err;
+    }
+
+    uint8_t pid_h = 0xff;
+    uint8_t pid_l = 0xff;
+    err = probe_read_reg16(CAM_PROBE_SCCB_ADDR, CAM_PROBE_PID_HIGH_REG, &pid_h);
+    if (err == ESP_OK) {
+        err = probe_read_reg16(CAM_PROBE_SCCB_ADDR, CAM_PROBE_PID_LOW_REG, &pid_l);
+    }
+
+    probe_i2c_stop();
+    probe_xclk_stop();
+    if (err == ESP_OK) {
+        uint16_t pid = ((uint16_t)pid_h << 8) | pid_l;
+        if (pid != CAM_PROBE_EXPECTED_PID) {
+            ESP_LOGW(TAG, "%s wake PID mismatch: 0x%04x", reason ? reason : "camera", pid);
+            return ESP_ERR_NOT_FOUND;
+        }
+        ESP_LOGI(TAG, "%s wake probe ok: pid=0x%04x", reason ? reason : "camera", pid);
+    } else {
+        ESP_LOGW(TAG, "%s wake probe failed: %s", reason ? reason : "camera", esp_err_to_name(err));
+    }
+    return err;
 }
 
 static void release_frame(void)
@@ -720,14 +761,39 @@ static void fill_camera_config(camera_config_t *config, pixformat_t pixel_format
     config->grab_mode = CAMERA_GRAB_WHEN_EMPTY;
 }
 
+static void log_camera_heap_before_init(const char *mode_name)
+{
+    // 摄像头 DVP DMA 需要连续 DMA 能力内存；S3 开启 PSRAM DMA 后可避免完整 UI 固件中抢占内部 SRAM。
+    ESP_LOGI(TAG,
+             "%s heap before init: largest_dma=%u, largest_internal=%u, largest_psram=%u, free_internal=%u, free_psram=%u",
+             mode_name ? mode_name : "camera",
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DMA),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+}
+
 static esp_err_t init_raw_camera(pixformat_t pixel_format, framesize_t frame_size, bool diag_mode, const char *mode_name)
 {
     // 原始帧路径已在实机诊断中验证能成帧；普通预览先用软件 JPEG 绕过 OV3660 片上 JPEG 编码不稳定问题。
     camera_config_t config;
     fill_camera_config(&config, pixel_format, frame_size);
 
+    log_camera_heap_before_init(mode_name);
+    // OV3660 reset/init 会连续写大量 SCCB 寄存器；正常 UI 固件里 GPIO4/GPIO5 还挂着 IMU 和触摸，
+    // 这里短暂独占共享 I2C0，避免传感器轮询插队导致 Camera probe/reset ESP_FAIL。
+    esp_err_t i2c_lock_err = fridge_sensors_i2c_lock(CAM_I2C_LOCK_TIMEOUT_MS);
+    if (i2c_lock_err != ESP_OK) {
+        snprintf(s_last_error, sizeof(s_last_error), "%s shared I2C lock failed: %s", mode_name, esp_err_to_name(i2c_lock_err));
+        ESP_LOGE(TAG, "%s", s_last_error);
+        return i2c_lock_err;
+    }
     esp_err_t err = esp_camera_init(&config);
     if (err != ESP_OK) {
+        fridge_sensors_i2c_unlock();
+        reset_camera_state_after_init_failure();
+        vTaskDelay(pdMS_TO_TICKS(80));
         snprintf(s_last_error, sizeof(s_last_error), "%s esp_camera_init failed: %s", mode_name, esp_err_to_name(err));
         ESP_LOGE(TAG, "%s", s_last_error);
         return err;
@@ -744,6 +810,7 @@ static esp_err_t init_raw_camera(pixformat_t pixel_format, framesize_t frame_siz
         sensor->set_framesize(sensor, frame_size);
     }
     apply_auto_image_controls(mode_name);
+    fridge_sensors_i2c_unlock();
     err = warmup_frames(mode_name, CAM_RAW_WARMUP_FRAME_COUNT);
     if (err != ESP_OK) {
         reset_camera_state_after_init_failure();
@@ -760,8 +827,18 @@ static esp_err_t init_hardware_jpeg_camera(void)
     fill_camera_config(&config, PIXFORMAT_JPEG, FRAMESIZE_HD);
     config.jpeg_quality = 12;
 
+    log_camera_heap_before_init("hardware jpeg");
+    esp_err_t i2c_lock_err = fridge_sensors_i2c_lock(CAM_I2C_LOCK_TIMEOUT_MS);
+    if (i2c_lock_err != ESP_OK) {
+        snprintf(s_last_error, sizeof(s_last_error), "hardware jpeg shared I2C lock failed: %s", esp_err_to_name(i2c_lock_err));
+        ESP_LOGE(TAG, "%s", s_last_error);
+        return i2c_lock_err;
+    }
     esp_err_t err = esp_camera_init(&config);
     if (err != ESP_OK) {
+        fridge_sensors_i2c_unlock();
+        reset_camera_state_after_init_failure();
+        vTaskDelay(pdMS_TO_TICKS(80));
         snprintf(s_last_error, sizeof(s_last_error), "hardware jpeg esp_camera_init failed: %s", esp_err_to_name(err));
         ESP_LOGE(TAG, "%s", s_last_error);
         return err;
@@ -782,6 +859,7 @@ static esp_err_t init_hardware_jpeg_camera(void)
         }
     }
     apply_auto_image_controls("hardware jpeg");
+    fridge_sensors_i2c_unlock();
     err = warmup_frames("hardware jpeg", CAM_JPEG_WARMUP_FRAME_COUNT);
     if (err != ESP_OK) {
         reset_camera_state_after_init_failure();
@@ -1027,7 +1105,7 @@ esp_err_t fridge_camera_capture_ai_fullres(void)
         return lock_err;
     }
     esp_err_t ret = ESP_OK;
-    // AI 识别使用实测稳定的高分辨率 XGA，串口预览仍保持 QVGA。
+    // AI 识别当前使用完整 UI 场景下实测稳定的 QVGA，串口预览同样保持 QVGA。
     // 这里抓到 JPEG 后立即反初始化 DMA/帧缓冲，给后续 base64 和 HTTPS 请求释放 PSRAM。
     // QXGA/UXGA/SXGA 当前在该排线和驱动组合下不稳定，不进入成品主路径，避免用户每次识别都等待失败重试。
     if (s_initialized) {
@@ -1042,6 +1120,7 @@ esp_err_t fridge_camera_capture_ai_fullres(void)
         goto finish;
     }
 
+    (void)wake_camera_sensor_for_capture("AI capture");
     int64_t start_us = esp_timer_get_time();
     esp_err_t last_err = ESP_ERR_NO_MEM;
     char last_reason[FRIDGE_CAMERA_MAX_ERROR_LEN + 1] = {0};
@@ -1060,15 +1139,24 @@ esp_err_t fridge_camera_capture_ai_fullres(void)
             continue;
         }
 
-        ESP_LOGI(TAG,
-                 "AI capture try %s: free_psram=%uKB, software JPEG quality=%u",
-                 option->label,
-                 (unsigned)(free_psram / 1024),
-                 CAM_AI_FULLRES_JPEG_QUALITY);
-        last_err = init_raw_camera(PIXFORMAT_YUV422, option->frame_size, false, option->mode_name);
-        if (last_err != ESP_OK) {
+        last_err = ESP_FAIL;
+        for (int attempt = 1; attempt <= CAM_AI_CAPTURE_RETRY_COUNT; attempt++) {
+            ESP_LOGI(TAG,
+                     "AI capture try %s attempt %d/%d: free_psram=%uKB, software JPEG quality=%u",
+                     option->label,
+                     attempt,
+                     CAM_AI_CAPTURE_RETRY_COUNT,
+                     (unsigned)(free_psram / 1024),
+                     CAM_AI_FULLRES_JPEG_QUALITY);
+            last_err = init_raw_camera(PIXFORMAT_YUV422, option->frame_size, false, option->mode_name);
+            if (last_err == ESP_OK) {
+                break;
+            }
             strlcpy(last_reason, s_last_error, sizeof(last_reason));
             (void)fridge_camera_reset();
+            vTaskDelay(pdMS_TO_TICKS(180));
+        }
+        if (last_err != ESP_OK) {
             continue;
         }
 

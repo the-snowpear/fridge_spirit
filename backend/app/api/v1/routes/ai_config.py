@@ -62,7 +62,10 @@ async def write_ai_config(
         user_id=user.id,
         domain="ai_config",
         op="upsert",
-        payload=payload.model_dump(mode="json", exclude_none=True, by_alias=True),
+        payload={
+            **payload.model_dump(mode="json", exclude_none=True, by_alias=True),
+            "configUpdatedAt": int(data.config_updated_at.timestamp() * 1000) if data.config_updated_at else 0,
+        },
     )
     await db.commit()
 

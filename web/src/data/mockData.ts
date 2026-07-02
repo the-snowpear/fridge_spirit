@@ -95,6 +95,7 @@ export function createMockAIConfig(): AIConfig {
     model: "gpt-4o-mini",
     systemPrompt: "你是冰箱小精灵的开发测试助手，请用简短中文回答。",
     timeoutMs: 30000,
+    apiFormat: 0,
     hasApiKey: false,
     apiKeyPreview: "",
     lastError: "",
@@ -332,7 +333,8 @@ export function createMockSensors(): SensorSnapshot {
     pitchDeg: Number((Math.random() * 3 - 1.5).toFixed(2)),
     rollDeg: Number((Math.random() * 3 - 1.5).toFixed(2)),
     angleDelta: Number((1.2 + Math.random() * 3).toFixed(1)),
-    vibrationPeak: Number((Math.max(Math.abs(accelX), Math.abs(accelY), Math.abs(accelZ)).toFixed(4))),
+    // 震动峰值与固件保持一致：去重力的动态加速度 |‖a‖ - 1g|，静止时约等于 0。
+    vibrationPeak: Number(Math.abs(Math.sqrt(accelX * accelX + accelY * accelY + accelZ * accelZ) - 1).toFixed(4)),
     radar: createMockRadar(),
     touch: "FT6336U idle / addr 0x38",
     display: "TR230S QSPI planned / line buffer",

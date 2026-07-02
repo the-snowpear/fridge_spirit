@@ -13,6 +13,7 @@
 #include "esp_timer.h"
 #include "fridge_radar.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
@@ -38,9 +39,51 @@ static const char *TAG = "fridge_sensors";
 
 static adc_oneshot_unit_handle_t s_adc_unit;
 static SemaphoreHandle_t s_lock;
+static SemaphoreHandle_t s_i2c_lock;
+static portMUX_TYPE s_i2c_lock_init_lock = portMUX_INITIALIZER_UNLOCKED;
 static fridge_sensor_snapshot_t s_snapshot;
 static bool s_initialized;
 static bool s_imu_bus_ready;
+
+static esp_err_t ensure_i2c_lock_created(void)
+{
+    if (s_i2c_lock) {
+        return ESP_OK;
+    }
+
+    SemaphoreHandle_t lock = xSemaphoreCreateRecursiveMutex();
+    if (!lock) {
+        return ESP_ERR_NO_MEM;
+    }
+    taskENTER_CRITICAL(&s_i2c_lock_init_lock);
+    if (!s_i2c_lock) {
+        s_i2c_lock = lock;
+        lock = NULL;
+    }
+    taskEXIT_CRITICAL(&s_i2c_lock_init_lock);
+    if (lock) {
+        vSemaphoreDelete(lock);
+    }
+    return ESP_OK;
+}
+
+esp_err_t fridge_sensors_i2c_lock(uint32_t timeout_ms)
+{
+    // GPIO4/GPIO5 是项目共享 I2C0/SCCB 总线；摄像头初始化和触摸/IMU 采样必须串行化。
+    esp_err_t err = ensure_i2c_lock_created();
+    if (err != ESP_OK) {
+        return err;
+    }
+    TickType_t ticks = timeout_ms == UINT32_MAX ? portMAX_DELAY : pdMS_TO_TICKS(timeout_ms);
+    return xSemaphoreTakeRecursive(s_i2c_lock, ticks) == pdTRUE ? ESP_OK : ESP_ERR_TIMEOUT;
+}
+
+void fridge_sensors_i2c_unlock(void)
+{
+    if (s_i2c_lock) {
+        xSemaphoreGiveRecursive(s_i2c_lock);
+    }
+}
 
 static uint16_t clamp_light_raw(int raw)
 {
@@ -63,12 +106,24 @@ static uint16_t raw_to_brightness_10bit(int raw)
 
 static esp_err_t imu_write_reg(uint8_t reg, uint8_t value)
 {
-    return i2c_master_write_to_device(FRIDGE_IMU_I2C_PORT, FRIDGE_IMU_DEFAULT_ADDR, (uint8_t[]){reg, value}, 2, pdMS_TO_TICKS(100));
+    esp_err_t lock_err = fridge_sensors_i2c_lock(200);
+    if (lock_err != ESP_OK) {
+        return lock_err;
+    }
+    esp_err_t err = i2c_master_write_to_device(FRIDGE_IMU_I2C_PORT, FRIDGE_IMU_DEFAULT_ADDR, (uint8_t[]){reg, value}, 2, pdMS_TO_TICKS(100));
+    fridge_sensors_i2c_unlock();
+    return err;
 }
 
 static esp_err_t imu_read_bytes(uint8_t reg, uint8_t *data, size_t len)
 {
-    return i2c_master_write_read_device(FRIDGE_IMU_I2C_PORT, FRIDGE_IMU_DEFAULT_ADDR, &reg, 1, data, len, pdMS_TO_TICKS(100));
+    esp_err_t lock_err = fridge_sensors_i2c_lock(200);
+    if (lock_err != ESP_OK) {
+        return lock_err;
+    }
+    esp_err_t err = i2c_master_write_read_device(FRIDGE_IMU_I2C_PORT, FRIDGE_IMU_DEFAULT_ADDR, &reg, 1, data, len, pdMS_TO_TICKS(100));
+    fridge_sensors_i2c_unlock();
+    return err;
 }
 
 static float accel_lsb_to_g(int16_t raw)
@@ -208,7 +263,14 @@ static esp_err_t imu_read_sample(fridge_sensor_snapshot_t *snapshot)
     snapshot->pitch_deg = atan2f(snapshot->accel_y_g, sqrtf((snapshot->accel_x_g * snapshot->accel_x_g) + (snapshot->accel_z_g * snapshot->accel_z_g))) * (180.0f / FRIDGE_PI);
     snapshot->roll_deg = atan2f(-snapshot->accel_x_g, snapshot->accel_z_g) * (180.0f / FRIDGE_PI);
     snapshot->angle_delta = fabsf(snapshot->pitch_deg) + fabsf(snapshot->roll_deg);
-    snapshot->vibration_peak = fmaxf(fmaxf(fabsf(snapshot->accel_x_g), fabsf(snapshot->accel_y_g)), fabsf(snapshot->accel_z_g));
+    // 震动峰值 = 去重力的动态加速度：先算三轴合力模长，再减去 1g 静止基线。
+    // 旧实现直接取三轴绝对值最大，静止时约等于 1g（重力分量），会被上层状态机误判成“一直在运动”，
+    // 导致开关门状态机永远卡在运动态。这里改为 |‖a‖ - 1g|：静止时约等于 0，只有真正震动/运动时才抬升，
+    // 与架构文档“加速度模长短时峰值”的定义一致；Web 面板“震动峰值”读数也会从约 1.0 变为静止时约 0。
+    float accel_magnitude = sqrtf((snapshot->accel_x_g * snapshot->accel_x_g) +
+                                  (snapshot->accel_y_g * snapshot->accel_y_g) +
+                                  (snapshot->accel_z_g * snapshot->accel_z_g));
+    snapshot->vibration_peak = fabsf(accel_magnitude - 1.0f);
     snapshot->imu_error = 0;
     snapshot->imu_ready = true;
     snapshot->imu_address = FRIDGE_IMU_DEFAULT_ADDR;
@@ -283,6 +345,10 @@ esp_err_t fridge_sensors_init(void)
     if (!s_lock) {
         return ESP_ERR_NO_MEM;
     }
+    esp_err_t lock_err = ensure_i2c_lock_created();
+    if (lock_err != ESP_OK) {
+        return lock_err;
+    }
 
     // GPIO1 是 ESP32-S3 的 ADC1_CH0。这里只读取模拟输入，不输出电平，避免对光敏模块反灌电。
     // 当前实测光敏模块为反向输出：ADC 原始值越高越暗，业务快照会换算成“亮度越高数值越高”。
@@ -314,7 +380,15 @@ esp_err_t fridge_sensors_init(void)
         ESP_LOGW(TAG, "mpu6050 init failed: %s", esp_err_to_name(err));
     }
 
-    BaseType_t ok = xTaskCreate(sensor_task, "sensor_task", SENSOR_TASK_STACK, NULL, 5, NULL);
+    // 传感器任务只周期读取 ADC/I2C 并更新快照，不在循环内写 Flash；
+    // 栈放 PSRAM 可为 LVGL、Wi-Fi/TLS 和 AI 生成保留更多内部 SRAM。
+    BaseType_t ok = xTaskCreateWithCaps(sensor_task,
+                                        "sensor_task",
+                                        SENSOR_TASK_STACK,
+                                        NULL,
+                                        5,
+                                        NULL,
+                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (ok != pdPASS) {
         return ESP_ERR_NO_MEM;
     }

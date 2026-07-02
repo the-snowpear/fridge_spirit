@@ -39,6 +39,7 @@ esp_err_t fridge_ui_set_page_async(fridge_ui_page_t page, const char *toast);
 bool fridge_ui_page_from_key(const char *key, fridge_ui_page_t *out);
 esp_err_t fridge_ui_set_brightness(uint8_t percent);
 void fridge_ui_request_standby(void);
+void fridge_ui_note_activity(void);
 
 #ifdef __cplusplus
 }
