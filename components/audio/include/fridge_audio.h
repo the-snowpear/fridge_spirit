@@ -38,8 +38,10 @@ typedef struct {
     char error[128];
 } fridge_audio_status_t;
 
-// 初始化 INMP441 I2S RX。
-// 硬件约束：VDD 接 3.3V，SCK=GPIO40，WS=GPIO41，SD=GPIO42，L/R 默认接 GND 选择左声道。
+// 初始化麦克风采集链路。
+// P4：板载驻极体 MIC + ES8311，I2C1=GPIO28/29、I2S0=GPIO2-6，输出 16kHz/16-bit/mono PCM；
+//      录音期间持续持有摄像头共享 I2C gate，PA_CTRL=GPIO11 始终保持低。
+// S3 存档：外接 INMP441，SCK=GPIO40、WS=GPIO41、SD=GPIO42、L/R=GND。
 esp_err_t fridge_audio_init(void);
 
 // 开始录音；录音缓冲优先使用 PSRAM，最长 6 秒，避免占用过多内部 RAM。

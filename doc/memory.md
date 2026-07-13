@@ -143,3 +143,123 @@
 - **启动敏感脚**：GPIO35(BOOT)、GPIO36（10K 上拉）是启动绑带脚；GPIO0/GPIO1 被 32.768KHz 晶振占用。
 - **串口**：新板 CH343P USB 串口（UART0=GPIO37/38）+ 独立 USB-C JTAG 口，COM 号待首次接板后在设备管理器确认并回填本文件；COM16 属旧 S3 板，不要再用。
 - 厂商资料位置：`doc/慧勤智远 ESP32-P4 CB V1.2小系统板/`（约 2.7GB，已 gitignore，禁止删除）；引脚分配以用户手册 V1.4 §1.5 为准。
+
+----
+
+## 2026-07-11 P4 第一阶段最小移植记忆（软件已构建，真机未验证）
+
+- 当前 P4 最小固件版本为 `p4-minimal-20260711`，目标是板载 C6 Wi-Fi、板载 ES8311 麦克风、TR230S QSPI 静态色带和 TF 基础读写。完成 OTA 健康确认和 SDMMC 共享控制器修复后，ESP-IDF 6.0.1 从空 `build/` 目录干净构建通过，镜像 0xCB4B0（832,688 字节）；这不是硬件通过结论。
+- P4 的 Wi-Fi 固定为 C6 + SDIO Slot1：CMD=47、CLK=48、D0-D3=49-52、C6_EN/复位=54，LDO4=3.3V；当前组件版本与厂商例程一致，为 `esp_hosted 2.2.3` / `esp_wifi_remote 0.15.0`。真机仍需核对 C6 slave 固件握手版本。
+- TF 固定使用 SDMMC Slot0：D0-D3=39-42、CLK=43、CMD=44、GPIO45 低电平供电。P4 只有一个 SDMMC 控制器，TF 必须复用 hosted 为 Slot1 建立的 host，只新增/释放 Slot0，不能二次初始化或整体反初始化控制器。hosted 必须先成功持有 LDO4，TF 组件不能再次申请该可调 LDO；hosted 失败时本次启动跳过 TF。64GB 卡不自动格式化，只有 `confirm:"ERASE_TF_CARD"` 才允许清卡。
+- 板载 ES8311：I2S0 MCLK=2、P4 DOUT=3、BCLK=4、ES8311 ASDOUT/P4 DIN=5、WS=6；I2C 为 SDA=28/SCL=29，PA_CTRL=11 必须保持低。GPIO28/29 与未来 OV5647 SCCB 共线，录音期间由统一 owner gate 独占，不能同时拍照。
+- TR230S QSPI 飞线：CS=GPIO7、D0=8、SCLK=9、D1=10、WAIT=19、D2=20、D3=21、RST=22，先用 10MHz。屏幕原生 2×7 是 2.00mm，不能硬插 2.54mm 杜邦母头；该接口没有 FT6336U 直接 I2C，触摸默认关闭。
+- P6 正面编号：板中文字正向、P6 位于下方时，靠板边为奇数排、靠 MCU 为偶数排，左侧方形焊盘是 P6-1；背面视角镜像。显示接线完整表见 `doc/P4第一阶段最小移植与接线方案.md`。
+- 最新屏幕方案取代 2026-07-02 的“板载 SPI 座 4-wire”临时想法：为了复用既有 QSPI 驱动，本阶段从 P6 GPIO 飞线到屏幕原生 2×7 或独立 FPC 转接板。TR230S 20-pin FPC 仍严禁直插板载 20-pin SPI 座。
+- 串口启动协议先发 `booting`，只允许静态 `get_pins/get_logs`；所有首阶段外设完成一次初始化尝试后再发 `ready` 并开放硬件命令。网络/hosted 首次初始化失败后，本次启动禁止重入，修正原因后必须重启。
+- 已启用 bootloader OTA rollback；主固件只有在首阶段初始化走完且 USB 控制台健康门通过后，才调用 `esp_ota_mark_app_valid_cancel_rollback()` 确认 `PENDING_VERIFY` 镜像，防止第二次复位被误回滚到 recovery。
+- 当前未识别到 P4 CH343P 新 COM 口；旧 COM16 只属于 S3。没有烧录、没有给屏幕上电、没有格式化 TF，也没有任何 P4 真机“通过”记录。
+- 构建命令继续使用：`powershell -NoProfile -ExecutionPolicy Bypass -File tools\idf.ps1 build`。烧录前必须先确认实际 COM 号，且 Web Serial/monitor/串口助手不能同时占用。
+
+----
+
+## 2026-07-11 TR230S 改为 SPI-4WIRE 并启用 FT6336U（软件已构建，真机未验证）
+
+- 本节取代上一节的 QSPI/2×7 屏幕方案。当前固定使用 **20-pin FPC 转独立杜邦线**，开发板板载 20-pin SPI 屏座必须保持空置。
+- TR230S SPI-4WIRE：CS=GPIO7、MOSI=GPIO8、SCLK=GPIO9、MISO=GPIO10、WAIT#=GPIO19、D/C#=GPIO20、RESET#=GPIO22；GPIO21 已释放。SPI Mode 0，10MHz 起步。
+- FT6336U：TP-INT=GPIO15、TP-SCL=GPIO16、TP-SDA=GPIO17、TP-RST=GPIO18，I2C0 100kHz，实物已知地址 0x48。SDA/SCL 外部上拉到 3.3V；FPC pin19 TP-VCC 按规格保持悬空。
+- 显示驱动已移除 QSPI 的 0x02/0x12 封包和 QIO 事务，改为 D/C# 区分命令与数据；软件手动控制 CS，确保 0x2C 到最后一块 RGB565 像素期间片选连续。
+- `CONFIG_FRIDGE_P4_TOUCH_ENABLE=y` 已写入 defaults 和当前 sdkconfig。P4 最小固件只打印触摸坐标，完整 S3 LVGL UI 尚未迁移。
+- `idf.py reconfigure build` 通过；镜像 0xCBEF0（835,312 字节），SHA-256 `0714C46693409AF143CB18FE4367194D3A08CFFD0926990758759E72D76405D9`，最小 2MiB app 分区剩余约 60%。这不是屏幕或触摸真机通过结论。
+- 权威接线表：`doc/P4_TR230S_SPI4WIRE_FT6336U接线方案.md`。
+
+----
+
+## 2026-07-11 P4 COM15 首次烧录与真机启动结果
+
+- 新板串口已确认：`COM15`，Windows 设备为 `USB VID_1A86&PID_55D3`（CH343 系列）；esptool 识别芯片为 ESP32-P4 rev v1.3，MAC `80:f1:b2:d2:04:85`。旧 COM16 仍只属于 S3。
+- IDF 6 默认生成的 P4 rev v3.1+ 固件与本板 v1.3 不兼容；已在 `sdkconfig.defaults.esp32p4` 固定 `CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y`、最低 rev v1.0，并按板卡标称/厂商例程把 CPU 从不保证稳定的 400MHz 改为 360MHz。
+- CH343 在 esptool RAM stub 阶段会出现 `Invalid head of packet (0xE0)`，460800 和 115200 均可复现；改用 ROM loader `--no-stub`、115200 后烧录成功，四个写入区域均通过 Hash 校验。
+- 本次固件 `build/fridge_spirit.bin` 大小 833,168 字节，SHA-256 `D9666D9B8CE32BC1533A759FC59FBF726ABF3B75C14EEAF18F56BE521B85F156`。
+- 启动验证：CPU 360MHz；32MB HEX PSRAM 200MHz 检出且 memory test OK；16MB Flash 正常；无 brownout、watchdog 或 panic。
+- C6/SDIO：Slot1 GPIO47-52、40MHz 初始化成功，识别 ESP32-C6 并启动 Wi-Fi STA；Host 端 esp_hosted 比 C6 协处理器固件新，日志有版本警告，后续需要匹配 C6 slave 固件。
+- TR230S：SPI-4WIRE 引脚与 10MHz 配置正确，日志显示 `TR230S display ready` 且静态色带刷新完成；屏幕实际画面仍需用户肉眼确认。
+- FT6336U：0x48 读取芯片 ID 返回 `ESP_ERR_INVALID_RESPONSE`，触摸未通过。优先核对 FPC16 SDA→GPIO17、FPC17 SCL→GPIO16、FPC18 RST→GPIO18、FPC20 GND，以及 SDA/SCL 各 4.7k 上拉到 3.3V；FPC19 TP-VCC 继续悬空。
+- ES8311：I2C1 GPIO28/29 和 I2S0 初始化成功，板载麦克风进入 16kHz/16-bit/mono ready 状态，PA 保持关闭。
+- TF：64GB 卡检测路径运行，但 FAT 挂载失败并返回 `formatRequired=true`；没有执行格式化。只有用户明确确认整卡数据可清空后，才能发送 `ERASE_TF_CARD`。
+
+----
+
+## 2026-07-11 TR230S 恢复 S3 已验证的 QSPI-4SDA
+
+- 本节取代同日的 SPI-4WIRE 显示方案。用户确认恢复 S3 点亮方式后，P4 显示驱动重新使用 TR230S 已验证的 `0x02` 寄存器写封包、`0x12` 显存写封包和 `SPI_TRANS_MODE_QIO` 四线像素传输。
+- P4 QSPI 接线固定为：CS=GPIO7、D0=GPIO8、SCLK=GPIO9、D1=GPIO10、WAIT#=GPIO19、D2=GPIO20、D3=GPIO21、RESET#=GPIO22；FPC pin14 D/C# 必须悬空。FT6336U 继续为 INT=15、SCL=16、SDA=17、RST=18。
+- 屏幕 20-pin FPC 仍严禁直插板载 20-pin SPI 座；只能使用独立 FPC 转杜邦板逐线连接。权威表为 `doc/P4_TR230S_QSPI_FT6336U接线方案.md`，旧 SPI-4WIRE 文档已标记停用。
+- QSPI Mode0 继续以 10MHz 起步。ESP-IDF 6.0.1 构建通过，镜像 833,440 字节，SHA-256 `BB6CAD6BA6F4B6AD75497BE09CF626E0467328EAF94F537BE5EDDC2046FE261C`；尚未烧录，因为必须先断电把实物排线由 SPI4 改成 QSPI，避免固件与接线错配。
+- 2026-07-11 19:53 补充真机结果：COM15 使用 ROM loader `--no-stub -b 115200` 烧录成功，四个区域均通过 Hash 校验。启动日志确认 QSPI 引脚、10MHz、TR230S 初始化和静态色带刷新完成；FT6336U 也已读到地址 0x48、chip 0x64、vendor 0x11。屏幕画面仍需要用户肉眼确认。
+- 同次启动 C6 SDIO 卡枚举成功但 hosted slave 未就绪，随后重试路径重复申请 LDO4 失败，网络初始化最终返回 ESP_FAIL，TF 因依赖 hosted/LDO4 被安全跳过；该问题与屏幕 QSPI、触摸无关，后续单独修复。
+
+----
+
+## 2026-07-11 P4/C6 ESP-Hosted 2.12.11 真机稳定结论
+
+- 本节取代同日早先的 C6 版本不匹配和握手失败待办。P4 Host 与板载 C6 Slave 已统一为官方 `esp_hosted 2.12.11`，COM15 的 `get_network` 当前应返回 `hostedReady=true`、`c6OtaGuard=false`、两端版本均为 `2.12.11`。
+- SDIO LDO4 只允许申请一次并在整板生命周期内保留，因为 C6 Slot1 与 TF Slot0 共用该电源域；禁止在 Hosted read task 存活时原地清空或重枚举 card。现场恢复统一发送 `retry_hosted`，由固件延迟 500ms 整板重启。
+- C6 可经 P4 JSON Lines 执行 APP-only 流式 OTA。工具为 `tools/c6_hosted_ota.py`，固定单块 1024 字节，先用 esptool 校验 C6 镜像，再校验总长度、SHA-256、逐块 CRC32；支持匹配会话断点续传。旧 0.0.6 使用 `legacy_end_reboots`，升级后 2.12.11 使用显式激活能力。
+- C6 2.12.11 镜像已真机写入并启动：大小 0x130EC0，SHA-256 `30FC480E297917F319AAFEA5533EAAE848E9173656608C9717269F9697B3B502`，可装入旧分区表 0x180000 OTA slot。不要把 bootloader/partition table 当 APP-only 镜像发送。
+- 稳定性实测为连续 3 轮整板重启 + Hosted 重新握手 + Wi-Fi 扫描，均成功，热点数分别 11/14/8。若后续再次出现 Hosted 故障，先看 `hostedLastError`、brownout 和 5V 供电，再使用 `retry_hosted`，不要恢复旧的热重试路径。
+- Web 管理面板现在可以通过 COM15 配置 Wi-Fi：USB 连接后进入网络页，点击“扫描”，选 2.4GHz SSID、输入密码并点“连接”。真实 AP 扫描已验证；当前设备 NVS 无保存凭据，实际认证、DHCP 和外网状态要在用户提供正确热点密码后验证。
+- 2026-07-11 23:48，64GB TF 已经用户明确授权后格式化成功并挂载为 FAT32：`/sdcard`，容量 59,638 MB、空闲 59,623 MB；写入—读回自检文件 `/sdcard/fridge_selftest.txt` 校验通过。后续不要再把该卡标记为 `formatRequired`，也不要无确认口令重复格式化。
+
+----
+
+## 2026-07-12 TF 卡存储工作台真机结论
+
+- COM15 当前固件已具备完整 TF 文件管理命令族、回收站、UTF-8/CP936 长文件名、1024 字节 CRC32 分块传输、NVS 专家模式、Slot0 安全卸载/挂载和一次性 token HTTP 服务。
+- 真机已验证中文目录/文件、4096 字节二进制上传下载及 Range 跳读、移动、回收/恢复、精确确认保护、自检、64 KiB 测速和诊断包导出；测速结果约写 1954 KiB/s、读 6458 KiB/s。
+- 安全卸载/重新挂载 TF 后 C6 Hosted 仍为 2.12.11 ready，没有重复申请 LDO4。当前 TF 容量仍为 59,638 MB，未重复格式化。
+- HTTP 只允许 localhost/127.0.0.1 Origin、固定 transfer session、固定路径/方向和十分钟一次性 Bearer token；无 Wi-Fi 时真机已验证安全拒绝。设备尚无 Wi-Fi 凭据，真实 HTTP 吞吐待配网后测试。
+- 最终烧录镜像为 1,150,480 字节，SHA-256 `457ED52E42C8A7506C87915BA53B329DB65BB41D66A323CF838B97485FEFF035`；COM15 使用 `--no-stub -b 115200` 写入并通过全部 Hash 校验。
+- Web 工作台入口为左侧“TF 卡”，支持文件/回收站/维护、拖放、预览、编辑、传输队列暂停/继续/取消和诊断导出。使用说明见 `doc/TF卡存储工作台使用说明.md`。
+
+----
+
+## 2026-07-12 P4 microWakeWord 接入记忆
+
+- P4 rev1.3 的 ESP-SR `esp32p4_less_v3` 核心是预编译 `libwakenet.a/libesp_audio_front_end.a`，在 IDF 6.0.1/GCC 15 下即使绕过官方检查仍会出现 RISC-V relocation 链接失败；不要再次尝试通过删检查或 `--no-relax` 修复二进制 ABI。
+- 当前唤醒后端改为完全从源码构建的 microWakeWord：`esp-tflite-micro 1.3.3~1`、`esp-nn 1.1.2`、`esp-micro-speech-features 1.2.3`。输入仍是板载 ES8311 的 16kHz/16-bit/mono PCM，和普通录音/摄像头共享资源约束不变。
+- 当前固件模型是英文 `Okay Nabu` v2 启动验证模型，不是“小冰小冰”；Web/串口必须看到 `targetModelReady=false`。只有通过 `tools/microwakeword/install_model.py ... --target-ready` 安装 manifest 中精确写为“小冰小冰”的模型后，才能标记目标模型就绪。
+- 模型固定嵌入 `components/wake_word/models/fridge_wake_word.tflite`；不再生成或烧录 `srmodels.bin`。旧 2MiB `model` 分区暂时保留，后续重排 OTA/存储时再单独处理。
+- P4 esp-nn 推理任务栈固定 8192 字节；tensor arena 至少 64KiB并放 PSRAM。`wake_status` 的 `inferenceCount/lastInferenceUs/tensorArenaUsed` 是首要真机判据，不能仅凭“listening”判断模型正常。
+- 训练与部署权威说明为 `doc/microWakeWord小冰小冰模型训练与部署.md`。板载数据采集用 `tools/microwakeword/collect_samples.py`，模型安装必须用 `install_model.py`，不要手工只替换 `.tflite` 而忘记 cutoff/window/arena。
+- 本轮构建通过但未烧录：检查时 COM15/CH343P 不在线，仅有蓝牙虚拟串口。重新接板后先用启动模型说 “Okay Nabu” 完成运行时验证，再投入中文训练和长稳误触发测试。
+
+
+----
+
+## 2026-07-13 ESP-IDF 降级到 5.5.1 恢复 WakeNet“小冰小冰”（真机已验证核心链路）
+
+- 主固件已从 IDF 6.0.1 降到 **5.5.1**，撤销 microWakeWord，恢复 **ESP-SR WakeNet less-v3**。IDF6 保留可回退。详见 `doc/IDF5.5迁移与已验证版本.md`。
+- 精确版本：**ESP-IDF 5.5.1（riscv GCC 14.2.0）+ esp-sr 2.4.5**，WakeNet 库路径 **esp32p4_less_v3**（esp-sr CMake 在 IDF 5.x 且 PATCH<3 时自动选中；5.5.1 的 PATCH=1 恰好锁定，5.5.3+ 会误选 rev3.0 库，不要升 5.5.3+）。esp_hosted 2.12.11 / esp_wifi_remote 0.15.0 不变。依据：厂商 `小智AI` 例程 `wks_esp32p4_cb_xiaozhi` 锁 IDF 5.5.1。
+- **不要再在 IDF6 下试图链接 WakeNet less-v3**：预编译库是 GCC14.2 编译的，IDF6/GCC15 必现 `R_RISCV_RVC_LUI relocation truncated`，删检查/`--no-relax` 无效。
+- 工具链：`D:\esp-IDF\v5.5.1\esp-idf`（clone v5.5.1）；公共工具目录仍 `D:\esp-IDF\.espressif`；`tools/idf.ps1` 已指向 5.5.1。构建/烧录仍先设 `IDF_TOOLS_PATH=D:\esp-IDF\.espressif` 再 dot-source export.ps1。
+- 迁移必须的 4 个配置坑（都不动硬件/分区/C6 Slave）：
+  1. `main/CMakeLists.txt` 显式加 `esp_psram`——否则 `set(COMPONENTS main)` 最小闭包下 esp_psram 是可选依赖不纳入，CONFIG_SPIRAM 整段未注册、32MB PSRAM 关闭。
+  2. `CONFIG_IDF_EXPERIMENTAL_FEATURES=y`——5.5.1 把 P4 PSRAM `SPIRAM_SPEED_200M` 归为实验特性，不开则 200M 选项不可见、回落 20MHz。
+  3. `CONFIG_ESP_HOSTED_MEMPOOL_PREFER_SPIRAM=y`——修复 hosted 启动崩溃 `assert sdio_mempool_create sdio_drv.c:255 (buf_mp_g)` / `mempool create failed: no mem`。根因：SDIO 缓冲池需约 48KB 片内 DMA 内存，IDF6 给 hosted 挂了约 120KB RETENT_RAM 堆、5.5.1 不再暴露，启动早期片内 DMA 不足；改从 DMA 可达的 PSRAM 分配即可。
+  4. `codec_es8311/idf_component.yml` 的 idf 依赖从 `>=6.0.0,<7.0.0` 放宽到 `>=5.5`。
+- `CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y` 在 5.5.1 里是未知符号、仅一条无害告警（该硅片选择符号是 IDF6 才引入的；less_v3 已由 esp-sr 的 PATCH<3 逻辑自动选中）。
+- AFE 唤醒监听会持续打印 `Ringbuffer of AFE is empty`（AFE 增强线程比 32ms 喂帧节拍快，两帧间的正常提示，不影响检测）。已在 wake init 用 `esp_log_level_set("AFE", ESP_LOG_ERROR)` 抑制，避免刷爆 USB JSON。
+- 真机（COM15，rev1.3，MAC 80:f1:b2:d2:04:85）已验证：PSRAM 32MB@200MHz OK、CPU360、C6 Host/Slave 2.12.11 hostedReady、Wi-Fi 连 eric_2G 拿到 192.168.31.228、TF /sdcard 59638MB 未格式化、FT6336U 0x48 读到、ES8311 麦克风实时喂帧、WakeNet 加载 wn9_xiaobinxiaobin_tts 且 `wake word ready: 小冰小冰`、NVS 持久唤醒重启后自动 listening、唤醒开关幂等。无 brownout/wdt/panic。
+- 仍未验证：真人说“小冰小冰”触发、5 秒录音→SiliconFlow ASR（需 ASR API Key）、20 次长稳/误触发。
+- **屏幕本次上电失败**：`fridge_display: WAIT# stayed low ... ESP_ERR_TIMEOUT`。属 TR230S QSPI 飞线/WAIT#/供电/FPC 方向的硬件问题，与 IDF 迁移无关（显示代码未改，2026-07-11 IDF6 下同代码曾 `TR230S display ready`）。复测前先断电核对屏线。
+- 最终镜像：`fridge_spirit.bin` 1,873,728B SHA-256 `496c8179657694e8b08a81b1397d93b457e6ac167f672e9b8354c65ab6bfd29e`；`srmodels.bin` 579,120B SHA-256 `baab09bb3822c45bb25eb7cd4889fdb526d033b957b4610a226569557fe96443`。烧录仍用 ROM loader `--no-stub -b 115200`，五区 Hash 通过。
+
+----
+
+## 2026-07-13 WKS70WSV114-WCT MIPI-DSI 真机结论
+
+- 当前 7 寸屏已在 COM15 真机确认正常循环显示红、绿、蓝、白、黑和 RGB565 彩条。屏参数固定为 EK79007、1024x600、RGB565、2-lane、700Mbps/lane、DPI 50MHz，HBP/HFP/HSW=160/160/20、VBP/VFP/VSW=23/12/10；LCD_RST=GPIO22、LCD_BL=GPIO23、DSI PHY LDO3=2.5V。官方 26-pin 排线走线未改，也不应改。
+- ESP-IDF 5.5.1 + ESP32-P4 rev1.x 的 DPI/DW-GDMA 首次启动可能只产生一次 `on_refresh_done`，表现为首帧后超时；厂商原始 7 寸驱动在本板上也能复现，因此不能再把该现象直接判定为排线或 EK79007 参数错误。
+- 已验证的恢复方法是：背光关闭时调用 `esp_lcd_dpi_panel_set_pattern(..., MIPI_DSI_PATTERN_BAR_VERTICAL)`，等待 40ms，再切回 `MIPI_DSI_PATTERN_NONE`。这会重新打开 DPI bridge，使 DMA 连续刷新恢复；主驱动已在初始化首帧前自动执行，用户看不到诊断图案。
+- 排查优先级：若日志没有 `DSI video bridge rearmed`，先查软件初始化；若有 rearm 和 `MIPI-DSI ready` 但屏无图，再查 5V 屏电源、FPC 锁扣/接触和背光；不要改 lane 走线或猜 GPIO。官方 DSI Pattern Generator 能绕过 PSRAM/DMA，可用于区分物理链路与帧缓冲问题。
+- 已验证启动日志：`tmp/logs/20260713-2008_mipi_bridge_rearm_main_com15.log`。该日志完成两轮图案且无 refresh timeout、panic、brownout、watchdog、PSRAM 错误或 DSI underrun。

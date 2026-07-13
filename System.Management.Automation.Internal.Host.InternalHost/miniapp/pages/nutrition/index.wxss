@@ -1,0 +1,119 @@
+/* 营养助手页：对齐固件 nutrition_cache 的 score / focus / suggestions 展示。 */
+
+.nutrition-page {
+  padding-bottom: 220rpx;
+}
+
+.error-panel {
+  border-color: var(--color-tomato-soft);
+}
+
+.error-panel .kicker {
+  color: var(--color-tomato);
+}
+
+.score-panel {
+  display: flex;
+  align-items: center;
+  gap: var(--space-6);
+  background: linear-gradient(180deg, rgba(220, 239, 220, 0.9), rgba(255, 253, 248, 0.95));
+}
+
+.score-ring {
+  flex: 0 0 184rpx;
+  width: 184rpx;
+  height: 184rpx;
+  border-radius: 50%;
+  background: linear-gradient(145deg, var(--color-sage-dark), var(--color-yolk));
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  color: #ffffff;
+  box-shadow: var(--shadow-lift);
+}
+
+.score-value {
+  font-size: var(--text-2xl);
+  font-weight: 900;
+  line-height: 1;
+}
+
+.score-label {
+  margin-top: var(--space-2);
+  font-size: var(--text-xs);
+  letter-spacing: 1rpx;
+}
+
+.score-copy {
+  min-width: 0;
+  flex: 1;
+}
+
+.score-summary {
+  margin-top: var(--space-3);
+  font-size: var(--text-lg);
+  font-weight: 800;
+  color: var(--color-ink);
+  line-height: 1.35;
+}
+
+.score-meta {
+  margin-top: var(--space-4);
+  color: var(--color-text-soft);
+  font-size: var(--text-xs);
+}
+
+.nutrition-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.section-title {
+  font-size: var(--text-md);
+  font-weight: 800;
+  color: var(--color-ink);
+}
+
+.focus-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+.suggestion-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.suggestion-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-4);
+  padding: var(--space-5);
+  border-radius: var(--radius-md);
+  background: rgba(255, 253, 248, 0.8);
+  border: 1rpx solid var(--color-line);
+}
+
+.suggestion-dot {
+  flex: 0 0 18rpx;
+  width: 18rpx;
+  height: 18rpx;
+  margin-top: 10rpx;
+  border-radius: 50%;
+  background: var(--color-yolk);
+}
+
+.suggestion-text {
+  flex: 1;
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+}
+
+.restrict-panel {
+  background: linear-gradient(180deg, rgba(255, 241, 208, 0.85), rgba(255, 253, 248, 0.95));
+}

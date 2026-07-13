@@ -1,0 +1,5 @@
+dependencies:
+  idf:
+    # 2026-07-13：主线降级到 ESP-IDF 5.5.1（恢复 ESP-SR WakeNet less-v3），放宽下界到 5.5。
+    version: ">=5.5"
+  espressif/esp_codec_dev: "1.5.4"

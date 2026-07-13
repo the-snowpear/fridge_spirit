@@ -1,0 +1,5 @@
+dependencies:
+  espressif/mqtt:
+    version: "^1.0.0"
+    rules:
+      - if: "target != esp32p4"

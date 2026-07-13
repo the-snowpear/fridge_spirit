@@ -47,6 +47,7 @@ export type DeviceCommand =
   | "get_asr_config"
   | "set_asr_config"
   | "clear_asr_key"
+  | "asr_transcribe"
   | "get_tts_config"
   | "set_tts_config"
   | "clear_tts_key"
@@ -74,6 +75,7 @@ export type DeviceCommand =
   | "wake_start"
   | "wake_stop"
   | "wake_status"
+  | "wake_set_enabled"
   | "wake_reset_stats"
   | "mic_record_start"
   | "mic_record_status"
@@ -106,7 +108,99 @@ export type DeviceCommand =
   | "get_pins"
   | "get_sensors"
   | "get_diagnostics"
-  | "get_logs";
+  | "get_logs"
+  | "get_tfcard_status"
+  | "tf_list"
+  | "tf_stat"
+  | "tf_mkdir"
+  | "tf_move"
+  | "tf_delete"
+  | "tf_restore"
+  | "tf_trash_empty"
+  | "tf_text_read"
+  | "tf_text_write"
+  | "tf_transfer_begin"
+  | "tf_transfer_status"
+  | "tf_transfer_chunk"
+  | "tf_transfer_end"
+  | "tf_transfer_abort"
+  | "tf_mount"
+  | "tf_unmount"
+  | "tf_health_test"
+  | "tf_benchmark"
+  | "tf_get_access_mode"
+  | "tf_set_access_mode"
+  | "tf_http_enable"
+  | "tf_http_status"
+  | "tf_http_disable"
+  | "tf_export_diagnostics"
+  | "format_tfcard"
+  | "tfcard_selftest";
+
+export interface TfCardStatus {
+  mounted: boolean;
+  filesystem?: string;
+  mountPoint?: string;
+  capacityMb?: number;
+  freeMb?: number;
+  totalBytes?: number;
+  freeBytes?: number;
+  usedBytes?: number;
+  writable?: boolean;
+  formatRequired?: boolean;
+  formattedThisBoot?: boolean;
+  expertMode?: boolean;
+  transferActive?: boolean;
+  cardName?: string;
+  lastError?: string;
+}
+
+export interface TfFileEntry {
+  name: string;
+  path: string;
+  type: "file" | "directory";
+  size: number;
+  modifiedAt?: number | string;
+  mtime?: number;
+  isDir?: boolean;
+  hidden?: boolean;
+  protected?: boolean;
+  originalPath?: string;
+}
+
+export interface TfListResponse {
+  path: string;
+  entries: TfFileEntry[];
+  cursor?: number;
+  nextCursor?: number;
+  hasMore: boolean;
+}
+
+export interface TfAccessMode {
+  expertMode: boolean;
+  protectedRoot?: string;
+}
+
+export interface TfTransferSession {
+  session: number;
+  active: boolean;
+  direction: "read" | "write";
+  path: string;
+  offset: number;
+  totalSize: number;
+  chunkSize: number;
+}
+
+export interface TfHttpSession {
+  serverRunning: boolean;
+  authorized: boolean;
+  session: number;
+  port: number;
+  expiresInSeconds: number;
+  url: string;
+  token?: string;
+  lastError?: string;
+}
 
 export interface DeviceStatus {
   model: string;
@@ -144,8 +238,14 @@ export interface NetworkConfig {
   save?: boolean;
   saveAiKey?: false;
   connected?: boolean;
+  connecting?: boolean;
   saved?: boolean;
   internet?: boolean;
+  hostedReady?: boolean;
+  c6OtaGuard?: boolean;
+  hostedHostVersion?: string;
+  hostedSlaveVersion?: string;
+  hostedLastError?: string;
   status?: string;
   ip?: string;
   rssi?: number;
@@ -240,6 +340,25 @@ export interface WakeStatus {
 }
 
 export type WakeWordDetectedEventPayload = WakeStatus;
+
+export interface WakeAsrStateEventPayload {
+  state: "recording" | "transcribing" | "done" | "error";
+  triggerId: number;
+  text?: string;
+  model?: string;
+  httpStatus?: number;
+  latencyMs?: number;
+  audioBytes?: number;
+  error?: string;
+}
+
+export interface AsrTranscribeResponse {
+  text: string;
+  model: string;
+  httpStatus: number;
+  latencyMs: number;
+  audioBytes: number;
+}
 
 export interface VoiceChatResponse {
   transcript: string;
@@ -667,6 +786,7 @@ export interface SectionDefinition {
     | "sensors"
     | "logs"
     | "diagnostics"
+    | "tfcard"
     | "settings";
   label: string;
   icon: LucideIcon;

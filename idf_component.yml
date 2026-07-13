@@ -1,7 +1,4 @@
-dependencies:
-  espressif/cjson: "1.7.19~2"
-  espressif/esp_jpeg: "1.3.1"
-  espressif/esp-sr: "2.4.5"
-  espressif/mqtt: "^1.0.0"
-  lvgl/lvgl: "9.2.2"
-  joltwallet/littlefs: "1.21.1"
+# P4 第一阶段的外部依赖由实际使用它们的组件各自声明。
+# 旧 S3 的 cJSON/ESP-SR/MQTT/LVGL/LittleFS 聚合依赖已随 s3-legacy 分支存档，
+# 不能继续作为项目级直接依赖，否则 IDF 6 会在最小构建中无条件拉入整套旧业务栈。
+dependencies: {}

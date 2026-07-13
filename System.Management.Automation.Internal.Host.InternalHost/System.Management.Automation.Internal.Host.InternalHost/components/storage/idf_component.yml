@@ -1,0 +1,9 @@
+dependencies:
+  joltwallet/littlefs:
+    version: "*"
+    rules:
+      - if: "target != esp32p4"
+  espressif/cjson:
+    version: "*"
+    rules:
+      - if: "target != esp32p4"

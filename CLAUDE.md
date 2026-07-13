@@ -36,14 +36,14 @@ The project is being ported from the ESP32-S3-DevKitC-1 N8R8 to the **慧勤智�
   - `1. 用户手册/ESP32-P4 CB V1.2_用户手册_V1.4.pdf` — pin allocation table (§1.5) and circuit notes (§2) are the authoritative wiring reference.
   - `3. 程序源码/1，基础例程/basic__routines.zip` — per-peripheral examples (`09_mipilcd`, `13_mipilcd_touch_screen`, `17_mipicamera`, `23_music`, `24_recoding`, `30_spilcd`, ...).
   - `3. 程序源码/3，WIFI例程/wifi__routines.zip` — Wi-Fi via `esp_hosted` + `esp_wifi_remote` over SDIO to the onboard ESP32-C6.
-  - Vendor examples target ESP-IDF 5.5.x; this project stays on **6.0.1** — adapt APIs when porting, do not install a second toolchain.
+  - Vendor examples target ESP-IDF 5.5.x; the main line is pinned to **5.5.1** because P4 rev1.3 WakeNet less-v3 libraries do not link with IDF6/GCC15. IDF6.0.1 remains only as a rollback environment.
 
 ### Hardware decisions already made (2026-07-02, by the user)
 
 1. **Screen**: undecided long-term. Bring-up plan: connect the existing TR230S 720x720 panel through an **adapter cable to the board's 20-pin SPI screen socket**, SPI 4-wire mode only (the socket has no QSPI data lines). Later the project may switch to a WKS MIPI-DSI panel on the 26-pin DSI socket. See the direct-plug prohibition below.
 2. **Camera**: switch to **OV5647 over MIPI-CSI** (the board has no DVP interface; OV3660 is retired).
 3. **Audio**: use the onboard **electret MIC + ES8311 codec + NS4150B PA** (speaker via the board's Speaker terminal) first; keep the ability to fall back to external INMP441 / MAX98357A on header pins.
-4. **ESP-IDF**: stay on 6.0.1 (`idf.py set-target esp32p4`).
+4. **ESP-IDF**: use 5.5.1 (`tools\idf.ps1 set-target esp32p4`); keep IDF6 only for the documented fallback path.
 
 ### Porting workstreams (status as of 2026-07-02)
 
@@ -68,24 +68,22 @@ The firmware drives the screen + touch, an OV5647 MIPI camera, MPU6050 IMU, BH17
 
 This is a **hardware project** — GPIO, power, clock, and bus decisions can damage the board, screen, camera, or sensors. Review the hardware-safety section of `AGENTS.md` before touching any pin assignment, sdkconfig, or driver init.
 
-## Build, flash, and monitor (ESP-IDF 6.0.1 on Windows)
+## Build, flash, and monitor (ESP-IDF 5.5.1 on Windows)
 
-The ESP-IDF install lives at `D:\esp-IDF\.espressif\v6.0.1\esp-idf`, but `export.ps1` defaults to `C:\Users\123\.espressif` and fails unless `IDF_TOOLS_PATH` is set first. Always use this exact sequence in PowerShell:
+The main ESP-IDF source lives at `D:\esp-IDF\v5.5.1\esp-idf`, while shared tools live under `D:\esp-IDF\.espressif`. Always use the project wrapper so it selects 5.5.1, clears inherited MSYS variables, validates the environment/profile, and forwards the common serial/build arguments to the real IDF script:
 
 ```powershell
-$env:IDF_TOOLS_PATH='D:\esp-IDF\.espressif'
-. D:\esp-IDF\.espressif\v6.0.1\esp-idf\export.ps1
-idf.py build
-idf.py -p <COM口> flash
-idf.py -p <COM口> monitor
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\idf.ps1 build
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\idf.ps1 -p COM15 flash
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\idf.ps1 -p COM15 monitor
 ```
 
-- Target chip: `esp32p4` (run `idf.py set-target esp32p4` once after the sdkconfig rework; this regenerates `sdkconfig` — reconcile against the new `sdkconfig.defaults`, never keep S3 leftovers).
-- **COM port: 待确认.** `COM16` was the old S3 board. The P4 board enumerates two USB-C ports: **COM (CH343P, UART0 GPIO37/38)** for flashing/monitor/JSON-Lines, and **USB-C JTAG** (built-in USB-Serial-JTAG) for debug. Identify the actual COM numbers on first connect and record them in `doc/memory.md` before scripting anything against them.
+- Target chip: `esp32p4` (run `tools\\idf.ps1 set-target esp32p4` once after the sdkconfig rework; this regenerates `sdkconfig` — reconcile against the new `sdkconfig.defaults`, never keep S3 leftovers).
+- **COM port: `COM15`.** It is the P4 board's CH343P UART0 path (`USB VID_1A86&PID_55D3`) for flashing/monitor/JSON-Lines. `COM16` is the retired S3 board. The default P4 configuration sets `CONFIG_ESPTOOLPY_NO_STUB=y` because this board's RAM stub transfer is unreliable; keep the ROM-loader path at 115200.
 - The COM port may be held by `idf_monitor`, VS Code Serial Monitor, Web Serial in the browser, or another terminal. If `Access to the port ... is denied` appears, close the holding process — do **not** retry-flash in a loop. When killing leftover monitor processes, only kill those whose command line contains the target COM port and `idf_monitor`/`idf.py monitor`.
 - After toggling Kconfig options (notably `CONFIG_FRIDGE_SCREEN_TEST` / `CONFIG_FRIDGE_CAMERA_TEST`), run `idf.py reconfigure build` and check `build/config/sdkconfig.h` before reflashing.
 - The main image must fit the large `ota_0` slot, while the small recovery image must fit `ota_1` (partition CSV is being reworked for 16 MB flash). Use `idf.py size` / `idf.py size-components` to debug overflow.
-- Recovery builds must be configured with `-DFRIDGE_RECOVERY_BUILD=ON -DSDKCONFIG="sdkconfig.recovery" -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.recovery.defaults"`. Do not use the default `idf.py flash` output from the recovery build directory as-is: ESP-IDF flashes the app image to `ota_0` by default, while the recovery image belongs at the `ota_1` offset from the partition CSV.
+- Recovery is currently blocked on the main P4 line: `sdkconfig.recovery` is still the archived S3/8MB configuration. Do not run a recovery build or flash command until a P4-specific recovery sdkconfig and an explicit `ota_1` flash procedure are created.
 
 ### Web operator panel (`web/`)
 

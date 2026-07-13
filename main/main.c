@@ -9,8 +9,8 @@
 #include "esp_log.h"
 #include "nvs_flash.h"
 
-#if CONFIG_FRIDGE_SCREEN_TEST && CONFIG_FRIDGE_CAMERA_TEST
-#error "CONFIG_FRIDGE_SCREEN_TEST and CONFIG_FRIDGE_CAMERA_TEST cannot be enabled at the same time"
+#if (CONFIG_FRIDGE_SCREEN_TEST + CONFIG_FRIDGE_MIPI_SCREEN_TEST + CONFIG_FRIDGE_CAMERA_TEST) > 1
+#error "QSPI screen test, MIPI screen test and camera test are mutually exclusive"
 #endif
 
 #if CONFIG_FRIDGE_RECOVERY_APP
@@ -28,6 +28,26 @@
 #include "fridge_display_test.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#elif CONFIG_FRIDGE_MIPI_SCREEN_TEST
+#include "fridge_display_mipi_test.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#elif CONFIG_FRIDGE_P4_MINIMAL
+// P4 服务模式：Wi-Fi(板载C6) + USB JSON + QSPI 屏/FT6336U + ES8311 + WakeNet/ASR + TF 卡。
+// 触摸仅在确认使用 20-pin FPC 转接板后启用；旧 S3 业务组件不进入此构建图。
+#include "esp_heap_caps.h"
+#include "esp_ota_ops.h"
+#include "fridge_audio.h"
+#include "fridge_diagnostics.h"
+#include "fridge_display.h"
+#include "fridge_network.h"
+#include "fridge_tfcard.h"
+#include "fridge_usb_protocol.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#if CONFIG_FRIDGE_P4_TOUCH_ENABLE
+#include "fridge_touch.h"
+#endif
 #else
 #include "fridge_ai_client.h"
 #include "fridge_camera.h"
@@ -54,7 +74,7 @@
 
 static const char *TAG = "fridge_main";
 
-#if !CONFIG_FRIDGE_SCREEN_TEST
+#if !CONFIG_FRIDGE_SCREEN_TEST && !CONFIG_FRIDGE_MIPI_SCREEN_TEST
 static void nvs_init_safe(void)
 {
     // 初始化 NVS，用于保存 Wi-Fi、API 配置和恢复模式需要的网络参数。
@@ -68,7 +88,8 @@ static void nvs_init_safe(void)
 }
 #endif
 
-#if !CONFIG_FRIDGE_RECOVERY_APP && !CONFIG_FRIDGE_SCREEN_TEST && !CONFIG_FRIDGE_CAMERA_TEST
+#if !CONFIG_FRIDGE_RECOVERY_APP && !CONFIG_FRIDGE_SCREEN_TEST && !CONFIG_FRIDGE_MIPI_SCREEN_TEST && \
+    !CONFIG_FRIDGE_CAMERA_TEST && !CONFIG_FRIDGE_P4_MINIMAL
 static void mqtt_autostart_task(void *arg)
 {
     (void)arg;
@@ -335,6 +356,91 @@ static void display_test_task(void *arg)
     // 独立屏幕测试任务：长期循环刷测试图案，避免阻塞 ESP-IDF 的 main_task 导致系统看门狗复位。
     fridge_display_test_run();
 }
+#elif CONFIG_FRIDGE_MIPI_SCREEN_TEST
+static void mipi_display_test_task(void *arg)
+{
+    (void)arg;
+    // 独立 MIPI 点屏任务：循环整屏图案，不初始化其它高功耗外设，便于观察 DSI 链路稳定性。
+    fridge_display_mipi_test_run();
+}
+#elif CONFIG_FRIDGE_P4_MINIMAL
+// 在屏幕上刷静态横向色带（黑/红/绿/蓝/白循环）。
+// 目的：不引入 LVGL 的情况下验证杜邦线 QSPI-4SDA 链路、TR230S 窗口设置与整屏显存写入。
+static void p4_minimal_paint_bands(void)
+{
+    const uint16_t colors[] = {0x0000, 0xF800, 0x07E0, 0x001F, 0xFFFF}; // RGB565：黑、红、绿、蓝、白
+    const int band_rows = 40;                                   // 每条色带 40 行，720/40=18 条
+    const size_t buf_px = (size_t)FRIDGE_DISPLAY_WIDTH * band_rows;
+    uint16_t *buf = heap_caps_malloc(buf_px * sizeof(uint16_t), MALLOC_CAP_DEFAULT);
+    if (!buf) {
+        ESP_LOGW(TAG, "test pattern buffer alloc failed (%u bytes)", (unsigned)(buf_px * sizeof(uint16_t)));
+        return;
+    }
+    for (int y = 0; y < FRIDGE_DISPLAY_HEIGHT; y += band_rows) {
+        const uint16_t c = colors[(y / band_rows) % (sizeof(colors) / sizeof(colors[0]))];
+        for (size_t i = 0; i < buf_px; i++) {
+            buf[i] = c;
+        }
+        esp_err_t err = fridge_display_flush_area(0, y, FRIDGE_DISPLAY_WIDTH - 1, y + band_rows - 1, buf);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "flush band y=%d failed: %s", y, esp_err_to_name(err));
+            break;
+        }
+    }
+    heap_caps_free(buf);
+    ESP_LOGI(TAG, "P4 minimal: 屏幕静态色带已刷新完成");
+}
+
+#if CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE
+// OTA 回滚健康确认：只有首阶段初始化已走完且 USB 控制台可用时，才确认当前 ota_0 镜像。
+// 外接屏未连接或单个外设失败不代表固件不可启动；USB 控制台仍可用于读取日志和继续排障。
+static void p4_minimal_confirm_ota_image(void)
+{
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    if (!running) {
+        ESP_LOGE(TAG, "cannot query running OTA partition; image remains unconfirmed");
+        return;
+    }
+
+    esp_ota_img_states_t state = ESP_OTA_IMG_UNDEFINED;
+    esp_err_t err = esp_ota_get_state_partition(running, &state);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "cannot query OTA image state: %s", esp_err_to_name(err));
+        return;
+    }
+    if (state != ESP_OTA_IMG_PENDING_VERIFY) {
+        return;
+    }
+
+    err = esp_ota_mark_app_valid_cancel_rollback();
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "OTA image confirmed valid after P4 minimal health gate");
+    } else {
+        ESP_LOGE(TAG, "failed to confirm OTA image: %s", esp_err_to_name(err));
+    }
+}
+#endif
+
+#if CONFIG_FRIDGE_P4_TOUCH_ENABLE
+// 触摸轮询任务：20-pin FPC 转杜邦板引出 FT6336U 的 INT/SDA/SCL/RST 四根控制线。
+static void p4_minimal_touch_task(void *arg)
+{
+    (void)arg;
+    bool was_pressed = false;
+    while (true) {
+        fridge_touch_point_t pt = {0};
+        if (fridge_touch_read(&pt) == ESP_OK) {
+            if (pt.pressed && !was_pressed) {
+                ESP_LOGI(TAG, "触摸按下: x=%u y=%u points=%u", pt.x, pt.y, pt.points);
+            } else if (!pt.pressed && was_pressed) {
+                ESP_LOGI(TAG, "触摸抬起");
+            }
+            was_pressed = pt.pressed;
+        }
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
+#endif
 #endif
 
 void app_main(void)
@@ -359,11 +465,99 @@ void app_main(void)
         ESP_LOGE(TAG, "create recovery_shell task failed");
     }
 #elif CONFIG_FRIDGE_SCREEN_TEST
-    // 独立屏幕测试模式：创建后台任务运行 QSPI 点亮和彩色图案，避免 Wi-Fi 发射峰值干扰首次硬件排查。
+    // 独立屏幕测试模式：创建后台任务运行 QSPI-4SDA 点亮和彩色图案，避免 Wi-Fi 发射峰值干扰首次硬件排查。
     ESP_LOGW(TAG, "CONFIG_FRIDGE_SCREEN_TEST is enabled");
     BaseType_t ok = xTaskCreate(display_test_task, "display_test", 8192, NULL, 5, NULL);
     if (ok != pdPASS) {
         ESP_LOGE(TAG, "create display_test task failed");
+    }
+#elif CONFIG_FRIDGE_MIPI_SCREEN_TEST
+    // 26-pin MIPI-DSI 独立测试模式：只启动 EK79007 全屏单色/彩条循环。
+    ESP_LOGW(TAG, "CONFIG_FRIDGE_MIPI_SCREEN_TEST is enabled");
+    BaseType_t ok = xTaskCreate(mipi_display_test_task, "mipi_test", 6144, NULL, 5, NULL);
+    if (ok != pdPASS) {
+        ESP_LOGE(TAG, "create MIPI display test task failed");
+    }
+#elif CONFIG_FRIDGE_P4_MINIMAL
+    // P4 最小移植模式（慧勤智远 ESP32-P4 CB V1.2）：
+    // 只初始化 NVS、诊断、USB JSON、网络、SPI 屏/触摸、ES8311、WakeNet/云端 ASR 和 TF 卡。
+    // 摄像头/传感器/雷达/AI 会话/扬声器不参与本配置的链接；不支持的 USB 命令会立即返回错误。
+    ESP_LOGW(TAG, "CONFIG_FRIDGE_P4_MINIMAL is enabled; P4 bring-up profile");
+    nvs_init_safe();
+    fridge_diagnostics_init();
+
+    // USB JSON 控制台最先启动，保证 hosted 握手或任一外设初始化失败时仍能读取诊断。
+    esp_err_t usb_ret = fridge_usb_protocol_start();
+    if (usb_ret == ESP_OK) {
+        ESP_LOGI(TAG, "USB console task started; hardware commands remain gated during initialization");
+    } else {
+        ESP_LOGW(TAG, "USB provisioning console skipped: %s", esp_err_to_name(usb_ret));
+    }
+
+    // 网络随后启动：esp_hosted 需要复位并握手板载 C6，失败时不阻塞其余硬件验证。
+    esp_err_t net_ret = fridge_network_init();
+    if (net_ret != ESP_OK) {
+        ESP_LOGE(TAG, "network init failed: %s (check C6/SDIO power management)", esp_err_to_name(net_ret));
+    }
+
+    if (net_ret == ESP_OK) {
+        esp_err_t saved_ret = fridge_network_connect_saved_async();
+        if (saved_ret == ESP_OK) {
+            ESP_LOGI(TAG, "saved Wi-Fi background connect started");
+        } else {
+            ESP_LOGW(TAG, "saved Wi-Fi background connect not started: %s", esp_err_to_name(saved_ret));
+        }
+    }
+
+    // 屏幕：复用 S3 已验证的 QSPI-4SDA 初始化与静态色带，杜邦接线阶段从 10MHz 起步。
+    esp_err_t disp_ret = fridge_display_init();
+    if (disp_ret == ESP_OK) {
+        p4_minimal_paint_bands();
+    } else {
+        ESP_LOGW(TAG, "display init failed: %s (check QSPI D0-D3 Dupont wiring/WAIT#)", esp_err_to_name(disp_ret));
+    }
+
+#if CONFIG_FRIDGE_P4_TOUCH_ENABLE
+    // 触摸：20-pin FPC 转接线使用独立 I2C0（SCL=GPIO16、SDA=GPIO17）轮询。
+    esp_err_t touch_ret = fridge_touch_init();
+    if (touch_ret == ESP_OK) {
+        if (xTaskCreate(p4_minimal_touch_task, "p4_touch", 3072, NULL, 4, NULL) != pdPASS) {
+            ESP_LOGW(TAG, "create touch poll task failed");
+        }
+    } else {
+        ESP_LOGW(TAG, "touch init failed: %s", esp_err_to_name(touch_ret));
+    }
+#else
+    ESP_LOGI(TAG, "P4 direct touch disabled by configuration");
+#endif
+
+    // 麦克风：ES8311 编解码器录音路径；PA_CTRL 保持低电平（本阶段不放音）。
+    esp_err_t audio_ret = fridge_audio_init();
+    if (audio_ret != ESP_OK) {
+        ESP_LOGW(TAG, "audio init failed: %s (check ES8311/shared I2C GPIO28-29)", esp_err_to_name(audio_ret));
+    }
+
+    // TF 与 C6 hosted 共用 LDO4 电源域。只有 network/hosted 成功持有并开启 LDO4 后才初始化 Slot0。
+    // 否则继续访问 TF 会把电源域故障误报成无卡或文件系统损坏。
+    if (net_ret == ESP_OK) {
+        esp_err_t tf_ret = fridge_tfcard_init();
+        if (tf_ret != ESP_OK) {
+            ESP_LOGW(TAG, "tfcard init failed: %s", esp_err_to_name(tf_ret));
+        }
+    } else {
+        fridge_tfcard_mark_unavailable("esp_hosted/LDO4 未就绪，已跳过 TF 初始化；请重启设备");
+        ESP_LOGW(TAG, "TF card skipped because esp_hosted/LDO4 is not ready");
+    }
+
+    // 初始化屏障：从此刻起串口发送 ready，并允许配网、录音和 TF 等硬件命令。
+    if (usb_ret == ESP_OK) {
+        fridge_usb_protocol_set_hardware_ready();
+        ESP_LOGI(TAG, "P4 minimal bring-up sequence finished; USB hardware commands enabled");
+#if CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE
+        p4_minimal_confirm_ota_image();
+#endif
+    } else {
+        ESP_LOGI(TAG, "P4 minimal bring-up sequence finished; USB console unavailable");
     }
 #else
 #if CONFIG_FRIDGE_CAMERA_TEST
@@ -393,7 +587,7 @@ void app_main(void)
     ESP_ERROR_CHECK(fridge_sensors_init());
 
 #if CONFIG_FRIDGE_UI_ENABLE
-    // 屏幕 QSPI 刷新需要一块连续的 DMA 内部 SRAM。UI 先启动可避免音频、
+    // 屏幕 SPI 刷新需要一块连续的 DMA 内部 SRAM。UI 先启动可避免音频、
     // 扬声器和唤醒词组件占用/碎片化内部内存后导致屏幕初始化失败。
     esp_err_t ui_ret = fridge_ui_init();
     if (ui_ret == ESP_OK) {

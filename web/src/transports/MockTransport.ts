@@ -21,6 +21,7 @@ import type {
   AIConfig,
   AIContextPreview,
   AIProfilesResponse,
+  AsrTranscribeResponse,
   ASRConfig,
   CameraAnalyzeResponse,
   CameraCaptureResponse,
@@ -44,11 +45,22 @@ import type {
   StateMachineStatus,
   TTSConfig,
   TTSStatus,
+  TfFileEntry,
+  TfTransferSession,
   WakeStatus,
   VoiceChatResponse,
   VoiceChatStatus,
 } from "../types";
 import { BaseTransport } from "./DeviceTransport";
+
+function crc32Mock(bytes: Uint8Array) {
+  let crc = 0xffffffff;
+  for (const byte of bytes) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
 
 function createMockWavBase64(durationMs: number) {
   const sampleRate = 16000;
@@ -177,6 +189,18 @@ export class MockTransport extends BaseTransport {
     rms: 0,
     error: "",
   };
+  private tfMounted = true;
+  private tfExpertMode = false;
+  private tfFiles = new Map<string, { entry: TfFileEntry; bytes: Uint8Array }>([
+    ["食材清单.json", { entry: { name: "食材清单.json", path: "食材清单.json", type: "file", size: 92, modifiedAt: Math.floor(Date.now() / 1000) }, bytes: new TextEncoder().encode('{\n  "items": ["番茄", "鸡蛋", "牛奶"],\n  "updatedBy": "冰箱小精灵"\n}') }],
+    ["照片", { entry: { name: "照片", path: "照片", type: "directory", size: 0, modifiedAt: Math.floor(Date.now() / 1000) }, bytes: new Uint8Array() }],
+    [".fridge_spirit", { entry: { name: ".fridge_spirit", path: ".fridge_spirit", type: "directory", size: 0, protected: true }, bytes: new Uint8Array() }],
+    [".fridge_spirit/trash", { entry: { name: "trash", path: ".fridge_spirit/trash", type: "directory", size: 0, protected: true }, bytes: new Uint8Array() }],
+    [".fridge_spirit/uploads", { entry: { name: "uploads", path: ".fridge_spirit/uploads", type: "directory", size: 0, protected: true }, bytes: new Uint8Array() }],
+    [".fridge_spirit/exports", { entry: { name: "exports", path: ".fridge_spirit/exports", type: "directory", size: 0, protected: true }, bytes: new Uint8Array() }],
+  ]);
+  private tfTransfers = new Map<number, TfTransferSession & { bytes: Uint8Array }>();
+  private tfNextSession = 1;
   private memorySummary: MemorySummary = {
     schema_version: 1,
     memory_policy: "硬件测试记忆：只保存结构化摘要，不保存完整聊天记录",
@@ -638,6 +662,20 @@ export class MockTransport extends BaseTransport {
         break;
       }
       case "wake_start":
+      case "wake_set_enabled": {
+        const enabled = command === "wake_start" || Boolean((payload as { enabled?: boolean } | undefined)?.enabled);
+        if (!enabled) {
+          this.stopMockWakeEvents();
+          this.wakeStatus = createMockWakeStatus({
+            ...this.wakeStatus,
+            enabled: false,
+            state: "idle",
+            error: "",
+          });
+          this.emitLog("info", "Mock WakeNet 已持久关闭。", "wake");
+          responsePayload = this.wakeStatus;
+          break;
+        }
         this.wakeStatus = createMockWakeStatus({
           ...this.wakeStatus,
           enabled: true,
@@ -647,9 +685,10 @@ export class MockTransport extends BaseTransport {
           peakAbs: 900 + Math.round(Math.random() * 600),
         });
         this.startMockWakeEvents();
-        this.emitLog("info", "Mock WakeNet 监听已启动。", "wake");
+        this.emitLog("info", "Mock WakeNet 已持久启用。", "wake");
         responsePayload = this.wakeStatus;
         break;
+      }
       case "wake_stop":
         this.stopMockWakeEvents();
         this.wakeStatus = createMockWakeStatus({
@@ -725,6 +764,22 @@ export class MockTransport extends BaseTransport {
         }
         responsePayload = createMockWavBase64(Math.max(this.voiceStatus.durationMs, 1000));
         break;
+      case "asr_transcribe": {
+        if (!this.asrConfig.hasApiKey) {
+          throw new Error("Mock ASR 缺少 API Key，请先保存 ASR Key。");
+        }
+        if (this.voiceStatus.state !== "ready" || this.voiceStatus.pcmBytes <= 0) {
+          throw new Error("no recorded PCM ready");
+        }
+        responsePayload = {
+          text: "冰箱里还有哪些食材",
+          model: this.asrConfig.model,
+          httpStatus: 200,
+          latencyMs: 680,
+          audioBytes: this.voiceStatus.pcmBytes + 44,
+        } satisfies AsrTranscribeResponse;
+        break;
+      }
       case "radar_test_start":
         this.radar = createMockRadar(this.radar);
         this.radar.mode = "report";
@@ -1003,6 +1058,111 @@ export class MockTransport extends BaseTransport {
         };
         responsePayload = this.chatHistory;
         break;
+      case "get_tfcard_status": {
+        const usedBytes = [...this.tfFiles.values()].reduce((sum, item) => sum + item.bytes.length, 0);
+        responsePayload = { mounted: this.tfMounted, filesystem: "FAT32", mountPoint: "/sdcard", capacityMb: Math.floor(64_026_652_672 / 1024 / 1024), freeMb: Math.floor((64_026_652_672 - usedBytes) / 1024 / 1024), expertMode: this.tfExpertMode, transferActive: this.tfTransfers.size > 0, formatRequired: false, lastError: "" };
+        break;
+      }
+      case "tf_get_access_mode":
+        responsePayload = { expertMode: this.tfExpertMode, protectedRoot: "/.fridge_spirit" };
+        break;
+      case "tf_set_access_mode":
+        this.tfExpertMode = Boolean((payload as { enabled?: boolean })?.enabled);
+        responsePayload = { expertMode: this.tfExpertMode, protectedRoot: ".fridge_spirit" };
+        break;
+      case "tf_list": {
+        if (!this.tfMounted) throw new Error("TF 卡未挂载");
+        const request = payload as { path?: string; cursor?: number; limit?: number } | undefined;
+        const parent = request?.path || "";
+        const prefix = parent ? `${parent}/` : "";
+        const all = [...this.tfFiles.values()].map((item) => item.entry).filter((entry) => entry.path.startsWith(prefix) && !entry.path.slice(prefix.length).includes("/") && entry.path !== parent);
+        const start = Number(request?.cursor || 0); const limit = request?.limit || 80; const page = all.slice(start, start + limit);
+        responsePayload = { path: parent, entries: page.map((entry) => ({ ...entry, isDir: entry.type === "directory", mtime: entry.modifiedAt })), nextCursor: start + page.length, hasMore: start + page.length < all.length };
+        break;
+      }
+      case "tf_stat": {
+        const target = (payload as { path?: string })?.path || "/";
+        responsePayload = this.tfFiles.get(target)?.entry ?? { name: "TF", path: "/", type: "directory", size: 0 };
+        break;
+      }
+      case "tf_mkdir": {
+        const target = (payload as { path: string }).path; const name = target.split("/").filter(Boolean).at(-1) || "新目录";
+        this.tfFiles.set(target, { entry: { name, path: target, type: "directory", size: 0, modifiedAt: Math.floor(Date.now() / 1000) }, bytes: new Uint8Array() });
+        responsePayload = this.tfFiles.get(target)?.entry;
+        break;
+      }
+      case "tf_move": {
+        const request = payload as { from: string; to: string }; const found = this.tfFiles.get(request.from);
+        if (!found) throw new Error("文件不存在");
+        this.tfFiles.delete(request.from); const name = request.to.split("/").filter(Boolean).at(-1) || found.entry.name;
+        found.entry = { ...found.entry, name, path: request.to, modifiedAt: Math.floor(Date.now() / 1000) }; this.tfFiles.set(request.to, found); responsePayload = { path: request.to };
+        break;
+      }
+      case "tf_delete": {
+        const target = (payload as { path: string }).path;
+        if (target.startsWith(".fridge_spirit") && !this.tfExpertMode) throw new Error("保护模式禁止删除系统目录");
+        const found = this.tfFiles.get(target); if (!found) throw new Error("文件不存在");
+        const trashId = String(Date.now()); const trashPath = `.fridge_spirit/trash/${trashId}.data`; this.tfFiles.delete(target);
+        found.entry = { ...found.entry, name: `${trashId}.data`, path: trashPath, originalPath: target }; this.tfFiles.set(trashPath, found); responsePayload = { trashId };
+        break;
+      }
+      case "tf_restore": {
+        const trashId = (payload as { trashId: string }).trashId; const target = `.fridge_spirit/trash/${trashId}.data`; const found = this.tfFiles.get(target); if (!found) throw new Error("回收项目不存在");
+        const original = found.entry.originalPath || found.entry.name; this.tfFiles.delete(target); found.entry = { ...found.entry, name: original.split("/").at(-1) || original, path: original, originalPath: undefined }; this.tfFiles.set(original, found); responsePayload = { path: original };
+        break;
+      }
+      case "tf_trash_empty":
+        for (const key of [...this.tfFiles.keys()]) if (key.startsWith(".fridge_spirit/trash/")) this.tfFiles.delete(key);
+        responsePayload = { jobId: crypto.randomUUID(), state: "done", deleted: true };
+        break;
+      case "tf_text_read": {
+        const request = payload as { path: string; maxBytes?: number; encoding?: string }; const found = this.tfFiles.get(request.path); if (!found) throw new Error("文件不存在");
+        const bytes = found.bytes.slice(0, request.maxBytes || found.bytes.length); let binary = ""; bytes.forEach((byte) => { binary += String.fromCharCode(byte); });
+        responsePayload = request.encoding === "base64" ? { base64: btoa(binary) } : { text: new TextDecoder().decode(bytes) };
+        break;
+      }
+      case "tf_text_write": {
+        const request = payload as { path: string; text: string }; const bytes = new TextEncoder().encode(request.text); const old = this.tfFiles.get(request.path);
+        this.tfFiles.set(request.path, { entry: { ...(old?.entry ?? { name: request.path.split("/").at(-1) || "file", path: request.path, type: "file" as const }), size: bytes.length, modifiedAt: Math.floor(Date.now() / 1000) }, bytes }); responsePayload = { size: bytes.length };
+        break;
+      }
+      case "tf_transfer_begin": {
+        const request = payload as { direction: "read" | "write"; path: string; totalSize: number }; const id = this.tfNextSession++; const existing = this.tfFiles.get(request.path)?.bytes ?? new Uint8Array();
+        const totalSize = request.direction === "read" ? existing.length : request.totalSize;
+        const session: TfTransferSession & { bytes: Uint8Array } = { session: id, active: true, direction: request.direction, path: request.path, offset: 0, totalSize, chunkSize: 1024, bytes: request.direction === "write" ? new Uint8Array(totalSize) : existing };
+        this.tfTransfers.set(id, session); responsePayload = session;
+        break;
+      }
+      case "tf_transfer_status": {
+        const requested = (payload as { session?: number } | undefined)?.session;
+        if (!requested && this.tfTransfers.size > 1) throw new Error("存在多个传输会话，必须指定 session");
+        const session = requested ? this.tfTransfers.get(requested) : [...this.tfTransfers.values()][0];
+        responsePayload = session ?? { active: false, session: 0, direction: "read", path: "", offset: 0, totalSize: 0, chunkSize: 1024 }; break;
+      }
+      case "tf_transfer_chunk": {
+        const request = payload as { session: number; offset: number; data_b64?: string }; const session = this.tfTransfers.get(request.session); if (!session) throw new Error("传输会话不存在");
+        if (request.data_b64 !== undefined) { const binary = atob(request.data_b64); const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0)); session.bytes.set(bytes, request.offset); session.offset = request.offset + bytes.length; responsePayload = { nextOffset: session.offset }; }
+        else { const bytes = session.bytes.slice(request.offset, request.offset + 1024); let binary = ""; bytes.forEach((byte) => { binary += String.fromCharCode(byte); }); session.offset = request.offset + bytes.length; responsePayload = { data_b64: btoa(binary), crc32: crc32Mock(bytes), length: bytes.length, offset: request.offset, eof: session.offset >= session.totalSize }; }
+        break;
+      }
+      case "tf_transfer_end": {
+        const id = (payload as { session: number }).session; const session = this.tfTransfers.get(id); if (!session) throw new Error("传输会话不存在");
+        if (session.direction === "write") { const name = session.path.split("/").at(-1) || "file"; this.tfFiles.set(session.path, { entry: { name, path: session.path, type: "file", size: session.bytes.length, modifiedAt: Math.floor(Date.now() / 1000) }, bytes: session.bytes }); }
+        this.tfTransfers.delete(id); responsePayload = { completed: true }; break;
+      }
+      case "tf_transfer_abort":
+        this.tfTransfers.delete((payload as { session: number }).session); responsePayload = { aborted: true }; break;
+      case "tf_mount": this.tfMounted = true; responsePayload = { mounted: true }; break;
+      case "tf_unmount": this.tfMounted = false; responsePayload = { mounted: false }; break;
+      case "tfcard_selftest": responsePayload = { jobId: crypto.randomUUID(), state: "done", readOk: true, writeOk: true }; break;
+      case "tf_health_test": responsePayload = { jobId: crypto.randomUUID(), state: "done", ioHealthy: true, smartAvailable: false }; break;
+      case "tf_benchmark": responsePayload = { jobId: crypto.randomUUID(), state: "done", readKbps: 18400, writeKbps: 11200 }; break;
+      case "tf_http_enable": responsePayload = { serverRunning: false, authorized: false, session: 0, port: 8080, expiresInSeconds: 0, url: "", lastError: "Mock 自动使用串口通道" }; break;
+      case "tf_http_status": responsePayload = { serverRunning: false, authorized: false, session: 0, port: 8080, expiresInSeconds: 0, url: "" }; break;
+      case "tf_http_disable": responsePayload = { serverRunning: false, authorized: false, session: 0, port: 8080, expiresInSeconds: 0, url: "" }; break;
+      case "tf_export_diagnostics": responsePayload = { path: ".fridge_spirit/exports/diagnostics-mock.json", bytes: 512 }; break;
+      case "format_tfcard":
+        this.tfFiles = new Map([...this.tfFiles].filter(([key]) => key === ".fridge_spirit" || key.startsWith(".fridge_spirit/"))); responsePayload = { mounted: true, formattedThisBoot: true }; break;
       case "get_pins":
         responsePayload = createMockPins();
         break;
@@ -1064,6 +1224,40 @@ export class MockTransport extends BaseTransport {
         event: "wake_word_detected",
         payload: this.wakeStatus,
       });
+      const triggerId = this.wakeStatus.triggerCount;
+      this.emitMessage({
+        type: "event",
+        event: "wake_asr_state",
+        payload: { state: "recording", triggerId },
+      });
+      window.setTimeout(() => {
+        if (!this.connected || !this.wakeStatus.enabled) {
+          return;
+        }
+        this.emitMessage({
+          type: "event",
+          event: "wake_asr_state",
+          payload: { state: "transcribing", triggerId, audioBytes: 160044 },
+        });
+      }, 650);
+      window.setTimeout(() => {
+        if (!this.connected || !this.wakeStatus.enabled) {
+          return;
+        }
+        this.emitMessage({
+          type: "event",
+          event: "wake_asr_state",
+          payload: {
+            state: "done",
+            triggerId,
+            text: "小冰小冰，帮我看看冰箱里的食材",
+            model: this.asrConfig.model,
+            httpStatus: 200,
+            latencyMs: 720,
+            audioBytes: 160044,
+          },
+        });
+      }, 1450);
     }, 5200);
   }
 

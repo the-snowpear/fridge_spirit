@@ -12,6 +12,7 @@
 #include "esp_ota_ops.h"
 #include "esp_timer.h"
 #include "fridge_network.h"
+#include "sdkconfig.h"
 
 static int64_t s_boot_time_us;
 
@@ -62,8 +63,13 @@ esp_err_t fridge_diagnostics_get_status(fridge_device_status_t *status)
     fridge_network_status_t net = {0};
     fridge_network_get_status(&net);
 
+#if CONFIG_IDF_TARGET_ESP32P4
+    strlcpy(status->model, "冰箱小精灵 / ESP32-P4 CB V1.2", sizeof(status->model));
+    snprintf(status->chip, sizeof(status->chip), "ESP32-P4 rev %d", chip_info.revision);
+#else
     strlcpy(status->model, "冰箱小精灵 DevKit", sizeof(status->model));
     snprintf(status->chip, sizeof(status->chip), "ESP32-S3 rev %d", chip_info.revision);
+#endif
     snprintf(status->firmware, sizeof(status->firmware), "%s", app_desc ? app_desc->version : "dev");
     format_uptime(status->uptime, sizeof(status->uptime));
     snprintf(status->flash, sizeof(status->flash), "%lu MB", (unsigned long)(flash_size / (1024 * 1024)));
@@ -95,7 +101,12 @@ esp_err_t fridge_diagnostics_get_snapshot(fridge_diagnostic_snapshot_t *snapshot
     fridge_network_get_status(&net);
 
     snprintf(snapshot->psram, sizeof(snapshot->psram), "%lu KB free", (unsigned long)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
-    strlcpy(snapshot->flash_partition, "8MB: ota_0 大主固件 + ota_1 小 recovery + assets/cache/model", sizeof(snapshot->flash_partition));
+    uint32_t flash_size = 0;
+    esp_flash_get_size(NULL, &flash_size);
+    snprintf(snapshot->flash_partition,
+             sizeof(snapshot->flash_partition),
+             "%luMB: ota_0 主固件 + ota_1 recovery + assets/cache/model",
+             (unsigned long)(flash_size / (1024 * 1024)));
     strlcpy(snapshot->littlefs, "planned: assets + cache", sizeof(snapshot->littlefs));
     const esp_partition_t *running = esp_ota_get_running_partition();
     if (running) {

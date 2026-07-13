@@ -1,0 +1,21 @@
+MDK-KEIL:
+https://pan.baidu.com/s/1QlyvCgg-ZYLomvp8tOtDtw   提取码：gfpp
+
+安装526或者533版本都可以
+
+下载需要的 F1、F4、F7、H7 名字的 DFP pack 芯片包 安装完 keil 后直接双击安装
+
+注册操作，解压注册文件夹后根据里面的图示步骤操作
+
+
+
+
+串口助手 软件工具等
+链接：https://pan.baidu.com/s/1CSz-EGUS9-EffdRMx-AyTw    提取码：j7r2
+
+
+
+
+
+上面云盘如果失效先从下面论坛网页查看新链接
+https://firebbs.cn/forum.php?mod=viewthread&tid=30037&extra=

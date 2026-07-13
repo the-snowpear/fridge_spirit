@@ -52,7 +52,8 @@ typedef struct {
 } fridge_wake_word_status_t;
 
 // 初始化本地唤醒词服务。
-// 硬件约束：服务复用 INMP441 I2S RX，启动监听前必须确认麦克风为 3.3V 供电并与主控共地。
+// P4 硬件约束：服务复用板载 ES8311 I2S0 RX 和 GPIO28/29 控制总线，
+// 监听期间与普通录音、摄像头 SCCB 访问互斥。
 esp_err_t fridge_wake_word_init(void);
 
 // 注册唤醒事件回调。回调在唤醒任务上下文中执行，不能做长时间阻塞操作。
@@ -78,6 +79,7 @@ typedef void (*fridge_wake_word_dialog_cb_t)(void *user_ctx);
 esp_err_t fridge_wake_word_set_dialog_callback(fridge_wake_word_dialog_cb_t cb, void *user_ctx);
 
 // 唤醒后自动对话流程结束时调用：清除“对话进行中”内部标记，并由策略层在下个 tick 决定是否恢复监听。
+void fridge_wake_word_notify_dialog_started(void);
 void fridge_wake_word_notify_dialog_finished(void);
 
 // 清零触发次数和最近触发时间，保留当前启停状态。

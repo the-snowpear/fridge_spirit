@@ -1,5 +1,5 @@
-// 冰箱小精灵 TR230S QSPI 屏幕驱动。
-// 本文件从已验证的 display_test 命令路径拆出可复用接口：GPIO7 复位、GPIO6 WAIT#、QSPI 4SDA 写显存。
+// 冰箱小精灵 TR230S QSPI-4SDA 屏幕驱动。
+// 复用 S3 已真机点亮的 0x02/0x12 命令封包和四数据线 QIO 像素路径，GPIO 统一取自板级定义。
 // 硬件注意：屏幕 VCC 为 5V，但所有 QSPI/RESET/WAIT 信号必须是 3.3V 逻辑，且所有模块必须共地。
 
 #include "fridge_display.h"
@@ -15,21 +15,33 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "fridge_board_pins.h"
 #include "nvs.h"
+#include "sdkconfig.h"
 
 #define LCD_BYTES_PER_PIXEL 2
 #define LCD_FLUSH_CHUNK_ROWS 20
 #define LCD_FLUSH_CHUNK_BYTES (FRIDGE_DISPLAY_WIDTH * LCD_FLUSH_CHUNK_ROWS * LCD_BYTES_PER_PIXEL)
-#define LCD_PIN_CS GPIO_NUM_10
-#define LCD_PIN_D0 GPIO_NUM_11
-#define LCD_PIN_SCLK GPIO_NUM_12
-#define LCD_PIN_D1 GPIO_NUM_13
-#define LCD_PIN_D2 GPIO_NUM_14
-#define LCD_PIN_D3 GPIO_NUM_9
-#define LCD_PIN_RST GPIO_NUM_7
-#define LCD_PIN_WAIT GPIO_NUM_6
+// P4（慧勤智远 CB V1.2）20-pin FPC 转杜邦接线：
+// CS=7、D0=8、SCLK=9、D1=10、D2=20、D3=21、WAIT=19、RESET=22；D/C# 不接。
+#define LCD_PIN_CS ((gpio_num_t)FRIDGE_PIN_LCD_CS)
+#define LCD_PIN_D0 ((gpio_num_t)FRIDGE_PIN_LCD_D0)
+#define LCD_PIN_SCLK ((gpio_num_t)FRIDGE_PIN_LCD_SCLK)
+#define LCD_PIN_D1 ((gpio_num_t)FRIDGE_PIN_LCD_D1)
+#define LCD_PIN_D2 ((gpio_num_t)FRIDGE_PIN_LCD_D2)
+#define LCD_PIN_D3 ((gpio_num_t)FRIDGE_PIN_LCD_D3)
+#define LCD_PIN_RST ((gpio_num_t)FRIDGE_PIN_LCD_RST)
+#define LCD_PIN_WAIT ((gpio_num_t)FRIDGE_PIN_LCD_WAIT)
 #define LCD_SPI_HOST SPI2_HOST
+#if CONFIG_FRIDGE_SCREEN_TEST
+#define LCD_PCLK_HZ CONFIG_FRIDGE_SCREEN_TEST_PCLK_HZ
+#elif CONFIG_IDF_TARGET_ESP32P4
+// P4 杜邦线接线阶段：SPI 时钟保守从 10MHz 起步，真机稳定后再单独评估提速。
+#define LCD_PCLK_HZ 10000000
+#else
+// S3 排线方案已按 40MHz 长期验证通过。
 #define LCD_PCLK_HZ 40000000
+#endif
 #define LCD_WAIT_READY_TIMEOUT_MS 500
 #define LCD_WAIT_POLL_INTERVAL_MS 10
 #define LCD_BRIGHTNESS_DEFAULT 80
@@ -81,12 +93,12 @@ static esp_err_t lcd_wait_ready(const char *stage)
     return ESP_ERR_TIMEOUT;
 }
 
+// QSPI 命令阶段仍以单线发送；keep_cs 用于 0x2C 后保持片选直到像素发送完成。
 static esp_err_t qspi_write_cmd_bytes(const uint8_t *data, int len, bool keep_cs)
 {
     if (len == 0) {
         return ESP_OK;
     }
-
     spi_transaction_t t = {0};
     t.length = len * 8;
     t.tx_buffer = data;
@@ -101,7 +113,7 @@ static esp_err_t qspi_write_cmd_bytes(const uint8_t *data, int len, bool keep_cs
     return ret;
 }
 
-// 像素数据阶段使用 4 线 QIO；最后用 0 长度、不保持 CS 的事务收尾。
+// 像素阶段让 ESP-IDF 使用 D0-D3 四线 QIO；零长度结束事务用于释放硬件 CS。
 static esp_err_t qspi_write_data(const uint8_t *data, int len, bool keep_cs)
 {
     spi_transaction_t t = {0};
@@ -119,9 +131,12 @@ static esp_err_t qspi_write_data(const uint8_t *data, int len, bool keep_cs)
     return ret;
 }
 
-// TR230S 命令封包：0x02 写寄存器，0x12 写显存，沿用已验证 display_test 路径。
+// TR230S 已验证命令封包：普通寄存器写以 0x02 开头，写显存以 0x12 开头。
 static esp_err_t lcd_write_cmd(uint8_t cmd, const uint8_t *data, uint8_t datalen)
 {
+    if (datalen > 0 && data == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
     esp_err_t ready = lcd_wait_ready("writing TR230S command");
     if (ready != ESP_OK) {
         return ready;
@@ -130,15 +145,10 @@ static esp_err_t lcd_write_cmd(uint8_t cmd, const uint8_t *data, uint8_t datalen
     uint8_t packet[100] = {0x02, 0x00, 0x00, 0x00};
     uint8_t pos = 4;
     packet[2] = cmd;
-
     if (cmd == 0x2C) {
         packet[0] = 0x12;
-        packet[1] = 0x00;
-        packet[2] = 0x2C;
-        packet[3] = 0x00;
         return qspi_write_cmd_bytes(packet, pos, true);
     }
-
     for (uint8_t i = 0; i < datalen; i++) {
         packet[pos++] = data[i];
     }
@@ -164,14 +174,14 @@ static void lcd_hard_reset(void)
 
 static void configure_safe_start_levels(void)
 {
-    gpio_config_t cs_conf = {
+    gpio_config_t output_conf = {
         .pin_bit_mask = 1ULL << LCD_PIN_CS,
         .mode = GPIO_MODE_OUTPUT,
         .pull_up_en = GPIO_PULLUP_DISABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .intr_type = GPIO_INTR_DISABLE,
     };
-    ESP_ERROR_CHECK(gpio_config(&cs_conf));
+    ESP_ERROR_CHECK(gpio_config(&output_conf));
     gpio_set_level(LCD_PIN_CS, 1);
 }
 
@@ -183,6 +193,7 @@ static esp_err_t qspi_bus_init(void)
     bus_conf.data2_io_num = LCD_PIN_D2;
     bus_conf.data3_io_num = LCD_PIN_D3;
     bus_conf.sclk_io_num = LCD_PIN_SCLK;
+    // IDF 6.x 中 quadwp/quadhd 与 data2/data3 共用 union，不能再写 NC 覆盖 D2/D3。
     bus_conf.data4_io_num = GPIO_NUM_NC;
     bus_conf.data5_io_num = GPIO_NUM_NC;
     bus_conf.data6_io_num = GPIO_NUM_NC;
@@ -294,8 +305,13 @@ esp_err_t fridge_display_init(void)
         return ESP_OK;
     }
 
-    ESP_LOGI(TAG, "init pins: CS=10 D0=11 SCLK=12 D1=13 D2=14 D3=9 RST=7 WAIT#=6");
-    ESP_LOGW(TAG, "LCD RESET uses GPIO7; GPIO8 is reserved for OV3660 D2 in the current wiring plan");
+    ESP_LOGI(TAG, "init QSPI-4SDA pins: CS=%d D0=%d SCLK=%d D1=%d D2=%d D3=%d RST=%d WAIT#=%d",
+             LCD_PIN_CS, LCD_PIN_D0, LCD_PIN_SCLK, LCD_PIN_D1,
+             LCD_PIN_D2, LCD_PIN_D3, LCD_PIN_RST, LCD_PIN_WAIT);
+#if CONFIG_IDF_TARGET_ESP32P4
+    ESP_LOGW(TAG, "P4 Dupont-wire test: QSPI Mode 0 at %uHz; D/C# is not connected; board 20-pin LCD socket must remain empty",
+             (unsigned)LCD_PCLK_HZ);
+#endif
 
     gpio_config_t wait_conf = {
         .pin_bit_mask = 1ULL << LCD_PIN_WAIT,
@@ -329,7 +345,11 @@ esp_err_t fridge_display_init(void)
         display_cleanup_after_failed_init();
         return ret;
     }
-    ret = lcd_init_commands();
+    ret = spi_device_acquire_bus(s_lcd, portMAX_DELAY);
+    if (ret == ESP_OK) {
+        ret = lcd_init_commands();
+        spi_device_release_bus(s_lcd);
+    }
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "LCD init commands failed: %s", esp_err_to_name(ret));
         display_cleanup_after_failed_init();
@@ -348,7 +368,12 @@ esp_err_t fridge_display_init(void)
     s_ready = true;
     uint8_t saved_brightness = load_saved_brightness();
     s_brightness = UINT8_MAX;
-    ESP_RETURN_ON_ERROR(fridge_display_set_brightness(saved_brightness), TAG, "restore brightness failed");
+    ret = fridge_display_set_brightness(saved_brightness);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "restore brightness failed: %s", esp_err_to_name(ret));
+        display_cleanup_after_failed_init();
+        return ret;
+    }
     ESP_LOGI(TAG, "TR230S display ready, pclk=%uHz chunk_rows=%u brightness=%u%%",
              (unsigned)LCD_PCLK_HZ,
              (unsigned)LCD_FLUSH_CHUNK_ROWS,
@@ -386,7 +411,9 @@ esp_err_t fridge_display_flush_area(uint16_t x1, uint16_t y1, uint16_t x2, uint1
                 s_tx_buf[i * 2] = (uint8_t)(color >> 8);
                 s_tx_buf[i * 2 + 1] = (uint8_t)(color & 0xFF);
             }
-            ret = qspi_write_data(s_tx_buf, (int)(pixel_count * LCD_BYTES_PER_PIXEL), true);
+            ret = qspi_write_data(s_tx_buf,
+                                  (int)(pixel_count * LCD_BYTES_PER_PIXEL),
+                                  true);
             if (ret != ESP_OK) {
                 break;
             }
@@ -421,7 +448,11 @@ esp_err_t fridge_display_set_brightness(uint8_t percent)
     }
 
     uint8_t value = percent;
-    esp_err_t ret = lcd_write_cmd(0x20, &value, 1);
+    esp_err_t ret = spi_device_acquire_bus(s_lcd, portMAX_DELAY);
+    if (ret == ESP_OK) {
+        ret = lcd_write_cmd(0x20, &value, 1);
+        spi_device_release_bus(s_lcd);
+    }
     if (ret != ESP_OK) {
         return ret;
     }

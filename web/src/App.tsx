@@ -6,6 +6,7 @@ import {
   Check,
   Cpu,
   Download,
+  HardDrive,
   Info,
   KeyRound,
   LayoutDashboard,
@@ -31,12 +32,14 @@ import {
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { MockTransport } from "./transports/MockTransport";
 import { WebSerialTransport } from "./transports/WebSerialTransport";
+import { TfCardPage } from "./TfCardPage";
 import type {
   AIAssistantChatResponse,
   AIChatMessage,
   AIConfig,
   AIContextPreview,
   AIProfilesResponse,
+  AsrTranscribeResponse,
   ASRConfig,
   CameraAnalyzeResponse,
   CameraCaptureResponse,
@@ -69,8 +72,8 @@ import type {
   TTSConfig,
   TTSStatus,
   WakeStatus,
+  WakeAsrStateEventPayload,
   WakeWordDetectedEventPayload,
-  VoiceChatResponse,
   VoiceChatStatus,
   WifiNetwork,
 } from "./types";
@@ -88,6 +91,7 @@ const sections: SectionDefinition[] = [
   { id: "sensors", label: "传感器", icon: Activity },
   { id: "logs", label: "日志", icon: Terminal },
   { id: "diagnostics", label: "诊断", icon: ShieldAlert },
+  { id: "tfcard", label: "TF 卡", icon: HardDrive },
   { id: "settings", label: "设置", icon: Settings },
 ];
 
@@ -321,12 +325,12 @@ function App() {
   const [micTestMode, setMicTestMode] = useState<"idle" | "hardware" | "asr">("idle");
   const [micSamples, setMicSamples] = useState<VoiceChatStatus[]>([]);
   const [micTranscript, setMicTranscript] = useState("");
-  const [micAiReply, setMicAiReply] = useState("");
-  const [micAsrResult, setMicAsrResult] = useState<VoiceChatResponse | null>(null);
+  const [micAsrResult, setMicAsrResult] = useState<AsrTranscribeResponse | null>(null);
   const [micPlayback, setMicPlayback] = useState<MicPlayback | null>(null);
   const [wakeStatus, setWakeStatus] = useState<WakeStatus | null>(null);
   const [wakeBusy, setWakeBusy] = useState(false);
   const [wakeEvents, setWakeEvents] = useState<WakeEventRecord[]>([]);
+  const [wakeAsrState, setWakeAsrState] = useState<WakeAsrStateEventPayload | null>(null);
   const [radarStatus, setRadarStatus] = useState<RadarSnapshot | null>(null);
   const [radarSamples, setRadarSamples] = useState<RadarSnapshot[]>([]);
   const [radarRunning, setRadarRunning] = useState(false);
@@ -377,6 +381,13 @@ function App() {
   const stateMachineConfigDirtyRef = useRef(false);
   const micPlaybackUrlRef = useRef<string | null>(null);
 
+  const sendTfCommand = useCallback(<TPayload,>(command: DeviceCommand, payload?: unknown) => {
+    if (!transportRef.current) {
+      return Promise.reject(new Error("设备尚未连接"));
+    }
+    return transportRef.current.sendCommand<TPayload>(command, payload);
+  }, []);
+
   const appendLog = useCallback((level: LogLevel, message: string, source = "web") => {
     setLogs((current) => [
       {
@@ -411,7 +422,28 @@ function App() {
   }, []);
 
   const handleDeviceMessage = useCallback((message: DeviceMessage) => {
-    if (message.type !== "event" || message.event !== "wake_word_detected") {
+    if (message.type !== "event") {
+      return;
+    }
+    if (message.event === "wake_asr_state") {
+      const payload = message.payload as WakeAsrStateEventPayload;
+      setWakeAsrState(payload);
+      if (payload.state === "done") {
+        setMicTranscript(payload.text ?? "");
+        setMicAsrResult({
+          text: payload.text ?? "",
+          model: payload.model ?? "",
+          httpStatus: payload.httpStatus ?? 0,
+          latencyMs: payload.latencyMs ?? 0,
+          audioBytes: payload.audioBytes ?? 0,
+        });
+      }
+      appendLog(payload.state === "error" ? "error" : "info", payload.state === "error"
+        ? `唤醒后 ASR 失败：${payload.error || "未知错误"}`
+        : `唤醒后 ASR：${payload.state}${payload.text ? ` / ${payload.text}` : ""}`, "wake");
+      return;
+    }
+    if (message.event !== "wake_word_detected") {
       return;
     }
     const payload = message.payload as WakeWordDetectedEventPayload;
@@ -740,10 +772,10 @@ function App() {
     try {
       commandInFlightRef.current = true;
       setWakeBusy(true);
-      const response = await transport.sendCommand<WakeStatus>("wake_start");
+      const response = await transport.sendCommand<WakeStatus>("wake_set_enabled", { enabled: true });
       setWakeStatus(response.payload);
       setVoiceStatus((current) => current ? { ...current, state: "wake_listening", error: "" } : current);
-      appendLog("info", `WakeNet 已开始监听：${response.payload.wakeWord} / ${response.payload.model}`, "wake");
+      appendLog("info", `WakeNet 已持久启用：${response.payload.wakeWord} / ${response.payload.model}`, "wake");
     } catch (error) {
       appendLog("error", toErrorMessage(error), "wake");
     } finally {
@@ -761,10 +793,10 @@ function App() {
     try {
       commandInFlightRef.current = true;
       setWakeBusy(true);
-      const response = await transport.sendCommand<WakeStatus>("wake_stop");
+      const response = await transport.sendCommand<WakeStatus>("wake_set_enabled", { enabled: false });
       setWakeStatus(response.payload);
       setVoiceStatus((current) => current?.state === "wake_listening" ? { ...current, state: "idle" } : current);
-      appendLog("info", "WakeNet 监听已停止。", "wake");
+      appendLog("info", "WakeNet 已关闭；该设置将在重启后保持。", "wake");
     } catch (error) {
       appendLog("error", toErrorMessage(error), "wake");
     } finally {
@@ -1352,25 +1384,17 @@ function App() {
       if (!recording) {
         setMicTestMode("asr");
         setMicTranscript("");
-        setMicAiReply("");
         setMicAsrResult(null);
-        const response = await transport.sendCommand<VoiceChatStatus>("voice_chat_start");
+        const response = await transport.sendCommand<VoiceChatStatus>("mic_record_start", { forAsr: true });
         setVoiceStatus(response.payload);
         pushMicSample(response.payload);
-        appendLog("info", "语音录音已开始。", "asr");
+        appendLog("info", "ASR 测试录音已开始。", "asr");
         return;
       }
 
-      const pendingId = crypto.randomUUID();
-      const pendingMessage: AIChatMessage = {
-        id: pendingId,
-        role: "assistant",
-        content: "正在转文字并请求 AI...",
-        at: nowTime(),
-        status: "pending",
-      };
-      setAiMessages((current) => [...current, pendingMessage].slice(-18));
-      const response = await transport.sendCommand<VoiceChatResponse>("voice_chat_stop");
+      const stopped = await transport.sendCommand<VoiceChatStatus>("mic_record_stop", { forAsr: true });
+      setVoiceStatus(stopped.payload);
+      const response = await transport.sendCommand<AsrTranscribeResponse>("asr_transcribe");
       setVoiceStatus({
         state: "ready",
         durationMs: 0,
@@ -1387,36 +1411,11 @@ function App() {
         error: "",
       });
       setMicTestMode("idle");
-      setMicTranscript(response.payload.transcript);
-      setMicAiReply(response.payload.reply);
+      setMicTranscript(response.payload.text);
       setMicAsrResult(response.payload);
-      const voiceUserMessage: AIChatMessage = {
-        id: crypto.randomUUID(),
-        role: "user",
-        content: response.payload.transcript,
-        at: nowTime(),
-        status: "ok",
-      };
-      const voiceAssistantMessage: AIChatMessage = {
-        id: crypto.randomUUID(),
-        role: "assistant",
-        content: response.payload.reply,
-        at: nowTime(),
-        status: "ok",
-        latencyMs: response.payload.asrLatencyMs + response.payload.aiLatencyMs,
-      };
-      setAiMessages((current) => [
-        ...current.filter((item) => item.id !== pendingId),
-        voiceUserMessage,
-        voiceAssistantMessage,
-      ].slice(-18));
-      const historyResponse = await transport.sendCommand<DeviceChatHistory>("get_chat_history").catch(() => null);
-      if (historyResponse) {
-        setDeviceChatHistory(historyResponse.payload);
-      }
-      appendLog("info", `语音对话完成：ASR ${response.payload.asrLatencyMs} ms / AI ${response.payload.aiLatencyMs} ms。`, "asr");
+      setAiChatDraft(response.payload.text);
+      appendLog("info", `ASR 转写完成：${response.payload.latencyMs} ms / HTTP ${response.payload.httpStatus}。`, "asr");
     } catch (error) {
-      setAiMessages((current) => current.map((item) => item.status === "pending" ? { ...item, content: String(error), status: "error" } : item));
       appendLog("error", String(error), "asr");
     } finally {
       commandInFlightRef.current = false;
@@ -1444,7 +1443,6 @@ function App() {
       setMicTestMode("hardware");
       setMicSamples([]);
       setMicTranscript("");
-      setMicAiReply("");
       setMicAsrResult(null);
       clearMicPlayback();
       const response = await transport.sendCommand<VoiceChatStatus>("mic_record_start");
@@ -2224,7 +2222,7 @@ function App() {
       <main className="workspace">
         <header className="topbar">
           <div>
-            <p className="eyebrow">ESP32-S3 DevKitC-1 N8R8</p>
+            <p className="eyebrow">ESP32-P4 CB V1.2 · C6 Hosted</p>
             <h1>{sections.find((item) => item.id === activeSection)?.label}</h1>
           </div>
           <div className="topbar-actions">
@@ -2250,8 +2248,8 @@ function App() {
 
         <section className="status-strip" aria-label="设备状态">
           <Metric label="固件" value={status?.firmware ?? "等待连接"} />
-          <Metric label="Flash" value={status?.flash ?? "N8R8 规划"} />
-          <Metric label="PSRAM" value={status?.psram ?? "8 MB 规划"} />
+          <Metric label="Flash" value={status?.flash ?? "16 MB"} />
+          <Metric label="PSRAM" value={status?.psram ?? "32 MB"} />
           <Metric label="运行时间" value={status?.uptime ?? "--"} />
           {healthRows.map(([label, state]) => (
             <div className="inline-health" key={label}>
@@ -2276,7 +2274,7 @@ function App() {
             <div className="risk-list">
               {(diagnostics?.riskItems ?? [
                 "屏幕 VCC 为 5V，GPIO 逻辑为 3.3V。",
-                "GPIO35-37 在 N8R8 上禁用；GPIO0 不接；GPIO3/45/46/48 属于摄像头高风险脚。",
+                "GPIO35/36 为启动绑带脚；GPIO0/1 被 32.768kHz 晶振占用。",
                 "I2C 上拉必须到 3.3V。",
               ]).map((item) => (
                 <div className="risk-row" key={item}>
@@ -2387,11 +2385,11 @@ function App() {
             micTestMode={micTestMode}
             micSamples={micSamples}
             micTranscript={micTranscript}
-            micAiReply={micAiReply}
             micAsrResult={micAsrResult}
             wakeStatus={wakeStatus}
             wakeBusy={wakeBusy}
             wakeEvents={wakeEvents}
+            wakeAsrState={wakeAsrState}
             micPlayback={micPlayback}
             startHardwareTest={startMicHardwareTest}
             stopHardwareTest={stopMicHardwareTest}
@@ -2495,6 +2493,8 @@ function App() {
             connected={connection === "connected"}
           />
         );
+      case "tfcard":
+        return <TfCardPage connected={connection === "connected"} sendCommand={sendTfCommand} />;
     }
   }
 }
@@ -2585,7 +2585,7 @@ function UsbPanel({
         <div>
           <h3>连接步骤</h3>
           <ol className="ordered-list">
-            <li>确认 ESP32-S3 已通过 USB 连接电脑。</li>
+            <li>确认 ESP32-P4 CB V1.2 已通过 COM Type-C 连接电脑。</li>
             <li>使用 Chrome 或 Edge 通过 localhost 打开本面板。</li>
             <li>选择 Web Serial 后点击连接，并在浏览器弹窗中选择串口。</li>
             <li>固件端按 JSON Lines 协议响应请求。</li>
@@ -2671,7 +2671,8 @@ function NetworkPanel({
   const selectedNetwork = wifiNetworks.find((item) => item.ssid === current.ssid);
   const usableNetworks = [...wifiNetworks].sort((a, b) => b.signal - a.signal);
   const scanBusy = wifiScanState === "scanning";
-  const canSubmit = connection === "connected" && !networkBusy && current.ssid.trim().length > 0;
+  const hostedUnavailable = current.hostedReady === false || current.c6OtaGuard === true;
+  const canSubmit = connection === "connected" && !networkBusy && !hostedUnavailable && current.ssid.trim().length > 0;
   const currentMqtt = mqttConfig ?? {
     brokerUri: current.mqttHost || "",
     homeId: "",
@@ -2699,7 +2700,7 @@ function NetworkPanel({
           <h2>选择网络并连接</h2>
         </div>
         <div className="button-row compact">
-          <button className="action-button secondary" type="button" onClick={() => void scanWifi()} disabled={connection !== "connected" || scanBusy || networkBusy}>
+          <button className="action-button secondary" type="button" onClick={() => void scanWifi()} disabled={connection !== "connected" || scanBusy || networkBusy || hostedUnavailable}>
             <RotateCw size={17} className={scanBusy ? "spin" : ""} />
             扫描
           </button>
@@ -2742,7 +2743,7 @@ function NetworkPanel({
             <div className="wifi-empty">
               <Wifi size={20} />
               <strong>{wifiScanState === "done" ? "未扫描到 Wi-Fi" : "还没有扫描结果"}</strong>
-              <span>{connection === "connected" ? "点击扫描读取 ESP32-S3 附近的真实 2.4GHz 网络。" : "先在左侧切到 USB 并连接设备，或使用 Mock 模式演示。"}</span>
+              <span>{connection === "connected" ? "点击扫描读取板载 ESP32-C6 附近的真实 2.4GHz 网络。" : "先在左侧切到 USB 并连接设备，或使用 Mock 模式演示。"}</span>
             </div>
           )}
         </div>
@@ -2752,7 +2753,16 @@ function NetworkPanel({
             <span>当前选择</span>
             <strong>{current.ssid || "尚未选择网络"}</strong>
             {networkBusy && <p className="network-progress">正在连接，请等待认证、获取 IP 和联网校时完成。</p>}
-            <p>{selectedNetwork?.note ?? "也可以直接手动输入隐藏网络 SSID。ESP32-S3 仅支持 2.4GHz Wi-Fi。"}</p>
+            <p>{selectedNetwork?.note ?? "也可以直接手动输入隐藏网络 SSID。当前联网链路由板载 ESP32-C6 提供。"}</p>
+            {typeof current.hostedReady === "boolean" && (
+              <p>
+                C6 Hosted：{current.hostedReady ? "就绪" : "未就绪"}
+                {current.hostedHostVersion && ` / Host ${current.hostedHostVersion}`}
+                {current.hostedSlaveVersion && ` / C6 ${current.hostedSlaveVersion}`}
+              </p>
+            )}
+            {current.c6OtaGuard && <p className="network-progress">C6 固件升级保护中，暂不可扫描或连接 Wi-Fi。</p>}
+            {current.hostedLastError && <p className="network-error">Hosted：{current.hostedLastError}</p>}
             {current.connected && <p>已连接：{current.ip || "等待 IP"} / RSSI {current.rssi ?? "--"} dBm / 外网 {current.internet ? "可用" : "待校时"}</p>}
             {current.lastError && <p className="network-error">{current.lastError}</p>}
           </div>
@@ -3079,10 +3089,10 @@ function AiPanel({
                 type="button"
                 disabled={!connected || busy || voiceBusy || voiceFromHardwareTest}
                 onClick={() => void toggleVoiceChat()}
-                title={voiceFromHardwareTest ? "硬件录音测试请到麦克风测试页停止" : voiceRecording ? "stop voice recording" : "start voice recording"}
+                title={voiceFromHardwareTest ? "硬件录音测试请到麦克风测试页停止" : voiceRecording ? "停止并转写到输入框" : "语音转写到输入框"}
               >
                 <Mic size={17} />
-                {voiceFromHardwareTest ? "硬件测试中" : voiceRecording ? "停止" : "语音"}
+                {voiceFromHardwareTest ? "硬件测试中" : voiceRecording ? "停止并转写" : "语音转写"}
               </button>
               <button className="action-button" type="submit" disabled={!connected || busy || draft.trim().length === 0}>
                 <Send size={17} />
@@ -3798,11 +3808,11 @@ function MicrophoneTestPanel({
   micTestMode,
   micSamples,
   micTranscript,
-  micAiReply,
   micAsrResult,
   wakeStatus,
   wakeBusy,
   wakeEvents,
+  wakeAsrState,
   micPlayback,
   startHardwareTest,
   stopHardwareTest,
@@ -3820,11 +3830,11 @@ function MicrophoneTestPanel({
   micTestMode: "idle" | "hardware" | "asr";
   micSamples: VoiceChatStatus[];
   micTranscript: string;
-  micAiReply: string;
-  micAsrResult: VoiceChatResponse | null;
+  micAsrResult: AsrTranscribeResponse | null;
   wakeStatus: WakeStatus | null;
   wakeBusy: boolean;
   wakeEvents: WakeEventRecord[];
+  wakeAsrState: WakeAsrStateEventPayload | null;
   micPlayback: MicPlayback | null;
   startHardwareTest: () => Promise<void>;
   stopHardwareTest: () => Promise<void>;
@@ -3849,7 +3859,7 @@ function MicrophoneTestPanel({
     <div className="section-flow">
       <div className="section-heading">
         <div>
-          <p className="eyebrow">INMP441 / I2S / ASR</p>
+          <p className="eyebrow">ES8311 / I2S / ASR</p>
           <h2>麦克风测试</h2>
         </div>
         <StatusPill state={hint === "ok" ? "ok" : hint === "i2s_timeout" || hint === "clipping" ? "danger" : "warn"}>
@@ -3859,7 +3869,7 @@ function MicrophoneTestPanel({
 
       <div className="warning-line">
         <Info size={16} />
-        当前接线：VDD=3V3，GND=GND，SCK=GPIO40，WS=GPIO41，SD=GPIO42，L/R=GND。GPIO40/41 同时也接到 MAX98357A 的 BCLK/LRC；这里的硬件录音测试不会触发 ASR 或 AI。
+        当前使用 P4 板载驻极体麦克风与 ES8311，无需外接线。音频为 16 kHz / 16-bit / mono；硬件录音测试不会触发 ASR 或 AI。
       </div>
 
       <div className="project-ai-card wake-card">
@@ -3873,10 +3883,10 @@ function MicrophoneTestPanel({
         <div className="button-row">
           <button className="action-button" type="button" disabled={wakeDisabled || wakeListening} onClick={() => void startWakeListening()}>
             <Mic size={17} />
-            启动监听
+            持久启用
           </button>
           <button className="action-button secondary danger-soft" type="button" disabled={!connected || wakeBusy || !wakeListening} onClick={() => void stopWakeListening()}>
-            停止监听
+            关闭唤醒
           </button>
           <button className="action-button secondary" type="button" disabled={!connected || wakeBusy} onClick={() => void refreshWakeStatus()}>
             <RotateCw size={17} className={wakeBusy ? "spin" : ""} />
@@ -3908,6 +3918,13 @@ function MicrophoneTestPanel({
             ))
           )}
         </div>
+        <p className="form-hint">
+          自动转写：{wakeAsrState?.state === "recording" ? "已唤醒，录音中"
+            : wakeAsrState?.state === "transcribing" ? "识别中"
+              : wakeAsrState?.state === "done" ? `完成：${wakeAsrState.text || "无文本"}`
+                : wakeAsrState?.state === "error" ? `失败：${wakeAsrState.error || "未知错误"}`
+                  : "等待唤醒"}
+        </p>
       </div>
 
       <div className="mic-test-grid">
@@ -4011,8 +4028,8 @@ function MicrophoneTestPanel({
 
       <div className="project-ai-card">
         <div className="ai-chat-head compact-head">
-          <h3>ASR / AI 结果</h3>
-          <StatusPill state={micAsrResult ? "ok" : "offline"}>{micAsrResult ? `${micAsrResult.asrLatencyMs + micAsrResult.aiLatencyMs} ms` : "未测试"}</StatusPill>
+          <h3>ASR 结果</h3>
+          <StatusPill state={micAsrResult ? "ok" : "offline"}>{micAsrResult ? `${micAsrResult.latencyMs} ms` : "未测试"}</StatusPill>
         </div>
         <div className="mic-result-grid">
           <div>
@@ -4020,12 +4037,12 @@ function MicrophoneTestPanel({
             <p>{micTranscript || "完成 ASR 测试后显示。"}</p>
           </div>
           <div>
-            <span className="form-hint">AI 回复</span>
-            <p>{micAiReply || "完成 ASR + AI 后显示。"}</p>
+            <span className="form-hint">识别模型</span>
+            <p>{micAsrResult?.model || asrConfig?.model || "--"}</p>
           </div>
         </div>
         {micAsrResult && (
-          <p className="form-hint">ASR HTTP {micAsrResult.asrHttpStatus} / AI HTTP {micAsrResult.aiHttpStatus} / 音频 {micAsrResult.audioBytes} B</p>
+          <p className="form-hint">ASR HTTP {micAsrResult.httpStatus} / 音频 {micAsrResult.audioBytes} B</p>
         )}
       </div>
     </div>

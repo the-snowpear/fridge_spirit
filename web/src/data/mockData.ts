@@ -25,22 +25,22 @@ const now = () =>
 // Mock 状态数据：贴近当前硬件架构，避免前端展示脱离真实约束。
 export function createMockStatus(): DeviceStatus {
   return {
-    model: "冰箱小精灵 DevKit",
-    chip: "ESP32-S3-DevKitC-1 N8R8",
-    firmware: "s3-alpha.0.1.0",
+    model: "冰箱小精灵 · P4 CB V1.2",
+    chip: "ESP32-P4NRW32 + ESP32-C6",
+    firmware: "p4-minimal-20260711",
     uptime: "02:17:43",
-    flash: "8 MB planned / sdkconfig 待修正",
-    psram: "8 MB detected",
+    flash: "16 MB W25Q128",
+    psram: "32 MB detected",
     freeHeapKb: 184,
     minHeapKb: 132,
-    freePsramKb: 6420,
+    freePsramKb: 30240,
     temperatureC: null,
     wifi: "ok",
     mqtt: "warn",
     usb: "ok",
     ota: "warn",
     page: "IDLE / local summary",
-    powerNote: "屏幕 5V 供电与 ESP32-S3 3.3V GPIO 必须隔离确认。",
+    powerNote: "屏幕 5V 供电与 ESP32-P4 3.3V GPIO 必须隔离确认；C6 Hosted 与 TF 共享 SDMMC/LDO4。",
     tasks: [
       { name: "gui_task", priority: "高", state: "running", heartbeat: "120 ms" },
       { name: "sensor_task", priority: "中高", state: "running", heartbeat: "42 ms" },
@@ -377,7 +377,7 @@ export function createMockDiagnostics(): DiagnosticSnapshot {
     riskItems: [
       "上电前核对屏幕 VCC 5V 与 GPIO 3.3V 逻辑隔离。",
       "I2C 上拉只允许到 3.3V。",
-      "Wi-Fi 峰值、屏幕背光、ESP32-CAM 补光建议使用稳定 5V/2A 电源。",
+      "C6 Wi-Fi 峰值、屏幕背光和 OV5647 摄像头并发时建议使用稳定 5V/2A 电源。",
     ],
   };
 }

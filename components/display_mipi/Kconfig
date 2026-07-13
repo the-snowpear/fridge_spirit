@@ -1,0 +1,21 @@
+menu "Fridge Spirit MIPI-DSI screen test"
+
+config FRIDGE_MIPI_SCREEN_TEST
+    bool "Run standalone WKS70WSV114-WCT MIPI-DSI screen test"
+    depends on IDF_TARGET_ESP32P4
+    default n
+    help
+        仅初始化慧勤智远 WKS70WSV114-WCT 7 寸 1024x600 MIPI-DSI 屏，
+        循环显示红/绿/蓝/白/黑单色全屏和 RGB565 彩条。
+        该模式不启动 Wi-Fi、音频、TF、摄像头或 GT911 触摸，适合首次点屏。
+        屏幕必须在断电状态下插入板载 26-pin DSI 座并锁紧后才能上电。
+
+config FRIDGE_MIPI_SCREEN_TEST_HOLD_MS
+    int "Pattern hold time (ms)"
+    depends on FRIDGE_MIPI_SCREEN_TEST
+    range 500 30000
+    default 2000
+    help
+        每个单色画面和彩条画面的保持时间，单位毫秒。
+
+endmenu

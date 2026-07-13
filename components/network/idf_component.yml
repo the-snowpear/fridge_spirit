@@ -1,0 +1,16 @@
+## 网络组件依赖清单。
+## ESP32-P4 本身没有 Wi-Fi：通过 esp_wifi_remote（esp_wifi API 兼容垫片）+ esp_hosted
+## （SDIO 传输层，连接板载 ESP32-C6-MINI-1）联网。
+## Host 与板载 C6 Slave 固定使用同一份 esp_hosted 2.12.11 源码，避免 RPC 协议版本漂移。
+dependencies:
+  espressif/esp_wifi_remote:
+    # 厂商验证的 0.15.0 官方提交已复制到 ASCII 路径，并只补 IDF 6 删除 esp_interface.h 的兼容差异。
+    override_path: "../../third_party/espressif__esp_wifi_remote"
+    rules:
+      - if: "target == esp32p4"
+  espressif/esp_hosted:
+    # 2.12.11 修复共享 SDMMC Host/TF 与 SDIO RX 回收问题；本地副本另含 LDO4 生命周期修复。
+    # 目录名使用完整组件名的双下划线形式，覆盖 remote 的同名传递依赖并兼容 Windows Kconfig。
+    override_path: "../../third_party/espressif__esp_hosted"
+    rules:
+      - if: "target == esp32p4"

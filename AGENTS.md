@@ -32,7 +32,7 @@
 当前仓库状态：
 
 - ESP-IDF 工程目标芯片：`esp32p4`（迁移中，`idf.py set-target esp32p4` 与 sdkconfig 重建尚未完成前，仓库内可能仍残留 `esp32s3` 生成配置，动手前先核对）。
-- 当前工程基于 `ESP-IDF 6.0.1`；厂商例程基于 5.5.x，移植时按 6.0.1 API 适配，不要另装第二套工具链。
+- 当前主线基于已验证的 `ESP-IDF 5.5.1`（riscv GCC 14.2.0）+ `esp-sr 2.4.5`；P4 rev1.3 的 WakeNet less-v3 预编译库与 IDF 6/GCC15 不兼容。IDF 6.0.1 仅保留作回退，不得作为主线构建环境。
 - 当前主固件以 `C` 语言为主，使用 `ESP-IDF`、`FreeRTOS`、`CMake` 和 `Kconfig`。
 - 仓库同时包含一个本地运维前端 `web/`，使用 `TypeScript + React 19 + Vite`，用于 USB/Web Serial 调试面板。
 - 当前源码已经不再是空白工程：`main/main.c` 已有主控启动编排，`components/` 下已有完整组件集（network、camera、audio、speaker、asr、wake_word、sensors、radar、ui、storage、usb_protocol 等），这些组件的硬件层都需要按 P4 板逐个移植。
@@ -71,7 +71,7 @@
 - `doc/慧勤智远 ESP32-P4 CB V1.2小系统板/1. 用户手册/ESP32-P4 CB V1.2_用户手册_V1.4.pdf`
   - **当前目标板的权威硬件资料**：§1.5 引脚分配表、§2 硬件电路（含 C6 SDIO 电源管理配置、共享 I2C 说明）。改任何引脚前必读。
 - `doc/慧勤智远 ESP32-P4 CB V1.2小系统板/3. 程序源码/`
-  - 厂商例程（基础例程/WIFI例程/综合实验/LVGL，均为 zip，基于 IDF 5.5.x）；移植 P4 外设时优先解压对应例程参考，但 API 按本工程的 6.0.1 适配。整个目录约 2.7GB，已 gitignore，禁止删除。
+  - 厂商例程（基础例程/WIFI例程/综合实验/LVGL，均为 zip，基于 IDF 5.5.x）；移植 P4 外设时优先解压对应例程参考，API 以本工程锁定的 5.5.1 为准。整个目录约 2.7GB，已 gitignore，禁止删除。
 - `doc/冰箱小精灵_本科物联网竞赛完整方案书_V1.1.docx`
   - 项目完整方案书，包含需求、硬件、端侧固件、云端、移动端、数据模型、测试和风险（写于 S3 时期，硬件细节以本文件和 CLAUDE.md 的 P4 章节为准）。
 - `doc/屏幕技术文档Specification_TS040HDS02CP-B1620A_V1.2(1).pdf` 与 `doc/屏幕模组_TS040HDS02CP-B1620A_规格整理.md`
@@ -254,28 +254,24 @@ static void fridge_state_update(const sensor_event_t *event)
 
 ## 本项目 ESP-IDF 构建、烧录与串口调试经验
 
-当前开发机的 ESP-IDF 6.0.1 安装在 `D:\esp-IDF\.espressif\v6.0.1\esp-idf`，工具链和 Python 虚拟环境实际位于 `D:\esp-IDF\.espressif`。在 PowerShell 中构建或烧录前，不要直接运行 `idf.py`，也不要只 dot-source `export.ps1` 后重试；必须先临时指定 `IDF_TOOLS_PATH`，否则 `export.ps1` 会默认去 `C:\Users\123\.espressif` 查找 Python 环境并失败。
+当前主线使用 ESP-IDF 5.5.1，源码在 `D:\esp-IDF\v5.5.1\esp-idf`，公共工具链目录为 `D:\esp-IDF\.espressif`。优先使用项目包装脚本，它会固定版本、清理 MSYS 环境变量、校验烧录 profile 并转发 `idf.py` 参数；不要直接运行未激活环境中的 `idf.py`。
 
 推荐构建命令：
 
 ```powershell
-$env:IDF_TOOLS_PATH='D:\esp-IDF\.espressif'
-. D:\esp-IDF\.espressif\v6.0.1\esp-idf\export.ps1
-idf.py build
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\idf.ps1 build
 ```
 
 推荐烧录命令：
 
 ```powershell
-$env:IDF_TOOLS_PATH='D:\esp-IDF\.espressif'
-. D:\esp-IDF\.espressif\v6.0.1\esp-idf\export.ps1
-idf.py -p <COM口> flash
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\idf.ps1 -p COM15 flash
 ```
 
 目标芯片与串口：
 
-- 目标芯片为 `esp32p4`；首次移植时需 `idf.py set-target esp32p4` 并按新 `sdkconfig.defaults` 重建配置，不要沿用 S3 生成的 `sdkconfig`。
-- **P4 板的 COM 口号尚未确认**（旧的 `COM16` 是已退役的 S3 板）。P4 板有两个 USB-C 口：`COM` 口走 CH343P（UART0，GPIO37/38），用于烧录、monitor 和 JSON Lines 调试；另一个是 USB-C JTAG 口。首次接板时先在设备管理器确认实际 COM 号，并把结果记入 `doc/memory.md`，之后脚本才允许直连该串口。
+- 目标芯片为 `esp32p4`；首次移植时需 `tools\\idf.ps1 set-target esp32p4` 并按新 `sdkconfig.defaults` 重建配置，不要沿用 S3 生成的 `sdkconfig`。
+- **P4 板串口已确认是 `COM15`**（USB VID `1A86:55D3` 的 CH343P）；旧的 `COM16` 只属于 S3。COM15 用于烧录、monitor 和 JSON Lines 调试，另一个 USB-C 口是 JTAG。烧录默认配置已固定 `ESPTOOLPY_NO_STUB=y`，不要改回 RAM stub。
 - 打开串口或烧录后开发板可能复位一次，这是正常现象；调试脚本应等待 Wi-Fi/SNTP 稳定后再发网络或 AI 请求。
 - 串口可能被浏览器 Web Serial、ESP-IDF monitor、VS Code Serial Monitor 或其他串口助手占用；如果打开失败，先关闭占用端口的程序，不要反复重试烧录。杀残留进程时只杀命令行明确包含目标 COM 口且为 `idf_monitor` / `idf.py monitor` 的进程。
 

@@ -113,7 +113,17 @@ export class WebSerialTransport extends BaseTransport {
       });
     });
 
-    await this.writer.write(this.encoder.encode(line));
+    try {
+      await this.writer.write(this.encoder.encode(line));
+    } catch (error) {
+      const pending = this.pending.get(request.request_id);
+      if (pending) {
+        window.clearTimeout(pending.timeout);
+        this.pending.delete(request.request_id);
+        pending.reject(error);
+      }
+      return promise;
+    }
     if (this.debugTxLogs) {
       this.emitLog("debug", `TX ${command} ${request.request_id}`, "serial");
     }
@@ -124,11 +134,14 @@ export class WebSerialTransport extends BaseTransport {
     if (command === "scan_wifi") {
       return Math.max(this.timeoutMs, 60000);
     }
-    if (command === "voice_chat_stop") {
+    if (command === "voice_chat_stop" || command === "asr_transcribe") {
       return Math.max(this.timeoutMs, 150000);
     }
     if (command === "tts_play") {
       return Math.max(this.timeoutMs, 120000);
+    }
+    if (command === "format_tfcard" || command === "tf_benchmark" || command === "tf_trash_empty" || command === "tf_text_read") {
+      return Math.max(this.timeoutMs, 180000);
     }
     if (
       command === "set_network" ||

@@ -1,0 +1,605 @@
+ ▐▛███▜▌   Claude Code v2.1.156
+▝▜█████▛▘  Opus 4.8 · API Usage Billing
+  ▘▘ ▝▝    D:\esp-IDF\Project\fridge_spirit
+
+✻ Conversation compacted (ctrl+o for history)
+
+
+● Everything verified and stable. Web build passes; device is healthy: PSRAM
+  31750 KB free, brownout=0, wdt=0, WakeNet state=listening,
+  largestInternalDmaBlock=278528.
+
+  All 6 tasks complete. Here is my final report.
+
+  ---
+  最终汇报：ESP-IDF 6.0.1 → 5.5.1 降级，恢复本地“小冰小冰”WakeNet
+
+  ✅ 已完成并构建验证
+
+  - 撤销 microWakeWord，恢复 WakeNet：逐文件比对
+  20260712-164741_microwakeword_port 备份还原 wake_word/usb_protocol/sdkconfig
+  的 WakeNet 版本 + 4 个 WebUI 文件；删除全部 mww 专属文件（删前已备份）。全仓
+  mww 残留清零。
+  - 干净构建通过：删 build/managed_components/dependencies.lock/sdkconfig 后重新
+  set-target→reconfigure→build。0 个 R_RISCV 重定位错误（IDF6
+  的根因彻底消失），非 Kconfig 编译告警 0。
+  - srmodels.bin 生成 579,120B（565KB < 2MB model 分区），含
+  wn9_xiaobinxiaobin_tts + vadnet1_medium，无 MultiNet。map 与构建日志确认链接
+  lib/esp32p4_less_v3/*.a。
+  - Web npm run build、tools/c6_hosted_ota.py 语法检查通过。
+
+  ✅ 已烧录验证（真机 COM15，ESP32-P4 rev1.3）
+
+  ROM loader --no-stub -b 115200 五区全部 Hash 校验通过。启动/运行验证：
+  - 无 brownout/watchdog/panic；PSRAM 32MB@200MHz memtest OK（运行空闲
+  31,750KB）；CPU 360MHz；IDF v5.5.1
+  - C6 Hosted Host/Slave 均 2.12.11、hostedReady=true；Wi-Fi 连
+  eric_2G（192.168.31.228）；scan_wifi 有真实结果
+  - TF /sdcard 59,638MB 已挂载、未格式化、数据完好；FT6336U 触摸 0x48
+  读取成功（无回归）
+  - ES8311 麦克风实时喂帧（rms≈20-41，timeout=0）；WakeNet 加载 
+  wn9_xiaobinxiaobin_tts，wake word ready: 小冰小冰，state=listening
+  - NVS 持久唤醒：重启后自动 listening；唤醒开关 disable/enable 幂等；ASR
+  编排就绪（TeleAI/TeleSpeechASR）
+
+  ⚠️ 仍未验证（需你参与）
+
+  1. 真人说“小冰小冰”触发 wake_word_detected（需人声）
+  2. 5 秒录音 → SiliconFlow ASR 转写（需你的 ASR API Key，当前 hasApiKey=false）
+  3. 连续 20 次唤醒成功率 / 误触发 / 长稳
+
+  选定版本及依据
+
+  - ESP-IDF 5.5.1（riscv GCC 14.2.0）+ esp-sr 2.4.5，WakeNet 库自动锁
+  esp32p4_less_v3
+  - 依据：厂商随板 小智AI 例程 wks_esp32p4_cb_xiaozhi 的 lock 文件锁定 IDF
+  5.5.1。esp-sr 2.4.5 CMake 仅在 IDF 5.x 且 PATCH<3 时自动选
+  less_v3——5.5.1(PATCH=1) 恰好锁定，不能升 5.5.3+（会误选 rev3.0 库）。IDF6
+  保留可回退。
+
+  关键改动文件（均不动硬件/分区/C6 Slave）
+
+  - main/CMakeLists.txt 加 esp_psram；sdkconfig.defaults.esp32p4 加
+  IDF_EXPERIMENTAL_FEATURES（200MHz PSRAM）+
+  ESP_HOSTED_MEMPOOL_PREFER_SPIRAM（修复 hosted SDIO mempool
+  启动崩溃）；codec_es8311/idf_component.yml idf 依赖放宽 >=5.5；wake_word 抑制
+  AFE 刷屏日志；tools/idf.ps1 指向 5.5.1。
+
+  镜像 SHA-256
+
+  - fridge_spirit.bin 1,873,728B —
+  496c8179657694e8b08a81b1397d93b457e6ac167f672e9b8354c65ab6bfd29e
+  - srmodels.bin 579,120B —
+  baab09bb3822c45bb25eb7cd4889fdb526d033b957b4610a226569557fe96443
+
+  备份目录
+
+  tmp/backups/manual/20260713-131500_idf55_wakenet_migration/、tmp/backups/befor
+  e_run/20260713-132000_idf55_clean_build/、.../20260713-134500_idf55_com15_flas
+  h/
+
+  需要你决定/处理的事项
+
+  1. 屏幕未点亮：本次上电 fridge_display: WAIT# stayed low ... 
+  ESP_ERR_TIMEOUT。这是 TR230S QSPI 飞线/WAIT#/供电/FPC 方向的硬件问题，与 IDF 
+  迁移无关（显示代码未改，2026-07-11 IDF6
+  下同代码曾点亮）。请断电核对屏线后我再复测。
+  2. ASR API Key：要完成“唤醒→录音→转写”验收，需你在 WebUI 或 set_asr_config
+  配置 SiliconFlow Key。
+  3. 说“小冰小冰”实测 + 20 
+  次长稳：设备正在监听，你可以现在对着板载麦克风说“小冰小冰”，我可以继续抓
+  wake_word_detected 事件与统计。
+  4. 项目根目录有一个疑似 PowerShell 误生成的整包副本
+  System.Management.Automation.Internal.Host.InternalHost/（未跟踪、不参与构建）
+  。不是我创建的，未删除——是否要我清理？
+
+  需要我继续做实时说“小冰小冰”的抓取，或处理上述任一项，请告诉我。
+
+✻ Churned for 15m 12s
+
+❯ /compact                                                                      
+  ⎿  Compacted (ctrl+o to see full summary)
+  ⎿  Read C:\Users\123\.claude\projects\D--esp-IDF-Project-fridge-spirit\memory\idf55-wakenet-migration.md (19 lines)
+  ⎿  Read doc\IDF5.5迁移与已验证版本.md (151 lines)
+  ⎿  Referenced file components\wake_word\fridge_wake_word.c
+  ⎿  Read sdkconfig.defaults.esp32p4 (89 lines)
+  ⎿  Read main\CMakeLists.txt (63 lines)
+
+❯ 现在，帮我做一下屏幕固件开发。我是用的是mipi                                  
+  dsi接口屏幕26pin,屏幕是D:\esp-IDF\Project\fridge_spirit\doc\慧勤智远 ESP32-P4 
+  CB V1.2小系统板\8. MIPI DSI接口触摸显示模块资料\WKS70WSV114-WCT产品资料       
+  这个屏幕。我希望初版显示测试是单色全屏+彩条循环切换显示。                     
+
+  Thought for 10s (ctrl+o to expand)
+
+● This is a hardware screen bring-up task on the P4 board — MIPI-DSI 26-pin, a
+  new panel (WKS70WSV114-WCT). Before touching any pin or driver, I need to read
+  the mandatory docs and the vendor material for this specific panel. Let me
+  gather everything in parallel.
+
+  Read 2 files, listed 1 directory (ctrl+o to expand)
+
+● Now let me examine the specific panel's vendor material and the current
+  display component structure.
+
+  Thought for 11s, searched for 1 pattern, listed 1 directory (ctrl+o to expand)
+
+● A lot to absorb here. The panel is a 7.0" 1024×600 MIPI-DSI panel, driver IC 
+  EK79007AD3, touch GT911. Let me read the vendor init code, the current display
+  component, and the vendor MIPI-DSI example to understand the porting target.
+
+  Read 2 files (ctrl+o to expand)
+
+● This is a major architecture change: the current components/display is TR230S
+  QSPI, but the new panel is MIPI-DSI (EK79007AD3 IC, 1024×600, GT911 touch) — a
+  completely different ESP-IDF driver stack (esp_lcd_mipi_dsi + DPI panel, not
+  SPI). Before writing anything, I must pin down the board's DSI socket
+  pinout/power and the panel timing. Let me gather the remaining hardware facts.
+
+  Listed 1 directory (ctrl+o to expand)
+
+● Bash(cd "D:/esp-IDF/Project/fridge_spirit/doc/慧勤智远 ESP32-P4 CB
+      V1.2小系统板/3. 程序源码" && find . -maxdepth 3 -iname "*mipi*" -o
+      -maxdepth 3 -iname "*.zip" | head -40)
+  ⎿  ./1，基础例程/09_mipilcd
+     ./1，基础例程/13_mipilcd_touch_screen
+     ./1，基础例程/17_mipicamera
+     … +8 lines (ctrl+o to expand)
+
+  Thought for 7s (ctrl+o to expand)
+
+● Excellent — there's a vendor example specifically for the 7.0" MIPI-LCD
+  (wks_p4_xiaozhi_50inch_70inch_80inch_101inch_mipilcd) and basic 09_mipilcd.
+  These are the authoritative references. Let me extract the DSI panel init,
+  pinout, and timing from them.
+
+● Bash(cd "D:/esp-IDF/Project/fridge_spirit/doc/慧勤智远 ESP32-P4 CB
+      V1.2小系统板/3. 程序源码/1，基础例程/09_mipilcd" && find . -type f | head
+      -50; echo "=== is it a dir with zip? ==="…)
+  ⎿  ./.devcontainer/devcontainer.json
+     ./.devcontainer/Dockerfile
+     ./.vscode/c_cpp_properties.json
+     … +32 lines (ctrl+o to expand)
+
+  Read 2 files (ctrl+o to expand)
+
+● Now the reset/backlight pin definitions and the EK79007 init command table.
+  Let me read lcd.h, lcd.c, and the init-command header.
+
+● Bash(cd "D:/esp-IDF/Project/fridge_spirit/doc/慧勤智远 ESP32-P4 CB
+      V1.2小系统板/3. 程序源码/1，基础例程/09_mipilcd/components/BSP/LCD" &&
+      grep -n "LCD_RST\|LCD_BL\|GPIO\|lcd_rst\|res…)
+  ⎿  22:#define LCD_BL_PIN       (GPIO_NUM_23)
+     23:#define LCD_RST_PIN      (GPIO_NUM_22)
+     25:/* LCD_BL */
+     … +26 lines (ctrl+o to expand)
+
+● Bash(cd "D:/esp-IDF/Project/fridge_spirit/doc/慧勤智远 ESP32-P4 CB
+      V1.2小系统板/3. 程序源码/1，基础例程/09_mipilcd/components/BSP/LCD" && sed
+      -n '1,80p' mipilcd_ex.h | grep -n "ek790…)
+  ⎿  === ek79007 block ===
+     static const mipi_lcd_init_cmd_t ek79007_init_cmds[] = {
+         {0x80, (uint8_t[]){0x8B}, 1},
+     … +38 lines (ctrl+o to expand)
+
+● I now have the EK79007 panel facts: 1024×600, 2-lane MIPI-DSI, 700 Mbps/lane, 
+  pixel clock 50 MHz, RGB565, RST=GPIO22, BL=GPIO23, DSI PHY power via LDO_VO3 
+  chan3 @ 2.5V, timing hbp160/hfp160/hsw20/vbp23/vfp12/vsw10, landscape-only.
+  The init sequence is just 9 vendor commands.
+
+  Let me check the closest managed-component example (xiaozhi 70inch), the
+  current screen-test Kconfig/main flow, and how the display is wired into main
+  today.
+
+● Bash(cd "D:/esp-IDF/Project/fridge_spirit/doc/慧勤智远 ESP32-P4 CB
+      V1.2小系统板/3. 程序源码/2，小智AI/wks_esp32p4_cb_xiaozhi/wks_p4_xiaozhi_5
+      0inch_70inch_80inch_101inch_mipilcd" &&…)
+  ⎿  ./dependencies.lock
+     ./main/idf_component.yml
+     ./managed_components/78__esp-ml307/idf_component.yml
+     … +18 lines (ctrl+o to expand)
+
+● Bash(cd "D:/esp-IDF/Project/fridge_spirit" && echo "=== main.c screen test
+      path ==="; grep -n "SCREEN_TEST\|display\|fridge_display\|screen"
+      main/main.c | head -40;…)  ⎿  Error: Exit code 123
+     === main.c screen test path ===
+     12:#if CONFIG_FRIDGE_SCREEN_TEST && CONFIG_FRIDGE_CAMERA_TEST
+     13:#error "CONFIG_FRIDGE_SCREEN_TEST and CONFIG_FRIDGE_CAMERA_TEST cannot 
+     be enabled at the same time"
+     27:#elif CONFIG_FRIDGE_SCREEN_TEST
+     28:#include "fridge_display_test.h"
+     38:#include "fridge_display.h"
+     51:#include "fridge_display.h"
+     73:#if !CONFIG_FRIDGE_SCREEN_TEST
+     87:#if !CONFIG_FRIDGE_RECOVERY_APP && !CONFIG_FRIDGE_SCREEN_TEST && 
+     !CONFIG_FRIDGE_CAMERA_TEST && !CONFIG_FRIDGE_P4_MINIMAL
+     … +73 lines (ctrl+o to expand)
+
+  Thought for 1m 11s (ctrl+o to expand)
+
+● The stray System.Management.Automation.Internal.Host.InternalHost/ copy is
+  polluting searches — I'll ignore it. I now have the core panel facts. Let me
+  read the remaining integration points: the board pins header, the public
+  display header + its users, and the main.c screen-test/display wiring.
+
+  Read 3 files (ctrl+o to expand)
+
+● Good — no GPIO conflict: the DSI panel uses dedicated D-PHY lanes plus only
+  RST=GPIO22 and BL=GPIO23. Let me read the backlight init, the example's paint
+  flow, the display_test component, and confirm the active build profile.
+
+● Bash(cd "D:/esp-IDF/Project/fridge_spirit/doc/慧勤智远 ESP32-P4 CB
+      V1.2小系统板/3. 程序源码/1，基础例程/09_mipilcd" && echo "=== lcd.c
+      BL/init ==="; grep -n "LCD_BL\|BL_PIN\|ledc\|gp…)
+  ⎿  === lcd.c BL/init ===
+     41:void lcd_init(void)
+     44:    lcddev.ctrl.lcd_bl = LCD_BL_PIN;                            /*
+     … +93 lines (ctrl+o to expand)
+
+● Bash(cd "D:/esp-IDF/Project/fridge_spirit" && echo "=== active target ===";
+      grep -h "CONFIG_IDF_TARGET=" sdkconfig 2>/dev/null; echo "=== active
+      profile in sdkconfig…)
+  ⎿  === active target ===
+     CONFIG_IDF_TARGET="esp32p4"
+     === active profile in sdkconfig ===
+     … +13 lines (ctrl+o to expand)
+
+  Thought for 1m 12s (ctrl+o to expand)
+
+● I now have the complete technical picture. Let me summarize what I've
+  established before proposing the plan:
+
+  Panel facts (from vendor 09_mipilcd + datasheets — authoritative for this 
+  exact board):
+  - WKS70WSV114-WCT = 7.0" 1024×600, driver IC EK79007AD3, MIPI-DSI 2-lane, 
+  GT911 touch
+  - DSI config: 2 data lanes, 700 Mbps/lane, DPI pixel clock 50 MHz, RGB565, 2
+  framebuffers
+  - Timing: hbp=160, hfp=160, hsw=20, vbp=23, vfp=12, vsw=10, landscape-only
+  - Pins: RST=GPIO22, BL=GPIO23 (same board nets the QSPI display used — no new
+  GPIOs); DSI PHY power via LDO_VO3 (chan 3) @ 2.5V; the DSI reset net is
+  board-divided to 1.8V
+  - EK79007 init = 9 vendor commands; uses IDF's native esp_lcd_mipi_dsi + DPI
+  panel (framebuffer model — completely different from the current QSPI
+  flush_area)
+
+  Key architecture point: the current components/display is TR230S QSPI 720×720
+  — a totally different interface. This is a from-scratch MIPI-DSI bring-up, not
+  an edit of the QSPI driver.
+
+  Before I write code, a few decisions genuinely change the implementation and
+  touch hardware, so I'll confirm them rather than guess.
+  ⎿  Error: Permission to use AskUserQuestion has been denied because Claude 
+     Code is running in don't ask mode. IMPORTANT: You *may* attempt to 
+     accomplish this action using other tools that might naturally be used to 
+     accomplish this goal, e.g. using head instead of cat. But you *should not* 
+     attempt to work around this denial in malicious ways, e.g. do not use your 
+     ability to run tests to execute non-test actions. You should only try to 
+     work around this restriction in reasonable ways that do not attempt to 
+     bypass the intent behind this denial. If you believe this capability is 
+     essential to complete the user's request, STOP and explain to the user what
+     you were trying to do and why you need this permission. Let the user 
+     decide how to proceed.
+
+● The interactive question tool is disabled (don't-ask mode), so I'll proceed
+  with sensible, safety-first defaults and state them explicitly:
+
+  My chosen defaults (aligned with project rules + your standing constraints):
+  1. Mode: a dedicated MIPI-DSI screen-test build profile (new
+  CONFIG_FRIDGE_MIPI_SCREEN_TEST), isolated like the existing SCREEN_TEST — no
+  Wi-Fi/WakeNet/audio/TF during first bring-up (cleanest log, no Wi-Fi power
+  peak). The full-stack integration comes after the panel is verified.
+  2. Scope: display only (solid full-screen + color-bar cycling). GT911 touch is
+  a separate follow-up.
+  3. Flash: I'll build-verify only, then stop — per your standing rule ("COM15
+  未连接就停在构建通过"). You must physically connect the 26-pin DSI panel and
+  confirm before I flash; I won't flash a panel I can't confirm is plugged in.
+
+  New self-contained component components/display_mipi (ports the vendor's
+  verified EK79007 init for this exact board — no new managed dependency). Let
+  me read the remaining wiring files.
+
+  Thought for 10s, read 3 files (ctrl+o to expand)
+
+● CONFIG_FRIDGE_SCREEN_TEST isn't in main/Kconfig.projbuild — it must be in
+  display_test/Kconfig. Let me check it and the lcd.c BL init detail + whether
+  managed esp_lcd_ek79007 exists (cleaner than porting vendor BSP).
+
+  Read 1 file (ctrl+o to expand)
+
+● Bash(cd "D:/esp-IDF/Project/fridge_spirit/doc/慧勤智远 ESP32-P4 CB
+      V1.2小系统板/3. 程序源码/1，基础例程/09_mipilcd" && sed -n '41,75p'
+      components/BSP/LCD/lcd.c; echo "=== idf_compone…)
+  ⎿  void lcd_init(void)
+     {
+         lcddev.ctrl.lcd_rst = LCD_RST_PIN;                          /*
+     复位
+     … +35 lines (ctrl+o to expand)
+
+● Let me read the framebuffer paint model (lcd_clear) and confirm the LDO
+  channel — DSI PHY uses LDO_VO3 (chan 3), TF/C6 uses LDO_VO4 (chan 4), so no
+  LDO conflict.
+
+● Bash(cd "D:/esp-IDF/Project/fridge_spirit/doc/慧勤智远 ESP32-P4 CB
+      V1.2小系统板/3. 程序源码/1，基础例程/09_mipilcd" && sed -n '74,120p'
+      components/BSP/LCD/lcd.c; echo "=== lcd_buffer…)
+  ⎿  IRAM_ATTR void lcd_clear(uint16_t color)
+     {
+         uint16_t *buffer = (uint16_t *)lcd_buffer[buffer_sw];  /* 将 void*
+     … +55 lines (ctrl+o to expand)
+
+  Thought for 38s (ctrl+o to expand)
+
+● I have the complete framebuffer model (double FB via
+  esp_lcd_dpi_panel_get_frame_buffer, draw_bitmap + refresh-done callback,
+  backlight = GPIO23 on/off). LDO channels don't conflict (DSI PHY = LDO_VO3
+  chan3; TF/C6 = LDO_VO4 chan4). Let me read the exact #if/#elif block
+  boundaries in main.c so my new profile inserts cleanly.
+
+  Read 1 file (ctrl+o to expand)
+
+● I have everything. Let me verify the vendor BSP's component requirements so my
+  CMakeLists declares the right dependencies for MIPI-DSI + LDO.
+
+● Bash(cd "D:/esp-IDF/Project/fridge_spirit/doc/慧勤智远 ESP32-P4 CB
+      V1.2小系统板/3. 程序源码/1，基础例程/09_mipilcd" && echo "=== BSP
+      CMakeLists ==="; cat components/BSP/CMakeLists.tx…)
+  ⎿  === BSP CMakeLists ===
+     set(src_dirs
+                 LED
+     … +29 lines (ctrl+o to expand)
+
+● I need to check LDO channel usage carefully. Flash uses LDO chan1, PSRAM uses
+  LDO chan2, DSI PHY uses chan3, TF/C6 uses chan4. The esp_ldo_acquire_channel
+  for chan3 is fine. Let me verify our project's sdkconfig has the DSI PHY LDO
+  channel reserved and check for any conflict with our current LDO usage.
+
+● Bash(cd "D:/esp-IDF/Project/fridge_spirit" && echo "=== our sdkconfig LDO/DSI
+      ==="; grep -iE "LDO_RESERVE|LDO_CHAN|MIPI_DSI|SOC_MIPI_DSI|LCD_DPI|ISP"
+      sdkconfig | hea…)
+  ⎿  === our sdkconfig LDO/DSI ===
+     CONFIG_SOC_MIPI_DSI_SUPPORTED=y
+     CONFIG_SOC_ISP_SUPPORTED=y
+     … +32 lines (ctrl+o to expand)
+
+  Thought for 1m 38s (ctrl+o to expand)
+
+● The driver flow is fully clear. Before writing, let me confirm which IDF 5.5.1
+  component provides esp_ldo_regulator.h and the MIPI-DSI LCD headers, so my
+  CMake REQUIRES is correct.
+
+● Bash(IDF=D:/esp-IDF/v5.5.1/esp-idf; echo "=== esp_ldo_regulator.h location
+      ==="; find "$IDF/components" -name "esp_ldo_regulator.h" 2>/dev/null; echo
+      "=== esp_lcd_mi…)
+  ⎿  === esp_ldo_regulator.h location ===
+     D:/esp-IDF/v5.5.1/esp-idf/components/esp_hw_support/ldo/include/esp_ld
+     o_regulator.h
+     … +6 lines (ctrl+o to expand)
+● The driver flow, pins, LDO channels, and component deps are all confirmed. Let
+  me read the two remaining integration files I'll edit, then write everything.
+
+  Read 1 file (ctrl+o to expand)
+
+● Bash(cd "D:/esp-IDF/Project/fridge_spirit" && echo "=== main/CMakeLists.txt
+      ==="; cat -n main/CMakeLists.txt)
+  ⎿  === main/CMakeLists.txt ===
+          1     set(fridge_recovery_requires
+          2         nvs_flash
+     … +60 lines (ctrl+o to expand)
+
+● Everything needed is confirmed. Let me check the vendor sdkconfig for any
+  DSI/DPI framebuffer memory settings I must replicate, then create the backup
+  directory.
+
+● Bash(cd "D:/esp-IDF/Project/fridge_spirit/doc/慧勤智远 ESP32-P4 CB
+      V1.2小系统板/3. 程序源码/1，基础例程/09_mipilcd" && grep -iE
+      "DPI|DSI_|LCD_RGB|BOUNCE|SPIRAM_RODATA|SPIRAM_ALLOW|SP…)
+  ⎿  CONFIG_SOC_MIPI_DSI_SUPPORTED=y
+     CONFIG_SOC_LCD_RGB_SUPPORTED=y
+     # CONFIG_ADC_CONTINUOUS_ISR_IRAM_SAFE is not set
+     … +24 lines (ctrl+o to expand)
+
+● Bash(cd "D:/esp-IDF/Project/fridge_spirit" && ts=$(date +%Y%m%d-%H%M%S);
+      dir="tmp/backups/manual/${ts}_mipi_dsi_ek79007_display"; mkdir -p
+      "$dir/main" "$dir/componen…)
+  ⎿  backup dir: tmp/backups/manual/20260713-145505_mipi_dsi_ek79007_displa
+     y
+     tmp/backups/manual/20260713-145505_mipi_dsi_ek79007_display:
+     … +18 lines (ctrl+o to expand)
+
+  Thought for 1m 42s (ctrl+o to expand)
+
+● Backups saved. Framebuffers (1024×600×2B ≈ 1.2 MB ×2) live in our 32 MB PSRAM
+  — plenty. Let me verify the exact IDF 5.5.1 DSI API struct fields/signatures
+  before writing, to avoid build errors.
+
+● Bash(IDF=D:/esp-IDF/v5.5.1/esp-idf; echo "=== dsi_bus_config +
+      dpi_panel_config + dbi_io_config ==="; sed -n '1,220p'
+      "$IDF/components/esp_lcd/dsi/include/esp_lcd_mi…)
+  ⎿  === dsi_bus_config + dpi_panel_config + dbi_io_config ===
+     13:typedef struct esp_lcd_dsi_bus_t *esp_lcd_dsi_bus_handle_t;   /*!<
+     Type of MIPI DSI bus handle */
+     … +38 lines (ctrl+o to expand)
+
+● The API matches the vendor example exactly. Now I'll write the new
+  self-contained components/display_mipi component. I'll port the vendor's
+  verified EK79007 init, but structure it cleanly with the DBI panel-io + custom
+  vendor panel + DPI panel, backlight on GPIO23, DSI PHY LDO on chan3.
+
+  Let me create the component files.
+
+● Write(components\display_mipi\include\fridge_display_mipi.h)
+  ⎿  Wrote 45 lines to
+     components\display_mipi\include\fridge_display_mipi.h
+         公共接口。 灵 MIPI-DSI 屏幕（WKS70WSV114-WCT / EK79007AD3）驱动
+         65、只能横屏。  1024x600、2 lane MIPI-DSI、驱动 IC EK79007、RGB5
+       4 //   - 屏幕从板上 26-pin DSI 座取电，DSI 数据/时钟走专用 D-PHY 
+         通道，不占用普通 GPIO；
+         屏共用同一板载网络）。22、背光 BL=GPIO23 是普通 GPIO（与旧 QSPI 
+         han2)/TF+C6(chan4) 不冲突；DO_VO3（通道 3）输出 2.5V，与 PSRAM(c
+       7 //     板上 DSI 复位网络已被分压到 1.8V，驱动只负责推挽复位时序
+       8 //   - 双帧缓冲各约 1024*600*2=1.2MB，分配在 32MB 片内 PSRAM，不
+       9 挤占内部 DMA SRAM。
+      10 #pragma once
+     … +46 lines (ctrl+o to expand)
+
+● Now the driver implementation, porting the vendor's verified EK79007 sequence
+  into a clean custom panel:
+
+✻ Churned for 16m 47s
+
+❯ 结果怎么样了                                                                  
+
+  Thought for 1m 4s (ctrl+o to expand)
+
+● 正在开发中，给你汇报一下进度。
+
+  已完成的准备工作（已吃透资料）
+
+  我把这块屏和板子的关键事实都从厂商资料里核对清楚了：
+
+  屏幕 WKS70WSV114-WCT 确认参数（来自厂商 09_mipilcd 例程 +
+  数据手册，是这块板+这块屏的权威依据）：
+  - 7.0" 1024×600，驱动 IC EK79007AD3，MIPI-DSI 2 lane，700 Mbps/lane
+  - DPI 像素时钟 50MHz，RGB565，双帧缓冲，只能横屏
+  - 时序：hbp160 / hfp160 / hsw20 / vbp23 / vfp12 / vsw10
+  - 引脚：RST=GPIO22、BL=GPIO23（与旧 QSPI 屏共用同一板载网络，不新增
+  GPIO）；DSI PHY 供电走片内 LDO_VO3 通道3 @2.5V
+  - 触摸芯片是 GT911（不是现有的 FT6336U）
+
+  关键判断：这块屏和现在 components/display 的 TR230S
+  QSPI（720×720）是完全不同的接口——不是改代码，是全新的 MIPI-DSI
+  驱动栈（esp_lcd_mipi_dsi + DPI 帧缓冲）。LDO
+  通道核对无冲突（Flash=1/PSRAM=2/DSI=3/TF+C6=4）。
+
+  我采用的方案（默认决策，已说明理由）
+
+  交互式确认工具被当前模式禁用了，所以我按项目规则+你的既有约束取了最稳妥的默认
+  ：
+  1. 独立 MIPI 屏幕测试模式（新增
+  CONFIG_FRIDGE_MIPI_SCREEN_TEST），只初始化屏、不启 Wi-Fi/WakeNet/音频/TF ——
+  点屏最快最安全
+  2. 本版只做显示（单色全屏 + 彩条循环），GT911 触摸留到点亮验证后单独做
+  3. 只构建、不烧录 —— 按你"COM15 未连接就停在构建通过"的约定，等你确认 26-pin
+  DSI 屏已插好再烧
+  4. 新建独立组件 components/display_mipi，内联移植厂商已验证的 EK79007 
+  初始化，不加 managed 依赖（避免动 dependencies.lock，保护你 IDF 5.5.1
+  那套微妙的依赖解析）
+
+  当前进度
+
+  - ✅ 资料核对、备份已建（tmp/backups/manual/20260713-145505_mipi_dsi_ek79007_d
+  isplay/）
+  - ✅ 公共头文件 fridge_display_mipi.h 已写
+  - 🔄 正在写驱动实现 fridge_display_mipi.c（DSI PHY 上电→DSI 总线→EK79007
+  初始化→DPI 面板→背光）
+  - ⬜ 测试图案 fridge_display_mipi_test.c（单色全屏 + 彩条循环）
+  - ⬜ Kconfig + 接进 main.c / main/CMakeLists.txt / 板级引脚
+  - ⬜ 构建验证
+
+  我继续把驱动实现写完。
+
+  Read 1 file (ctrl+o to expand)
+
+● Now I'll write the driver implementation. I'll use the DPI framebuffer
+  directly for zero-copy fills, with a refresh-done semaphore.
+
+● Write(components\display_mipi\fridge_display_mipi.c)
+  ⎿  Wrote 305 lines to components\display_mipi\fridge_display_mipi.c
+         实现。 小精灵 MIPI-DSI 屏幕（WKS70WSV114-WCT / EK79007AD3）驱动
+         （7"1024x600）路径。 真机点亮的 09_mipilcd 例程，仅保留 EK79007
+       3 //
+         bps) → DBI 命令通道PHY 上电(LDO_VO3/2.5V) → DSI 总线(2 lane/700M
+       5 //   → EK79007 复位+寄存器初始化(0x80~0xB2) → MADCTL/COLMOD/DISP
+       6 //   → 取双帧缓冲 → 背光点亮。
+       8 // 硬件注意：
+       9 //   - 屏 VCC/背光走 26-pin DSI 座，逻辑电平 3.3V；RST=GPIO22、B
+      10 //   - DSI PHY 电源固定用片内 LDO 通道 3（LDO_VO3→VDD_MIPI_DPHY
+         ），与 PSRAM(2)/TF+C6(4) 不冲突。
+     … +343 lines (ctrl+o to expand)
+
+● Let me reconsider the double-buffer API: mixing internal-FB fills
+  (fill_screen) with external-buffer flush_area can desync the buffer index. For
+  a v1 full-frame test (solid + color bars) the clean, correct approach is
+  zero-copy full-frame render into the current framebuffer. I'll replace
+  flush_area with a render callback (both solid and bars use it consistently)
+  and defer partial/LVGL flush.
+
+● Update(components\display_mipi\include\fridge_display_mipi.h)
+  ⎿  Added 7 lines, removed 4 lines
+      29  // 用于单色全屏点亮测试；color 为主机端常见 little-endian RGB56
+          5。
+      30  esp_err_t fridge_display_mipi_fill_screen(uint16_t rgb565);
+      31  
+      32 -// 刷新一个闭区间矩形区域，像素为 little-endian RGB565，按行优 
+         -先排列。                                                       
+      33 -// 坐标范围 [0, WIDTH-1] x [0, HEIGHT-1]，x1<=x2、y1<=y2。     
+      34 -esp_err_t fridge_display_mipi_flush_area(uint16_t x1, uint16_t 
+         -y1, uint16_t x2, uint16_t y2,                                  
+      35 -                                         const uint16_t *rgb565
+         -_pixels);                                                      
+      32 +// 帧缓冲绘制回调：在 fb（行优先 RGB565，尺寸 width*height）上 
+         +绘制任意整屏图案。                                             
+      33 +typedef void (*fridge_mipi_paint_cb_t)(uint16_t *fb, uint16_t w
+         +idth, uint16_t height, void *ctx);                             
+      34  
+      35 +// 用回调在“当前可写帧缓冲”上绘制整屏图案，然后整帧提交并翻页（
+         +阻塞直到刷新完成）。                                           
+      36 +// 采用零拷贝双缓冲：回调只填当前离屏缓冲，避免撕裂；供彩条等复
+         +杂图案使用。                                                   
+      37 +// 注意：本版只做整屏刷新，局部/LVGL 增量刷新待点亮验证后再单独
+         +实现。                                                         
+      38 +esp_err_t fridge_display_mipi_render(fridge_mipi_paint_cb_t pai
+         +nt, void *ctx);                                                
+      39 +                                                               
+      40  // 打开/关闭背光（BL=GPIO23，高有效）。
+      41  void fridge_display_mipi_set_backlight(bool on);
+      42  
+
+● Update(components\display_mipi\fridge_display_mipi.c)
+  ⎿  Added 9 lines, removed 16 lines
+      272      return ret;
+      273  }
+      274  
+      275 -esp_err_t fridge_display_mipi_flush_area(uint16_t x1, uint16_t
+          - y1, uint16_t x2, uint16_t y2,                                
+      276 -                                         const uint16_t *rgb56
+          -5_pixels)                                                     
+      275 +esp_err_t fridge_display_mipi_render(fridge_mipi_paint_cb_t pa
+          +int, void *ctx)                                               
+      276  {
+      278 -    if (!s_ready || !rgb565_pixels) {                         
+      277 +    if (!s_ready || !paint) {                                 
+      278          return ESP_ERR_INVALID_STATE;
+      279      }
+      281 -    if (x2 >= FRIDGE_MIPI_WIDTH || y2 >= FRIDGE_MIPI_HEIGHT ||
+          - x1 > x2 || y1 > y2) {                                        
+      282 -        return ESP_ERR_INVALID_ARG;                           
+      280 +    // 在当前离屏帧缓冲上绘制整屏图案，再整帧提交并翻页（零拷 
+          +贝双缓冲）。                                                  
+      281 +    uint16_t *fb = (uint16_t *)s_fb[s_fb_index];              
+      282 +    paint(fb, FRIDGE_MIPI_WIDTH, FRIDGE_MIPI_HEIGHT, ctx);    
+      283 +    esp_err_t ret = mipi_flush_full_fb(fb);                   
+      284 +    if (ret == ESP_OK) {                                      
+      285 +        s_fb_index ^= 1;                                      
+      286      }
+      284 -    // 直接把外部像素块交给 DPI 面板（内部按需拷贝到帧缓冲），
+          -随后等待整屏刷新完成。                                        
+      285 -    // 注意：DPI 是全屏扫描，局部区域刷新后仍需等待一帧完成信 
+          -号，避免连续调用竞争缓冲。                                    
+      286 -    esp_err_t ret = esp_lcd_panel_draw_bitmap(s_dpi_panel, x1,
+          - y1, x2 + 1, y2 + 1, rgb565_pixels);                          
+      287 -    if (ret != ESP_OK) {                                      
+      288 -        return ret;                                           
+      289 -    }                                                         
+      290 -    if (xSemaphoreTake(s_refresh_sem, pdMS_TO_TICKS(200)) != p
+          -dTRUE) {                                                      
+      291 -        ESP_LOGW(TAG, "flush_area wait refresh done timeout");
+      292 -        return ESP_ERR_TIMEOUT;                               
+      293 -    }                                                         
+      294 -    return ESP_OK;                                            
+      287 +    return ret;                                               
+      288  }
+      289  
+      290  void fridge_display_mipi_set_backlight(bool on)
+  ⎿  Interrupted · What should Claude do instead?

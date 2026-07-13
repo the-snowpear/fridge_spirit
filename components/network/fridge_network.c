@@ -1,6 +1,7 @@
 // 冰箱小精灵网络组件。
-// 负责 ESP32-S3 的 Wi-Fi STA、真实 AP 扫描、NVS 凭据保存、自动重连和 SNTP 联网验证。
-// 注意：本组件不操作任何 GPIO；Wi-Fi 发射存在电流峰值，调试时需确认 USB/5V 供电稳定。
+// 负责 Wi-Fi STA、真实 AP 扫描、NVS 凭据保存、自动重连和 SNTP 联网验证。
+// S3 使用片上 Wi-Fi；P4 通过 esp_wifi_remote/esp_hosted 把相同 esp_wifi API 转发给板载 C6。
+// P4 的 hosted 底层会使用 SDIO GPIO47-54 及其电源域；Wi-Fi 发射存在电流峰值，需保证 5V 供电稳定。
 
 #include "fridge_network.h"
 
@@ -15,6 +16,7 @@
 #include "esp_netif_ip_addr.h"
 #include "esp_netif_sntp.h"
 #include "esp_wifi.h"
+#include "esp_hosted.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/semphr.h"
@@ -48,18 +50,25 @@ static TaskHandle_t s_saved_connect_task;
 static TaskHandle_t s_auto_reconnect_task;
 static esp_netif_t *s_sta_netif;
 static bool s_initialized;
+static bool s_init_failed;
+static esp_err_t s_init_error = ESP_OK;
 static bool s_connected;
 static bool s_connecting;
 static bool s_manual_disconnect;
 static bool s_saved;
 static bool s_internet_ready;
 static bool s_sntp_initialized;
+static bool s_hosted_ready;
+static bool s_c6_ota_guard;
+static uint32_t s_hosted_retry_count;
 static int s_retry_num;
 static int s_last_disconnect_reason;
 static int8_t s_last_rssi;
 static char s_current_ssid[FRIDGE_WIFI_MAX_SSID_LEN + 1];
 static char s_current_ip[FRIDGE_WIFI_MAX_IP_LEN];
 static char s_last_error[FRIDGE_WIFI_MAX_ERROR_LEN];
+static char s_hosted_last_error[FRIDGE_WIFI_MAX_ERROR_LEN];
+static char s_hosted_slave_version[24] = "0.0.6-legacy";
 static char s_ntp_server[64] = FRIDGE_WIFI_DEFAULT_NTP;
 
 static esp_err_t read_saved_config(fridge_wifi_config_t *config);
@@ -307,7 +316,7 @@ static void auto_saved_reconnect_task(void *arg)
     vTaskDelay(pdMS_TO_TICKS(WIFI_AUTO_RECONNECT_INITIAL_DELAY_MS));
 
     while (true) {
-        if (s_initialized && !s_connected && !s_connecting && !s_manual_disconnect) {
+        if (s_initialized && !s_c6_ota_guard && !s_connected && !s_connecting && !s_manual_disconnect) {
             fridge_wifi_config_t config = {0};
             esp_err_t err = read_saved_config(&config);
             if (err == ESP_OK) {
@@ -481,36 +490,93 @@ esp_err_t fridge_network_init(void)
     if (s_initialized) {
         return ESP_OK;
     }
+    if (s_init_failed) {
+        // hosted/remote Wi-Fi 失败时底层可能已经持有 SDMMC、LDO 或 netif 资源；本次启动禁止伪重试。
+        return s_init_error;
+    }
 
+    esp_err_t err = ESP_OK;
     s_wifi_event_group = xEventGroupCreate();
-    ESP_RETURN_ON_FALSE(s_wifi_event_group, ESP_ERR_NO_MEM, TAG, "create event group failed");
+    if (!s_wifi_event_group) {
+        err = ESP_ERR_NO_MEM;
+        goto fail;
+    }
     s_connect_mutex = xSemaphoreCreateMutex();
-    ESP_RETURN_ON_FALSE(s_connect_mutex, ESP_ERR_NO_MEM, TAG, "create Wi-Fi connect mutex failed");
+    if (!s_connect_mutex) {
+        err = ESP_ERR_NO_MEM;
+        goto fail;
+    }
     s_scan_mutex = xSemaphoreCreateMutex();
-    ESP_RETURN_ON_FALSE(s_scan_mutex, ESP_ERR_NO_MEM, TAG, "create Wi-Fi scan mutex failed");
+    if (!s_scan_mutex) {
+        err = ESP_ERR_NO_MEM;
+        goto fail;
+    }
     s_sntp_mutex = xSemaphoreCreateMutex();
-    ESP_RETURN_ON_FALSE(s_sntp_mutex, ESP_ERR_NO_MEM, TAG, "create SNTP mutex failed");
+    if (!s_sntp_mutex) {
+        err = ESP_ERR_NO_MEM;
+        goto fail;
+    }
 
-    ESP_RETURN_ON_ERROR(esp_netif_init(), TAG, "esp_netif_init failed");
-    ESP_RETURN_ON_ERROR(ensure_event_loop(), TAG, "event loop create failed");
+    err = esp_netif_init();
+    if (err != ESP_OK) {
+        goto fail;
+    }
+    err = ensure_event_loop();
+    if (err != ESP_OK) {
+        goto fail;
+    }
 
     s_sta_netif = esp_netif_create_default_wifi_sta();
-    ESP_RETURN_ON_FALSE(s_sta_netif, ESP_FAIL, TAG, "create default STA failed");
+    if (!s_sta_netif) {
+        err = ESP_FAIL;
+        goto fail;
+    }
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_RETURN_ON_ERROR(esp_wifi_init(&cfg), TAG, "esp_wifi_init failed");
+    err = esp_wifi_init(&cfg);
+    if (err != ESP_OK) {
+        goto fail;
+    }
+    s_hosted_ready = true;
     // USB JSON Lines 与 ESP-IDF 日志共用同一串口，降低 Wi-Fi 底层 info 噪声，避免日志插入协议响应。
     esp_log_level_set("wifi", ESP_LOG_WARN);
     esp_log_level_set("wifi_init", ESP_LOG_WARN);
-    ESP_RETURN_ON_ERROR(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, NULL),
-                        TAG, "register Wi-Fi event failed");
-    ESP_RETURN_ON_ERROR(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL, NULL),
-                        TAG, "register IP event failed");
-    ESP_RETURN_ON_ERROR(esp_wifi_set_storage(WIFI_STORAGE_RAM), TAG, "set Wi-Fi storage failed");
-    ESP_RETURN_ON_ERROR(esp_wifi_set_mode(WIFI_MODE_STA), TAG, "set Wi-Fi STA mode failed");
-    ESP_RETURN_ON_ERROR(esp_wifi_start(), TAG, "start Wi-Fi failed");
+    err = esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, NULL);
+    if (err != ESP_OK) {
+        goto fail;
+    }
+    err = esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL, NULL);
+    if (err != ESP_OK) {
+        goto fail;
+    }
+    err = esp_wifi_set_storage(WIFI_STORAGE_RAM);
+    if (err != ESP_OK) {
+        goto fail;
+    }
+    err = esp_wifi_set_mode(WIFI_MODE_STA);
+    if (err != ESP_OK) {
+        goto fail;
+    }
+    err = esp_wifi_start();
+    if (err != ESP_OK) {
+        goto fail;
+    }
+
+    // 新版 C6 支持查询固件版本；出厂 0.0.6 不支持该 RPC，1 秒超时后保留已核实的 legacy 标记。
+    esp_hosted_coprocessor_fwver_t c6_version = {0};
+    if (esp_hosted_get_coprocessor_fwversion(&c6_version) == ESP_OK) {
+        snprintf(s_hosted_slave_version,
+                 sizeof(s_hosted_slave_version),
+                 "%lu.%lu.%lu",
+                 (unsigned long)c6_version.major1,
+                 (unsigned long)c6_version.minor1,
+                 (unsigned long)c6_version.patch1);
+    }
     // 配网和 AI API 测试阶段优先保证连接稳定；关闭省电会增加 Wi-Fi 峰值电流，测试时需要稳定 USB/5V 供电。
-    ESP_RETURN_ON_ERROR(esp_wifi_set_ps(WIFI_PS_NONE), TAG, "disable Wi-Fi power save failed");
+    err = esp_wifi_set_ps(WIFI_PS_NONE);
+    if (err != ESP_OK) {
+        goto fail;
+    }
 
     fridge_wifi_config_t saved = {0};
     s_saved = (read_saved_config(&saved) == ESP_OK);
@@ -518,6 +584,22 @@ esp_err_t fridge_network_init(void)
     start_auto_saved_reconnect_task();
     ESP_LOGI(TAG, "network initialized, saved credential=%s", s_saved ? "yes" : "no");
     return ESP_OK;
+
+fail:
+    // remote Wi-Fi 初始化可能已部分创建 netif、SDMMC 和 LDO4；在未知层级强行拆除比保留到重启更危险。
+    // 锁定首次错误，后续 scan/connect 直接返回同一错误，避免重复创建 hosted 资源。
+    s_init_failed = true;
+    s_hosted_ready = false;
+    s_init_error = err == ESP_OK ? ESP_FAIL : err;
+    strlcpy(s_hosted_last_error, esp_err_to_name(s_init_error), sizeof(s_hosted_last_error));
+    char init_error[FRIDGE_WIFI_MAX_ERROR_LEN];
+    snprintf(init_error,
+             sizeof(init_error),
+             "网络/hosted 初始化失败(%s)，本次启动禁止重试，请重启设备",
+             esp_err_to_name(s_init_error));
+    set_last_error(init_error);
+    ESP_LOGE(TAG, "%s", init_error);
+    return s_init_error;
 }
 
 esp_err_t fridge_network_scan(fridge_wifi_ap_t *aps, size_t max_count, size_t *out_count)
@@ -525,6 +607,7 @@ esp_err_t fridge_network_scan(fridge_wifi_ap_t *aps, size_t max_count, size_t *o
     ESP_RETURN_ON_FALSE(aps && out_count, ESP_ERR_INVALID_ARG, TAG, "invalid scan args");
     ESP_RETURN_ON_FALSE(max_count > 0, ESP_ERR_INVALID_ARG, TAG, "max_count is zero");
     ESP_RETURN_ON_ERROR(fridge_network_init(), TAG, "network init failed before scan");
+    ESP_RETURN_ON_FALSE(!s_c6_ota_guard, ESP_ERR_INVALID_STATE, TAG, "C6 OTA maintenance is active");
     ESP_RETURN_ON_FALSE(s_scan_mutex, ESP_ERR_INVALID_STATE, TAG, "scan mutex is NULL");
 
     *out_count = 0;
@@ -617,6 +700,7 @@ esp_err_t fridge_network_connect(const fridge_wifi_config_t *config, bool save)
     ESP_RETURN_ON_FALSE(config, ESP_ERR_INVALID_ARG, TAG, "config is NULL");
     ESP_RETURN_ON_FALSE(config->ssid[0] != '\0', ESP_ERR_INVALID_ARG, TAG, "SSID is empty");
     ESP_RETURN_ON_ERROR(fridge_network_init(), TAG, "network init failed before connect");
+    ESP_RETURN_ON_FALSE(!s_c6_ota_guard, ESP_ERR_INVALID_STATE, TAG, "C6 OTA maintenance is active");
     ESP_RETURN_ON_FALSE(s_connect_mutex, ESP_ERR_INVALID_STATE, TAG, "connect mutex is NULL");
 
     if (xSemaphoreTake(s_connect_mutex, pdMS_TO_TICKS(WIFI_CONNECT_TIMEOUT_MS + WIFI_DISCONNECT_TIMEOUT_MS + 2000)) != pdTRUE) {
@@ -758,6 +842,7 @@ esp_err_t fridge_network_connect_saved_async(void)
 
 esp_err_t fridge_network_sync_time(void)
 {
+    ESP_RETURN_ON_FALSE(!s_c6_ota_guard, ESP_ERR_INVALID_STATE, TAG, "C6 OTA maintenance is active");
     if (!s_connected) {
         set_last_error("SNTP skipped: Wi-Fi not connected");
         return ESP_ERR_INVALID_STATE;
@@ -838,6 +923,12 @@ esp_err_t fridge_network_get_status(fridge_network_status_t *status)
     status->saved = s_saved;
     status->internet_ready = s_internet_ready;
     status->rssi = s_last_rssi;
+    status->hosted_ready = s_hosted_ready;
+    status->c6_ota_guard = s_c6_ota_guard;
+    status->hosted_retry_count = s_hosted_retry_count;
+    strlcpy(status->hosted_host_version, "2.12.11", sizeof(status->hosted_host_version));
+    strlcpy(status->hosted_slave_version, s_hosted_slave_version, sizeof(status->hosted_slave_version));
+    strlcpy(status->hosted_last_error, s_hosted_last_error, sizeof(status->hosted_last_error));
     strlcpy(status->ssid, s_current_ssid, sizeof(status->ssid));
     strlcpy(status->ip, s_current_ip, sizeof(status->ip));
     strlcpy(status->ntp_server, s_ntp_server, sizeof(status->ntp_server));
@@ -852,5 +943,49 @@ esp_err_t fridge_network_get_status(fridge_network_status_t *status)
             strlcpy(s_current_ssid, status->ssid, sizeof(s_current_ssid));
         }
     }
+    return ESP_OK;
+}
+
+bool fridge_network_hosted_ready(void)
+{
+    return s_hosted_ready && s_initialized && !s_init_failed;
+}
+
+esp_err_t fridge_network_enter_c6_ota(void)
+{
+    if (!fridge_network_hosted_ready()) {
+        return s_init_error != ESP_OK ? s_init_error : ESP_ERR_INVALID_STATE;
+    }
+    if (s_c6_ota_guard) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    // 先设置 guard，阻止新的扫描/连接/SNTP；已有短事务结束后再停止远端 Wi-Fi 状态机。
+    s_c6_ota_guard = true;
+    s_manual_disconnect = true;
+    esp_err_t disconnect_err = esp_wifi_disconnect();
+    if (disconnect_err != ESP_OK && disconnect_err != ESP_ERR_WIFI_NOT_CONNECT) {
+        s_manual_disconnect = false;
+        snprintf(s_hosted_last_error,
+                 sizeof(s_hosted_last_error),
+                 "stop Wi-Fi before C6 OTA failed: %s",
+                 esp_err_to_name(disconnect_err));
+        return disconnect_err;
+    }
+    s_manual_disconnect = false;
+    s_connected = false;
+    s_connecting = false;
+    s_internet_ready = false;
+    s_current_ip[0] = '\0';
+
+    esp_err_t stop_err = esp_wifi_stop();
+    if (stop_err != ESP_OK) {
+        snprintf(s_hosted_last_error,
+                 sizeof(s_hosted_last_error),
+                 "stop Wi-Fi before C6 OTA failed: %s",
+                 esp_err_to_name(stop_err));
+        return stop_err;
+    }
+    ESP_LOGW(TAG, "C6 OTA maintenance guard entered; network stays stopped until reboot");
     return ESP_OK;
 }

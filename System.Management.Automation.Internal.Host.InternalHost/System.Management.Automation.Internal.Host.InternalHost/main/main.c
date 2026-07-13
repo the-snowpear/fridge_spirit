@@ -1,0 +1,619 @@
+// 冰箱小精灵主控启动入口。
+// 这里只做系统初始化编排：NVS、诊断、网络、USB JSON 协议、recovery 兜底和专用硬件测试模式。
+// 硬件注意：屏幕测试与摄像头测试都会占用专用 GPIO，不能和正常运维链路同时启用。
+
+#include <stdio.h>
+#include <string.h>
+
+#include "esp_err.h"
+#include "esp_log.h"
+#include "nvs_flash.h"
+
+#if CONFIG_FRIDGE_SCREEN_TEST && CONFIG_FRIDGE_CAMERA_TEST
+#error "CONFIG_FRIDGE_SCREEN_TEST and CONFIG_FRIDGE_CAMERA_TEST cannot be enabled at the same time"
+#endif
+
+#if CONFIG_FRIDGE_RECOVERY_APP
+#include "esp_app_desc.h"
+#include "esp_crt_bundle.h"
+#include "esp_http_client.h"
+#include "esp_https_ota.h"
+#include "esp_ota_ops.h"
+#include "esp_partition.h"
+#include "fridge_diagnostics.h"
+#include "fridge_network.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#elif CONFIG_FRIDGE_SCREEN_TEST
+#include "fridge_display_test.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#elif CONFIG_FRIDGE_P4_MINIMAL
+// P4 最小移植模式：Wi-Fi(板载C6) + USB JSON + QSPI-4SDA 屏/FT6336U + ES8311 录音 + TF 卡。
+// 触摸仅在确认使用 20-pin FPC 转接板后启用；旧 S3 业务组件不进入此构建图。
+#include "esp_heap_caps.h"
+#include "esp_ota_ops.h"
+#include "fridge_audio.h"
+#include "fridge_diagnostics.h"
+#include "fridge_display.h"
+#include "fridge_network.h"
+#include "fridge_tfcard.h"
+#include "fridge_usb_protocol.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#if CONFIG_FRIDGE_P4_TOUCH_ENABLE
+#include "fridge_touch.h"
+#endif
+#else
+#include "fridge_ai_client.h"
+#include "fridge_camera.h"
+#include "fridge_diagnostics.h"
+#include "fridge_display.h"
+#include "fridge_mqtt_protocol.h"
+#include "fridge_network.h"
+#include "fridge_usb_protocol.h"
+#include "fridge_ui.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#if !CONFIG_FRIDGE_CAMERA_TEST
+#include "fridge_asr.h"
+#include "fridge_audio.h"
+#include "fridge_kitchen_tools.h"
+#include "fridge_kitchen_ai.h"
+#include "fridge_radar.h"
+#include "fridge_sensors.h"
+#include "fridge_speaker.h"
+#include "fridge_state_machine.h"
+#include "fridge_wake_word.h"
+#endif
+#endif
+
+static const char *TAG = "fridge_main";
+
+#if !CONFIG_FRIDGE_SCREEN_TEST
+static void nvs_init_safe(void)
+{
+    // 初始化 NVS，用于保存 Wi-Fi、API 配置和恢复模式需要的网络参数。
+    // 注意：NVS 写入发生在 Flash 中，后续要避免高频写入；本项目只在用户更新配置时写入。
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+}
+#endif
+
+#if !CONFIG_FRIDGE_RECOVERY_APP && !CONFIG_FRIDGE_SCREEN_TEST && !CONFIG_FRIDGE_CAMERA_TEST && !CONFIG_FRIDGE_P4_MINIMAL
+static void mqtt_autostart_task(void *arg)
+{
+    (void)arg;
+    // Wi-Fi 是后台连接的，MQTT 必须等拿到 IP 后再启动；否则只会在启动早期返回 ESP_ERR_INVALID_STATE。
+    for (int i = 0; i < 120; i++) {
+        fridge_network_status_t net = {0};
+        if (fridge_network_get_status(&net) == ESP_OK && net.connected) {
+            esp_err_t err = fridge_mqtt_start();
+            if (err == ESP_OK) {
+                ESP_LOGI(TAG, "MQTT autostart after Wi-Fi connected");
+            } else {
+                ESP_LOGW(TAG, "MQTT autostart failed after Wi-Fi connected: %s", esp_err_to_name(err));
+            }
+            vTaskDelete(NULL);
+        }
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+    ESP_LOGW(TAG, "MQTT autostart timed out waiting for Wi-Fi");
+    vTaskDelete(NULL);
+}
+
+static void start_saved_network_and_mqtt_early(void)
+{
+    esp_err_t saved_ret = fridge_network_connect_saved_async();
+    if (saved_ret == ESP_OK) {
+        ESP_LOGI(TAG, "saved Wi-Fi background connect started");
+    } else {
+        ESP_LOGW(TAG, "start saved Wi-Fi background connect failed: %s", esp_err_to_name(saved_ret));
+    }
+
+    esp_err_t mqtt_ret = fridge_mqtt_start();
+    if (mqtt_ret == ESP_OK) {
+        ESP_LOGI(TAG, "saved MQTT background connect started");
+        return;
+    }
+
+    // 首次上电时 Wi-Fi 往往还没拿到 IP。这里在语音/唤醒词等大内存组件启动前短暂等待，
+    // 让 MQTT 任务优先占住连续内部 SRAM，保证离线恢复后能立刻接收云端快照并上传本地脏数据。
+    ESP_LOGI(TAG, "MQTT not started yet: %s; waiting briefly before audio stack", esp_err_to_name(mqtt_ret));
+    for (int i = 0; i < 20; i++) {
+        fridge_network_status_t net = {0};
+        if (fridge_network_get_status(&net) == ESP_OK && net.connected) {
+            mqtt_ret = fridge_mqtt_start();
+            if (mqtt_ret == ESP_OK) {
+                ESP_LOGI(TAG, "MQTT started before audio stack after Wi-Fi connected");
+                return;
+            }
+            ESP_LOGW(TAG, "MQTT early start after Wi-Fi connected failed: %s", esp_err_to_name(mqtt_ret));
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+
+    BaseType_t ok = xTaskCreate(mqtt_autostart_task, "mqtt_autostart", 4096, NULL, 4, NULL);
+    if (ok != pdPASS) {
+        ESP_LOGW(TAG, "create MQTT autostart task failed");
+    }
+}
+#endif
+
+#if CONFIG_FRIDGE_RECOVERY_APP
+static void recovery_print_json_status(const char *request_id, const char *command)
+{
+    const esp_app_desc_t *app_desc = esp_app_get_description();
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    fridge_network_status_t net = {0};
+    fridge_network_get_status(&net);
+
+    // recovery 响应保持一行 JSON，方便 Web Serial 或脚本在日志噪声中按 request_id 匹配。
+    printf("{\"type\":\"response\",\"request_id\":\"%s\",\"command\":\"%s\",\"ok\":true,"
+           "\"payload\":{\"mode\":\"recovery\",\"firmware\":\"%s\",\"runningPartition\":\"%s\","
+           "\"targetPartition\":\"ota_0\",\"wifiConnected\":%s,\"ssid\":\"%s\",\"ip\":\"%s\","
+           "\"note\":\"local recovery shell; future OTA restore writes main firmware to ota_0\"}}\n",
+           request_id,
+           command,
+           app_desc ? app_desc->version : "dev",
+           running ? running->label : "unknown",
+           net.connected ? "true" : "false",
+           net.ssid,
+           net.ip);
+    fflush(stdout);
+}
+
+static void recovery_print_error(const char *request_id, const char *command, const char *error)
+{
+    printf("{\"type\":\"response\",\"request_id\":\"%s\",\"command\":\"%s\",\"ok\":false,\"error\":\"%s\"}\n",
+           request_id,
+           command,
+           error);
+    fflush(stdout);
+}
+
+static bool recovery_get_json_string(const char *line, const char *key, char *out, size_t out_size)
+{
+    // recovery 只解析调试脚本发来的短 JSON Lines，避免引入完整 JSON 库扩大 ota_1 固件体积。
+    if (!line || !key || !out || out_size == 0) {
+        return false;
+    }
+    out[0] = '\0';
+
+    char pattern[40];
+    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
+    const char *p = strstr(line, pattern);
+    if (!p) {
+        return false;
+    }
+    p = strchr(p + strlen(pattern), ':');
+    if (!p) {
+        return false;
+    }
+    p++;
+    while (*p == ' ' || *p == '\t') {
+        p++;
+    }
+    if (*p != '"') {
+        return false;
+    }
+    p++;
+
+    size_t used = 0;
+    while (*p && *p != '"' && used + 1 < out_size) {
+        if (*p == '\\' && p[1]) {
+            p++;
+        }
+        out[used++] = *p++;
+    }
+    out[used] = '\0';
+    return used > 0;
+}
+
+static void recovery_handle_set_network(const char *line, const char *request_id, const char *command)
+{
+    fridge_wifi_config_t cfg = {0};
+    recovery_get_json_string(line, "ssid", cfg.ssid, sizeof(cfg.ssid));
+    recovery_get_json_string(line, "password", cfg.password, sizeof(cfg.password));
+    if (cfg.ssid[0] == '\0') {
+        recovery_print_error(request_id, command, "ssid is required");
+        return;
+    }
+
+    // recovery 允许保存 Wi-Fi，便于主固件损坏时仍能靠本地兜底程序联网下载后续主固件。
+    esp_err_t err = fridge_network_connect(&cfg, true);
+    if (err != ESP_OK) {
+        fridge_network_status_t status = {0};
+        fridge_network_get_status(&status);
+        recovery_print_error(request_id, command, status.last_error[0] ? status.last_error : esp_err_to_name(err));
+        return;
+    }
+    recovery_print_json_status(request_id, command);
+}
+
+static void recovery_handle_boot_main(const char *request_id, const char *command)
+{
+    const esp_partition_t *main_app = esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_0, "ota_0");
+    if (!main_app) {
+        recovery_print_error(request_id, command, "ota_0 main partition not found");
+        return;
+    }
+
+    // recovery 不覆盖自身，只把下次启动目标切回主固件 ota_0。
+    // 如果 ota_0 镜像已损坏，bootloader 仍会回到可启动分区，避免擦写恢复固件导致失去本地兜底。
+    esp_err_t err = esp_ota_set_boot_partition(main_app);
+    if (err != ESP_OK) {
+        recovery_print_error(request_id, command, esp_err_to_name(err));
+        return;
+    }
+    recovery_print_json_status(request_id, command);
+    vTaskDelay(pdMS_TO_TICKS(200));
+    esp_restart();
+}
+
+static void recovery_handle_restore_main(const char *line, const char *request_id, const char *command)
+{
+    char url[256] = "";
+    recovery_get_json_string(line, "url", url, sizeof(url));
+    if (url[0] == '\0') {
+        recovery_print_error(request_id, command, "url is required");
+        return;
+    }
+
+    const esp_partition_t *main_app = esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_0, "ota_0");
+    if (!main_app) {
+        recovery_print_error(request_id, command, "ota_0 main partition not found");
+        return;
+    }
+
+    // 从 recovery 覆盖 ota_0。这里依赖系统证书包校验 HTTPS 服务器证书；
+    // 生产前还需要增加固件签名/哈希白名单，避免只凭 URL 下载未授权镜像。
+    esp_http_client_config_t http_config = {
+        .url = url,
+        .timeout_ms = 30000,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+        .keep_alive_enable = true,
+    };
+    esp_https_ota_config_t ota_config = {
+        .http_config = &http_config,
+        .bulk_flash_erase = true,
+        .partition = {
+            .staging = main_app,
+            .final = main_app,
+            .finalize_with_copy = false,
+        },
+    };
+
+    puts("{\"type\":\"event\",\"event\":\"recovery_restore_started\",\"target\":\"ota_0\"}");
+    fflush(stdout);
+    esp_err_t err = esp_https_ota(&ota_config);
+    if (err != ESP_OK) {
+        recovery_print_error(request_id, command, esp_err_to_name(err));
+        return;
+    }
+
+    esp_err_t boot_err = esp_ota_set_boot_partition(main_app);
+    if (boot_err != ESP_OK) {
+        recovery_print_error(request_id, command, esp_err_to_name(boot_err));
+        return;
+    }
+
+    recovery_print_json_status(request_id, command);
+    vTaskDelay(pdMS_TO_TICKS(300));
+    esp_restart();
+}
+
+static void recovery_shell_task(void *arg)
+{
+    (void)arg;
+    char line[1024];
+
+    ESP_LOGI(TAG, "recovery JSON Lines shell started");
+    puts("{\"type\":\"event\",\"event\":\"recovery_ready\",\"mode\":\"recovery\",\"commands\":[\"get_status\",\"set_network\",\"restore_main\",\"boot_main\"]}");
+    fflush(stdout);
+
+    while (true) {
+        if (!fgets(line, sizeof(line), stdin)) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
+        }
+
+        char request_id[48] = "recovery";
+        char command[32] = "";
+        recovery_get_json_string(line, "request_id", request_id, sizeof(request_id));
+        recovery_get_json_string(line, "command", command, sizeof(command));
+        if (command[0] == '\0') {
+            recovery_get_json_string(line, "cmd", command, sizeof(command));
+        }
+
+        if (strcmp(command, "get_status") == 0 || strcmp(command, "get_diagnostics") == 0) {
+            recovery_print_json_status(request_id, command);
+        } else if (strcmp(command, "set_network") == 0) {
+            recovery_handle_set_network(line, request_id, command);
+        } else if (strcmp(command, "boot_main") == 0) {
+            recovery_handle_boot_main(request_id, command);
+        } else if (strcmp(command, "restore_main") == 0) {
+            recovery_handle_restore_main(line, request_id, command);
+        } else {
+            recovery_print_error(request_id, command[0] ? command : "unknown", "recovery command not available");
+        }
+    }
+}
+#elif CONFIG_FRIDGE_SCREEN_TEST
+static void display_test_task(void *arg)
+{
+    (void)arg;
+    // 独立屏幕测试任务：长期循环刷测试图案，避免阻塞 ESP-IDF 的 main_task 导致系统看门狗复位。
+    fridge_display_test_run();
+}
+#elif CONFIG_FRIDGE_P4_MINIMAL
+// 在屏幕上刷静态横向色带（黑/红/绿/蓝/白循环）。
+// 目的：不引入 LVGL 的情况下验证杜邦线 QSPI-4SDA 链路、TR230S 窗口设置与整屏显存写入。
+static void p4_minimal_paint_bands(void)
+{
+    const uint16_t colors[] = {0x0000, 0xF800, 0x07E0, 0x001F, 0xFFFF}; // RGB565：黑、红、绿、蓝、白
+    const int band_rows = 40;                                   // 每条色带 40 行，720/40=18 条
+    const size_t buf_px = (size_t)FRIDGE_DISPLAY_WIDTH * band_rows;
+    uint16_t *buf = heap_caps_malloc(buf_px * sizeof(uint16_t), MALLOC_CAP_DEFAULT);
+    if (!buf) {
+        ESP_LOGW(TAG, "test pattern buffer alloc failed (%u bytes)", (unsigned)(buf_px * sizeof(uint16_t)));
+        return;
+    }
+    for (int y = 0; y < FRIDGE_DISPLAY_HEIGHT; y += band_rows) {
+        const uint16_t c = colors[(y / band_rows) % (sizeof(colors) / sizeof(colors[0]))];
+        for (size_t i = 0; i < buf_px; i++) {
+            buf[i] = c;
+        }
+        esp_err_t err = fridge_display_flush_area(0, y, FRIDGE_DISPLAY_WIDTH - 1, y + band_rows - 1, buf);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "flush band y=%d failed: %s", y, esp_err_to_name(err));
+            break;
+        }
+    }
+    heap_caps_free(buf);
+    ESP_LOGI(TAG, "P4 minimal: 屏幕静态色带已刷新完成");
+}
+
+#if CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE
+// OTA 回滚健康确认：只有首阶段初始化已走完且 USB 控制台可用时，才确认当前 ota_0 镜像。
+// 外接屏未连接或单个外设失败不代表固件不可启动；USB 控制台仍可用于读取日志和继续排障。
+static void p4_minimal_confirm_ota_image(void)
+{
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    if (!running) {
+        ESP_LOGE(TAG, "cannot query running OTA partition; image remains unconfirmed");
+        return;
+    }
+
+    esp_ota_img_states_t state = ESP_OTA_IMG_UNDEFINED;
+    esp_err_t err = esp_ota_get_state_partition(running, &state);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "cannot query OTA image state: %s", esp_err_to_name(err));
+        return;
+    }
+    if (state != ESP_OTA_IMG_PENDING_VERIFY) {
+        return;
+    }
+
+    err = esp_ota_mark_app_valid_cancel_rollback();
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "OTA image confirmed valid after P4 minimal health gate");
+    } else {
+        ESP_LOGE(TAG, "failed to confirm OTA image: %s", esp_err_to_name(err));
+    }
+}
+#endif
+
+#if CONFIG_FRIDGE_P4_TOUCH_ENABLE
+// 触摸轮询任务：20-pin FPC 转杜邦板引出 FT6336U 的 INT/SDA/SCL/RST 四根控制线。
+static void p4_minimal_touch_task(void *arg)
+{
+    (void)arg;
+    bool was_pressed = false;
+    while (true) {
+        fridge_touch_point_t pt = {0};
+        if (fridge_touch_read(&pt) == ESP_OK) {
+            if (pt.pressed && !was_pressed) {
+                ESP_LOGI(TAG, "触摸按下: x=%u y=%u points=%u", pt.x, pt.y, pt.points);
+            } else if (!pt.pressed && was_pressed) {
+                ESP_LOGI(TAG, "触摸抬起");
+            }
+            was_pressed = pt.pressed;
+        }
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
+#endif
+#endif
+
+void app_main(void)
+{
+#if CONFIG_FRIDGE_RECOVERY_APP
+    // 小型本地恢复模式：只启动 NVS、诊断、Wi-Fi 和串口 JSON Lines。
+    // 注意：该固件应烧录到 ota_1 小分区，禁止在此模式中初始化屏幕、摄像头、语音或 AI 大组件。
+    ESP_LOGW(TAG, "CONFIG_FRIDGE_RECOVERY_APP is enabled; local recovery mode");
+    nvs_init_safe();
+    fridge_diagnostics_init();
+    ESP_ERROR_CHECK(fridge_network_init());
+
+    esp_err_t saved_ret = fridge_network_connect_saved_async();
+    if (saved_ret == ESP_OK) {
+        ESP_LOGI(TAG, "recovery saved Wi-Fi background connect started");
+    } else {
+        ESP_LOGW(TAG, "recovery saved Wi-Fi not started: %s", esp_err_to_name(saved_ret));
+    }
+
+    BaseType_t ok = xTaskCreate(recovery_shell_task, "recovery_shell", 6144, NULL, 5, NULL);
+    if (ok != pdPASS) {
+        ESP_LOGE(TAG, "create recovery_shell task failed");
+    }
+#elif CONFIG_FRIDGE_SCREEN_TEST
+    // 独立屏幕测试模式：创建后台任务运行 QSPI-4SDA 点亮和彩色图案，避免 Wi-Fi 发射峰值干扰首次硬件排查。
+    ESP_LOGW(TAG, "CONFIG_FRIDGE_SCREEN_TEST is enabled");
+    BaseType_t ok = xTaskCreate(display_test_task, "display_test", 8192, NULL, 5, NULL);
+    if (ok != pdPASS) {
+        ESP_LOGE(TAG, "create display_test task failed");
+    }
+#elif CONFIG_FRIDGE_P4_MINIMAL
+    // P4 最小移植模式（慧勤智远 ESP32-P4 CB V1.2）：
+    // 只初始化 NVS、诊断、USB JSON、网络(esp_hosted/板载C6)、SPI 屏/触摸、ES8311 录音、TF 卡。
+    // 摄像头/传感器/雷达/唤醒词/扬声器不参与本配置的链接；不支持的 USB 命令会立即返回错误。
+    ESP_LOGW(TAG, "CONFIG_FRIDGE_P4_MINIMAL is enabled; P4 bring-up profile");
+    nvs_init_safe();
+    fridge_diagnostics_init();
+
+    // USB JSON 控制台最先启动，保证 hosted 握手或任一外设初始化失败时仍能读取诊断。
+    esp_err_t usb_ret = fridge_usb_protocol_start();
+    if (usb_ret == ESP_OK) {
+        ESP_LOGI(TAG, "USB console task started; hardware commands remain gated during initialization");
+    } else {
+        ESP_LOGW(TAG, "USB provisioning console skipped: %s", esp_err_to_name(usb_ret));
+    }
+
+    // 网络随后启动：esp_hosted 需要复位并握手板载 C6，失败时不阻塞其余硬件验证。
+    esp_err_t net_ret = fridge_network_init();
+    if (net_ret != ESP_OK) {
+        ESP_LOGE(TAG, "network init failed: %s (check C6/SDIO power management)", esp_err_to_name(net_ret));
+    }
+
+    if (net_ret == ESP_OK) {
+        esp_err_t saved_ret = fridge_network_connect_saved_async();
+        if (saved_ret == ESP_OK) {
+            ESP_LOGI(TAG, "saved Wi-Fi background connect started");
+        } else {
+            ESP_LOGW(TAG, "saved Wi-Fi background connect not started: %s", esp_err_to_name(saved_ret));
+        }
+    }
+
+    // 屏幕：复用 S3 已验证的 QSPI-4SDA 初始化与静态色带，杜邦接线阶段从 10MHz 起步。
+    esp_err_t disp_ret = fridge_display_init();
+    if (disp_ret == ESP_OK) {
+        p4_minimal_paint_bands();
+    } else {
+        ESP_LOGW(TAG, "display init failed: %s (check QSPI D0-D3 Dupont wiring/WAIT#)", esp_err_to_name(disp_ret));
+    }
+
+#if CONFIG_FRIDGE_P4_TOUCH_ENABLE
+    // 触摸：20-pin FPC 转接线使用独立 I2C0（SCL=GPIO16、SDA=GPIO17）轮询。
+    esp_err_t touch_ret = fridge_touch_init();
+    if (touch_ret == ESP_OK) {
+        if (xTaskCreate(p4_minimal_touch_task, "p4_touch", 3072, NULL, 4, NULL) != pdPASS) {
+            ESP_LOGW(TAG, "create touch poll task failed");
+        }
+    } else {
+        ESP_LOGW(TAG, "touch init failed: %s", esp_err_to_name(touch_ret));
+    }
+#else
+    ESP_LOGI(TAG, "P4 direct touch disabled by configuration");
+#endif
+
+    // 麦克风：ES8311 编解码器录音路径；PA_CTRL 保持低电平（本阶段不放音）。
+    esp_err_t audio_ret = fridge_audio_init();
+    if (audio_ret != ESP_OK) {
+        ESP_LOGW(TAG, "audio init failed: %s (check ES8311/shared I2C GPIO28-29)", esp_err_to_name(audio_ret));
+    }
+
+    // TF 与 C6 hosted 共用 LDO4 电源域。只有 network/hosted 成功持有并开启 LDO4 后才初始化 Slot0。
+    // 否则继续访问 TF 会把电源域故障误报成无卡或文件系统损坏。
+    if (net_ret == ESP_OK) {
+        esp_err_t tf_ret = fridge_tfcard_init();
+        if (tf_ret != ESP_OK) {
+            ESP_LOGW(TAG, "tfcard init failed: %s", esp_err_to_name(tf_ret));
+        }
+    } else {
+        fridge_tfcard_mark_unavailable("esp_hosted/LDO4 未就绪，已跳过 TF 初始化；请重启设备");
+        ESP_LOGW(TAG, "TF card skipped because esp_hosted/LDO4 is not ready");
+    }
+
+    // 初始化屏障：从此刻起串口发送 ready，并允许配网、录音和 TF 等硬件命令。
+    if (usb_ret == ESP_OK) {
+        fridge_usb_protocol_set_hardware_ready();
+        ESP_LOGI(TAG, "P4 minimal bring-up sequence finished; USB hardware commands enabled");
+#if CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE
+        p4_minimal_confirm_ota_image();
+#endif
+    } else {
+        ESP_LOGI(TAG, "P4 minimal bring-up sequence finished; USB console unavailable");
+    }
+#else
+#if CONFIG_FRIDGE_CAMERA_TEST
+    // 摄像头专用测试模式：跳过屏幕、触摸、传感器和麦克风，避免 OV3660 DVP 引脚与既有外设互相冲突。
+    // 注意：上电前必须确认 OV3660 模组是 3.3V 直连版，且 PWDN/XCLK/SCCB/DVP 接线与计划表一致。
+    ESP_LOGW(TAG, "CONFIG_FRIDGE_CAMERA_TEST is enabled; screen/sensors/audio are skipped");
+    nvs_init_safe();
+    fridge_diagnostics_init();
+
+    ESP_ERROR_CHECK(fridge_network_init());
+    ESP_ERROR_CHECK(fridge_ai_client_init());
+    ESP_ERROR_CHECK(fridge_mqtt_protocol_init());
+    // 摄像头测试模式下先启动 USB 控制台，再由 Web Serial 的 camera_capture 命令按需初始化 OV3660。
+    // 这样即使摄像头断开或供电异常，主控也能保持在线，避免上电阶段卡在 SCCB 探测导致看门狗复位。
+    ESP_LOGW(TAG, "camera init is deferred until camera_capture; keep OV3660 disconnected until power rails are verified");
+    ESP_ERROR_CHECK(fridge_usb_protocol_start());
+    ESP_LOGI(TAG, "camera-only USB console is ready");
+#else
+    // 正常主控模式：初始化 NVS、诊断、Wi-Fi、AI 配置和 USB 配网控制台。
+    // 注意：此路径会启动 Wi-Fi，真实硬件调试时需确认 5V/USB 供电足够稳定。
+    nvs_init_safe();
+    fridge_diagnostics_init();
+
+    ESP_ERROR_CHECK(fridge_network_init());
+    ESP_ERROR_CHECK(fridge_ai_client_init());
+    ESP_ERROR_CHECK(fridge_mqtt_protocol_init());
+    ESP_ERROR_CHECK(fridge_sensors_init());
+
+#if CONFIG_FRIDGE_UI_ENABLE
+    // 屏幕 SPI 刷新需要一块连续的 DMA 内部 SRAM。UI 先启动可避免音频、
+    // 扬声器和唤醒词组件占用/碎片化内部内存后导致屏幕初始化失败。
+    esp_err_t ui_ret = fridge_ui_init();
+    if (ui_ret == ESP_OK) {
+        ESP_LOGI(TAG, "local LVGL touch UI started");
+        for (int i = 0; i < 30 && !fridge_display_is_ready(); i++) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+        if (!fridge_display_is_ready()) {
+            ESP_LOGW(TAG, "display not ready after early UI wait; keep booting with USB diagnostics");
+        }
+    } else {
+        ESP_LOGW(TAG, "local LVGL touch UI skipped: %s", esp_err_to_name(ui_ret));
+    }
+#endif
+
+    esp_err_t usb_ret = fridge_usb_protocol_start();
+    if (usb_ret == ESP_OK) {
+        ESP_LOGI(TAG, "USB provisioning console is ready");
+    } else {
+        ESP_LOGW(TAG, "USB provisioning console skipped: %s", esp_err_to_name(usb_ret));
+    }
+
+    // 厨房 AI 后台任务只做网络请求和 LittleFS 缓存写入，不控制 GPIO。
+    // 它需要一小块连续内部 SRAM 作为 FreeRTOS 栈，因此放在音频/雷达/扬声器前初始化；
+    // 实际 AI 请求和响应大缓冲仍由组件内部优先分配到 PSRAM，降低黑屏重启风险。
+    esp_err_t kitchen_ai_ret = fridge_kitchen_ai_init();
+    if (kitchen_ai_ret != ESP_OK) {
+        ESP_LOGW(TAG, "kitchen AI skipped to keep demo firmware online: %s", esp_err_to_name(kitchen_ai_ret));
+    }
+
+    start_saved_network_and_mqtt_early();
+
+    ESP_ERROR_CHECK(fridge_asr_init());
+    ESP_ERROR_CHECK(fridge_radar_init());
+    ESP_ERROR_CHECK(fridge_audio_init());
+    ESP_ERROR_CHECK(fridge_state_machine_init());
+    ESP_ERROR_CHECK(fridge_speaker_init());
+    esp_err_t kitchen_ret = fridge_kitchen_tools_init();
+    if (kitchen_ret != ESP_OK) {
+        ESP_LOGW(TAG, "kitchen tools skipped to keep demo firmware online: %s", esp_err_to_name(kitchen_ret));
+    }
+    // 语音唤醒：默认不监听，也不在启动期分配 AFE/模型内存。
+    // WakeNet 的初始化（含较大内部 SRAM 占用）推迟到用户首次打开“语音唤醒”开关、
+    // 由策略层在亮屏空闲时惰性触发；NVS 默认 user_en=false，保证升级后启动内存基线不变。
+    ESP_LOGI(TAG, "wake word available; lazily initialized on first enable, gated by screen-awake policy");
+#endif
+#endif
+}

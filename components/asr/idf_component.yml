@@ -1,0 +1,4 @@
+dependencies:
+  # ASR 使用 cJSON 解析 OpenAI-compatible 转写响应；ESP-SR 2.4.0 不再间接带入它，
+  # 因此由实际使用方显式声明，避免依赖偶然的传递关系。
+  espressif/cjson: "1.7.19~2"
