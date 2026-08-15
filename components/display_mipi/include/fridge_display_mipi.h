@@ -34,12 +34,53 @@ typedef void (*fridge_mipi_paint_cb_t)(uint16_t *fb, uint16_t width, uint16_t he
 
 // 用回调在“当前可写帧缓冲”上绘制整屏图案，然后整帧提交并翻页（阻塞直到刷新完成）。
 // 采用零拷贝双缓冲：回调只填当前离屏缓冲，避免撕裂；供彩条等复杂图案使用。
-// 驱动采用单任务所有权，fill/render 不允许跨任务并发调用；刷新超时后需重启设备再初始化。
+// fill/render 与 LVGL/摄像头共用驱动互斥；刷新超时后需重启设备再初始化。
 // 注意：本版只做整屏刷新，局部/LVGL 增量刷新待点亮验证后再单独实现。
 esp_err_t fridge_display_mipi_render(fridge_mipi_paint_cb_t paint, void *ctx);
 
+// 获取 MIPI DPI 驱动已经分配的双帧缓冲。
+// LVGL P4 UI 直接复用这两块 PSRAM 帧缓冲，避免再申请两块 1024x600 RGB565 缓冲。
+esp_err_t fridge_display_mipi_get_frame_buffers(void **fb0, void **fb1);
+
+// UI/PPA 路径获取“当前安全可写缓冲”和另一块缓冲，顺序由 DPI 翻页状态决定。
+// 调用者必须已经持有 begin_ui_render() 的渲染互斥；摄像头接管期间返回失败。
+esp_err_t fridge_display_mipi_get_ui_frame_buffers(void **write_fb, void **other_fb);
+
+// LVGL 整轮渲染互斥。begin 成功后必须调用 end；摄像头接管期间 begin 会失败，
+// 从渲染开始就阻止 LVGL 写双缓冲，而不是等到 flush 阶段才丢弃提交。
+esp_err_t fridge_display_mipi_begin_ui_render(void);
+void fridge_display_mipi_end_ui_render(void);
+
+// 提交 LVGL 渲染完成的整帧缓冲并等待 DPI 刷新边界。
+// frame_buffer 必须是 fridge_display_mipi_get_frame_buffers() 返回的其中一块。
+// 当摄像头预览持有帧缓冲所有权时，LVGL 调用会返回 ESP_ERR_INVALID_STATE，避免双写撕裂。
+esp_err_t fridge_display_mipi_present_frame(void *frame_buffer);
+
+// 摄像头预览专用整帧提交接口。调用前必须先 acquire，避免普通 LVGL 路径绕过所有权检查。
+esp_err_t fridge_display_mipi_present_camera_frame(void *frame_buffer);
+
+// 摄像头接管后获取“当前安全可写缓冲”和另一块缓冲，顺序由驱动的翻页状态决定。
+esp_err_t fridge_display_mipi_get_camera_frame_buffers(void **write_fb, void **other_fb);
+
+// 摄像头预览申请/释放 DPI 帧缓冲所有权。
+// 持有期间只允许摄像头路径提交整帧；LVGL flush 应暂停。
+// 预览结束后必须 release，并触发一次 LVGL 全屏重绘。
+esp_err_t fridge_display_mipi_acquire_for_camera(void);
+esp_err_t fridge_display_mipi_release_from_camera(void);
+bool fridge_display_mipi_camera_owns_framebuffers(void);
+
 // 打开/关闭背光（BL=GPIO23，高有效）。
+// 关闭时只将 PWM 占空比降为 0，不会丢失此前设置的亮度百分比；重新打开后恢复该亮度。
 void fridge_display_mipi_set_backlight(bool on);
+
+// 设置/读取背光亮度百分比。有效范围固定为 10%～100%，调用方负责将用户偏好持久化到 NVS。
+// 该接口只操作 GPIO23 的 20kHz LEDC PWM，不访问 Flash；显示未初始化时设置会返回 ESP_ERR_INVALID_STATE。
+esp_err_t fridge_display_mipi_set_brightness(uint8_t percent);
+uint8_t fridge_display_mipi_get_brightness(void);
+
+// 返回当前背光输出是否打开。亮度偏好仍可保留为非零值，但屏幕待机时该状态为 false，
+// 供 WakeNet 策略决定是否暂停监听，避免黑屏时继续占用板载音频资源。
+bool fridge_display_mipi_is_backlight_enabled(void);
 
 // 返回 MIPI-DSI 面板是否已初始化完成。
 bool fridge_display_mipi_is_ready(void);

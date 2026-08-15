@@ -101,6 +101,7 @@ def _derived_client_event_id(parent_id: str, suffix: str) -> str:
 
 
 def _item_to_schema(item: InventoryItem) -> InventoryItemSchema:
+    extra = item.extra if isinstance(item.extra, dict) else {}
     return InventoryItemSchema(
         id=item.id,
         name=item.name,
@@ -109,13 +110,16 @@ def _item_to_schema(item: InventoryItem) -> InventoryItemSchema:
         unit=item.unit,
         zone=item.zone,
         slot=item.slot,
+        zone_id=item.zone,
+        layer_id=extra.get("layerId"),
+        cell=extra.get("cell"),
         location=item.location,
         expire_date=item.expire_date,
         status=item.status,
         source=item.source,
         confidence=item.confidence,
         updated_at=item.updated_at,
-        extra=item.extra if isinstance(item.extra, dict) else {},
+        extra=extra,
     )
 
 
@@ -450,7 +454,7 @@ async def _upsert_inventory_item(
     item.category = payload.get("category")
     item.quantity = _parse_quantity(payload.get("quantity"), item.quantity)
     item.unit = str(payload.get("unit") or item.unit or "份")[:24]
-    item.zone = payload.get("zone")
+    item.zone = payload.get("zoneId") or payload.get("zone_id") or payload.get("zone")
     item.slot = payload.get("slot")
     item.location = payload.get("location")
     parsed_expire_date = _parse_date(payload.get("expireDate") or payload.get("expire_date"))
@@ -462,6 +466,11 @@ async def _upsert_inventory_item(
     next_extra = payload.get("extra") if isinstance(payload.get("extra"), dict) else item.extra or {}
     # 记录本次编辑时间，供后续后写覆盖比较；0 时沿用旧值，避免抹掉历史时间戳。
     next_extra = dict(next_extra)
+    layer_id = payload.get("layerId") or payload.get("layer_id")
+    if layer_id is not None:
+        next_extra["layerId"] = layer_id
+    if payload.get("cell") is not None:
+        next_extra["cell"] = payload.get("cell")
     if updated_at_ms > 0:
         next_extra["syncUpdatedAtMs"] = updated_at_ms
     item.extra = next_extra
@@ -525,6 +534,9 @@ async def _replace_inventory_from_device_snapshot(
             "quantity": quantity_value,
             "unit": unit,
             "zone": zone_key,
+            "zoneId": raw.get("zoneKey") or raw.get("zone_id") or zone_key,
+            "layerId": raw.get("layerId") or raw.get("layer_id"),
+            "cell": raw.get("cell"),
             "slot": slot,
             "location": location,
             "expireDate": None,

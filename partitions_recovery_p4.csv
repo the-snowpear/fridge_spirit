@@ -1,9 +1,9 @@
 # Name,   Type, SubType, Offset,  Size,   Flags
 # 16MB Flash layout for WKS ESP32-P4 CB V1.2 (W25Q128).
-# 与 S3 版 partitions_recovery.csv 保持相同分区名与角色，仅按 16MB 扩容：
+# P4 16MB Flash 分区表：保留与历史 recovery 方案相同的分区名与角色，并按 16MB 扩容：
 #   ota_0 主固件 6M；ota_1 本地 recovery 2M；assets(0x83, LittleFS) 4M；
-#   cache(0x83) 1M；model(0x40, ESP-SR srmodels.bin) 2M；coredump 64K。
-# app 分区偏移必须 64K 对齐（0x30000 / 0x630000）。分区末端为 0xF40000，尾部保留 768KiB。
+#   cache(0x83) 1M；model(0x40, ESP-SR srmodels.bin) 2M；coredump 768K。
+# app 分区偏移必须 64K 对齐（0x30000 / 0x630000）。coredump 末端为 0xFF0000，尾部保留 64KiB。
 nvs,      data, nvs,     0x9000,  64K,
 otadata,  data, ota,     0x19000, 8K,
 phy_init, data, phy,     0x21000, 4K,
@@ -12,4 +12,4 @@ ota_1,    app,  ota_1,   0x630000, 2M,
 assets,   data, 0x83,            , 4M,
 cache,    data, 0x83,            , 1M,
 model,    data, 0x40,            , 2M,
-coredump, data, coredump,        , 64K,
+coredump, data, coredump,        , 768K,

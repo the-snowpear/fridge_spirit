@@ -1,0 +1,18 @@
+{
+  "files": [
+    "config/agent.json",
+    "config/persona.json",
+    "config/providers.json",
+    "skills/kitchen/inventory_query/SKILL.md",
+    "skills/kitchen/inventory_query/manifest.json",
+    "workflows/inventory/query.json"
+  ],
+  "format": "fridge-agent-source/1",
+  "min_firmware_protocol": "agent-jsonlines/1",
+  "package_id": "fridge-agent-defaults",
+  "required_firmware_tools": [
+    "inventory.list",
+    "runtime.finish"
+  ],
+  "version": "1.0.0"
+}

@@ -29,6 +29,15 @@ declare namespace WechatMiniprogram {
     onProgressUpdate(callback: (res: { progress: number; totalBytesSent: number; totalBytesExpectedToSend: number }) => void): void;
   }
 
+  interface SocketTask {
+    send(option: { data: string; success?: (res: GeneralCallbackResult) => void; fail?: (res: GeneralCallbackResult) => void }): void;
+    close(option?: { code?: number; reason?: string }): void;
+    onOpen(callback: (res: GeneralCallbackResult) => void): void;
+    onMessage(callback: (res: { data: string | ArrayBuffer }) => void): void;
+    onClose(callback: (res: GeneralCallbackResult & { code?: number; reason?: string }) => void): void;
+    onError(callback: (res: GeneralCallbackResult) => void): void;
+  }
+
   interface LoginSuccessCallbackResult extends GeneralCallbackResult {
     code: string;
   }
@@ -101,6 +110,7 @@ declare namespace WechatMiniprogram {
       fail?: (res: GeneralCallbackResult) => void;
       complete?: (res: GeneralCallbackResult) => void;
     }): UploadTask;
+    connectSocket(option: { url: string; header?: IAnyObject; protocols?: string[]; timeout?: number }): SocketTask;
     getStorageSync<T = any>(key: string): T;
     setStorageSync<T = any>(key: string, data: T): void;
     removeStorageSync(key: string): void;

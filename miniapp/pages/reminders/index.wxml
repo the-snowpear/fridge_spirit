@@ -23,7 +23,7 @@
         <text class="soft">到期：{{item.dueText}}</text>
         <view class="row" style="gap: var(--space-3);">
           <button class="btn ghost" style="height: 64rpx; line-height: 64rpx; padding: 0 var(--space-5);" data-id="{{item.id}}" loading="{{item.confirming}}" bindtap="onDismiss">忽略</button>
-          <button class="btn secondary" style="height: 64rpx; line-height: 64rpx; padding: 0 var(--space-5);" data-id="{{item.id}}" loading="{{item.confirming}}" bindtap="onConfirm">确认</button>
+          <button class="btn secondary" style="height: 64rpx; line-height: 64rpx; padding: 0 var(--space-5);" data-id="{{item.id}}" loading="{{item.confirming}}" bindtap="onConfirm">完成</button>
         </view>
       </view>
     </view>

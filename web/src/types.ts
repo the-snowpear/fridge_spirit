@@ -11,6 +11,8 @@ export interface DeviceRequest {
   request_id: string;
   command: DeviceCommand;
   payload?: unknown;
+  tool?: string;
+  arguments?: Record<string, unknown>;
 }
 
 export interface DeviceResponse<TPayload = unknown> {
@@ -58,6 +60,13 @@ export type DeviceCommand =
   | "select_ai_profile"
   | "delete_ai_profile"
   | "test_ai_chat"
+  | "agent_submit"
+  | "agent_run_status"
+  | "agent_cancel"
+  | "agent_confirm"
+  | "agent_reject"
+  | "agent_session_read"
+  | "agent_session_clear"
   | "ai_assistant_chat"
   | "get_kitchen_ai_status"
   | "kitchen_ai_generate"
@@ -81,12 +90,16 @@ export type DeviceCommand =
   | "mic_record_status"
   | "mic_record_stop"
   | "mic_record_wav"
+  | "mic_record_wav_info"
+  | "mic_record_wav_chunk"
+  | "mic_record_wav_end"
   | "voice_chat_start"
   | "voice_chat_stop"
   | "voice_chat_status"
   | "tts_play"
   | "tts_status"
   | "tts_stop"
+  | "speaker_beep"
   | "radar_test_start"
   | "radar_test_status"
   | "radar_test_stop"
@@ -100,15 +113,15 @@ export type DeviceCommand =
   | "camera_reset"
   | "get_ai_context_preview"
   | "test_ai_task"
-  | "get_memory_summary"
-  | "set_memory_summary"
-  | "clear_memory_summary"
   | "get_chat_history"
   | "clear_chat_history"
   | "get_pins"
   | "get_sensors"
   | "get_diagnostics"
   | "get_logs"
+  | "tool_call"
+  | "ui_status"
+  | "screenshot_capture"
   | "get_tfcard_status"
   | "tf_list"
   | "tf_stat"
@@ -135,7 +148,80 @@ export type DeviceCommand =
   | "tf_http_disable"
   | "tf_export_diagnostics"
   | "format_tfcard"
-  | "tfcard_selftest";
+  | "tfcard_selftest"
+  | "get_realtime_config"
+  | "set_realtime_config"
+  | "clear_realtime_key"
+  | "realtime_start"
+  | "realtime_stop"
+  | "realtime_status"
+  | "realtime_send_text"
+  | "realtime_cancel"
+  | "mq5_confirm_burn_in"
+  | "mq5_capture_baseline"
+  | "mq5_reset_calibration";
+
+/** MQ-5 燃气模块运行状态（与固件 fridge_mq5_state_t 一一对应；unknown 为防御性 fallback） */
+export type Mq5State =
+  | "disabled"
+  | "error"
+  | "warming_up"
+  | "needs_burn_in"
+  | "ready_to_calibrate"
+  | "monitoring"
+  | "unknown";
+
+/** MQ-5 校准操作命令（均需携带精确 confirm 口令） */
+export type Mq5Command = "mq5_confirm_burn_in" | "mq5_capture_baseline" | "mq5_reset_calibration";
+
+/** 智谱 GLM Realtime 配置视图（设备端 NVS；不含明文 Key） */
+export interface RealtimeConfig {
+  url: string;
+  model: string;
+  voice: string;
+  instructions: string;
+  vadMode: string;
+  timeoutMs: number;
+  enabled: boolean;
+  hasApiKey: boolean;
+  ready: boolean;
+  apiKeyPreview: string;
+  lastError: string;
+}
+
+export interface RealtimeStatus {
+  ready: boolean;
+  sessionActive: boolean;
+  networkOk: boolean;
+  internetReady: boolean;
+  audioUpActive: boolean;
+  audioDownActive: boolean;
+  toolsReady: boolean;
+  state: string;
+  model: string;
+  voice: string;
+  lastError: string;
+  toolsExported: number;
+  audioUpBytes: number;
+  audioDownBytes: number;
+  toolCallsOk: number;
+  toolCallsFail: number;
+  lastEventAgeMs: number;
+}
+
+export interface RealtimeEventPayload {
+  state?: string;
+  role?: string;
+  text?: string;
+  tool?: string;
+  callId?: string;
+  arguments?: string;
+  summary?: string;
+  code?: string;
+  status?: string;
+  isFinal?: boolean;
+  latencyMs?: number;
+}
 
 export interface TfCardStatus {
   mounted: boolean;
@@ -309,8 +395,18 @@ export interface TTSConfig {
   ready: boolean;
 }
 
+export type MicSource = "es8311" | "fy_sp703";
+
 export interface VoiceChatStatus {
   state: "idle" | "recording" | "wake_listening" | "ready" | "error";
+  source?: MicSource;
+  nativeSampleRate?: number;
+  nativeBitsPerSample?: number;
+  nativeChannels?: number;
+  selectedChannel?: "left" | "right" | "mix" | string;
+  leftRms?: number;
+  rightRms?: number;
+  overflowCount?: number;
   durationMs: number;
   pcmBytes: number;
   rms: number;
@@ -330,6 +426,7 @@ export interface WakeStatus {
   state: "idle" | "listening" | "error" | string;
   wakeWord: string;
   model: string;
+  audioSource?: MicSource;
   triggerCount: number;
   lastTriggerMs: number;
   vadState: number;
@@ -374,6 +471,7 @@ export interface VoiceChatResponse {
 }
 
 export interface MicRecordWavResponse {
+  source?: MicSource;
   sampleRate: number;
   channels: number;
   bitsPerSample: number;
@@ -381,6 +479,28 @@ export interface MicRecordWavResponse {
   pcmBytes: number;
   wavBytes: number;
   wavBase64: string;
+}
+
+export interface MicRecordWavInfoResponse {
+  source?: MicSource;
+  sampleRate: number;
+  channels: number;
+  bitsPerSample: number;
+  durationMs: number;
+  pcmBytes: number;
+  wavBytes: number;
+  chunkBytes: number;
+  session: number;
+  fullCrc32: number;
+}
+
+export interface MicRecordWavChunkResponse {
+  session: number;
+  offset: number;
+  length: number;
+  crc32: number;
+  eof: boolean;
+  data_b64: string;
 }
 
 export interface TTSStatus {
@@ -536,6 +656,69 @@ export interface AIChatResponse {
   httpStatus?: number;
 }
 
+// P4 唯一 Agent Session 的同步调试返回；上下文和历史均由设备 Runtime 管理。
+export interface AgentChatResponse {
+  reply: string;
+  latencyMs: number;
+  httpStatus: number;
+  runId: string;
+  status: string;
+}
+
+export interface AgentSubmitResponse {
+  queued: boolean;
+  runId: string;
+  state: string;
+}
+
+export interface AgentConfirmation {
+  callId: string;
+  toolName: string;
+  arguments: Record<string, unknown>;
+  permission: string;
+}
+
+export interface AgentRunStatus {
+  active: boolean;
+  runId: string;
+  state: string;
+  intent: string;
+  reply: string;
+  error: string;
+  httpStatus: number;
+  modelLatencyMs: number;
+  contextBytes: number;
+  toolSchemaCount: number;
+  modelSteps: number;
+  cloudStackHighWater: number;
+  freePsramBytes: number;
+  internalDmaLargestBytes: number;
+  cloudPending: boolean;
+  confirmation: AgentConfirmation | null;
+}
+
+export interface AgentSessionRecord {
+  kind: "user" | "assistant" | "tool" | "result";
+  run_id: string;
+  call_id: string;
+  time: string;
+  text: string;
+  tool_name: string;
+  detail: string;
+  latency: string;
+  risk: number;
+  tool_status: number;
+  requires_confirmation: boolean;
+}
+
+export interface AgentSession {
+  schema_version: number;
+  foreground: {
+    next_sequence: number;
+    messages: AgentSessionRecord[];
+  };
+}
+
 export type ProjectAITaskType =
   | "chat_assist"
   | "recognize_ingredients"
@@ -550,7 +733,6 @@ export interface ProjectAITaskRequest {
   taskType: ProjectAITaskType;
   userText: string;
   includeInventory: boolean;
-  includeMemory: boolean;
   includeReminders: boolean;
   includePreferences: boolean;
 }
@@ -590,16 +772,6 @@ export interface ProjectAITaskResponse {
   needsConfirmation: boolean;
   safetyNote: string;
   result: unknown;
-}
-
-export interface MemorySummary {
-  schema_version?: number;
-  memory_policy?: string;
-  family_size?: number;
-  taste?: string[];
-  avoid?: string[];
-  allergies?: string[];
-  recent_summary?: string[];
 }
 
 export interface DeviceChatHistoryMessage {
@@ -642,17 +814,26 @@ export interface PinInfo {
 }
 
 export interface SensorSnapshot {
-  pir: boolean;
-  lux: number;
+  profile?: string;
+  pir?: boolean;
+  lux?: number;
   lightRaw12bit?: number;
   lightValue10bit?: number;
   lightPercent?: number;
   lightPolarity?: "raw_high_dark" | "raw_high_bright" | string;
-  lightDelta: number;
+  lightDelta?: number;
   imuReady?: boolean;
+  baselineReady?: boolean;
   imuAddress?: number;
   imuWhoAmI?: number;
   imuError?: number;
+  imuErrorName?: string;
+  consecutiveFailures?: number;
+  sampleCount?: number;
+  i2cBus?: number;
+  sclGpio?: number;
+  sdaGpio?: number;
+  sampleRateHz?: number;
   accelXG?: number;
   accelYG?: number;
   accelZG?: number;
@@ -662,13 +843,29 @@ export interface SensorSnapshot {
   imuTemperatureC?: number;
   pitchDeg?: number;
   rollDeg?: number;
-  angleDelta: number;
-  vibrationPeak: number;
+  angleDelta?: number;
+  vibrationPeak?: number;
   radar?: RadarSnapshot;
-  touch: string;
-  display: string;
-  buzzer: string;
-  doorState: string;
+  touch?: string;
+  display?: string;
+  buzzer?: string;
+  doorState?: string;
+  // MQ-5 燃气模块（GPIO20 ADC1_CH4，仅 AO）：相对 ADC 读数，不是 ppm；
+  // 旧固件不返回这些字段时为 undefined，前端必须显示 "--" 而不是崩溃。
+  mq5State?: Mq5State;
+  mq5Ready?: boolean;
+  mq5Error?: number;
+  mq5Raw12bit?: number;
+  mq5Value10bit?: number;
+  mq5AdcPercent?: number;
+  mq5SampleCount?: number;
+  mq5UpdatedAtMs?: number;
+  mq5WarmupElapsedSec?: number;
+  mq5DailyWarmupComplete?: boolean;
+  mq5BurnInConfirmed?: boolean;
+  mq5BaselineReady?: boolean;
+  mq5BaselineRaw12bit?: number;
+  mq5DeltaFromBaseline?: number;
   stateMachine?: StateMachineStatus | null;
   updatedAt: string;
 }
@@ -778,6 +975,7 @@ export interface SectionDefinition {
     | "usb"
     | "network"
     | "ai"
+    | "realtime"
     | "camera"
     | "mic"
     | "speaker"
@@ -787,7 +985,24 @@ export interface SectionDefinition {
     | "logs"
     | "diagnostics"
     | "tfcard"
+    | "ui_preview"
     | "settings";
   label: string;
   icon: LucideIcon;
+}
+
+export interface ScreenshotResponse {
+  path: string;
+  format: "jpeg" | "bmp";
+  bytes?: number;
+}
+
+export interface UiStatus {
+  ready: boolean;
+  resourceReady: boolean;
+  framebuffersSynced: boolean;
+  pageFrameReady: boolean;
+  page: string;
+  orientation: "landscape" | "portrait_privacy";
+  privacyMode: boolean;
 }

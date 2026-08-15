@@ -15,8 +15,10 @@ extern "C" {
 #define FRIDGE_MQTT_MAX_STATUS_LEN 160
 #define FRIDGE_MQTT_MAX_TOPIC_LEN 192
 #define FRIDGE_MQTT_DEFAULT_KEEPALIVE_SECONDS 60
+#define FRIDGE_MQTT_PROTOCOL_VERSION 2
+#define FRIDGE_MQTT_MAX_PAYLOAD_BYTES (64U * 1024U)
 
-// 云端绑定配置：由 USB/Web Serial 面板或后续小程序绑定流程写入 NVS。
+// P4 Agent 公网绑定配置：由 USB 管理通道或二维码绑定流程写入 NVS。
 // 注意：password/token 只用于连接 MQTT Broker，绝不能输出到串口响应或日志。
 typedef struct {
     char broker_uri[FRIDGE_MQTT_MAX_URI_LEN + 1];
@@ -24,12 +26,13 @@ typedef struct {
     char device_id[FRIDGE_MQTT_MAX_ID_LEN + 1];
     char username[FRIDGE_MQTT_MAX_ID_LEN + 1];
     char password[FRIDGE_MQTT_MAX_TOKEN_LEN + 1];
+    uint32_t binding_epoch;
     uint16_t keepalive_seconds;
     bool use_tls;
     bool enabled;
 } fridge_mqtt_config_t;
 
-// 云端同步状态：只返回脱敏后的连接情况，供 Web 面板和诊断组件展示。
+// 云端同步状态：只返回脱敏后的连接情况，供 UI、USB 和诊断组件展示。
 typedef struct {
     bool initialized;
     bool enabled;
@@ -39,6 +42,10 @@ typedef struct {
     uint32_t reconnect_count;
     uint32_t published_count;
     uint32_t received_count;
+    uint32_t rejected_count;
+    uint32_t queue_dropped_count;
+    uint32_t binding_epoch;
+    uint16_t protocol_version;
     int last_error;
     char broker_uri[FRIDGE_MQTT_MAX_URI_LEN + 1];
     char home_id[FRIDGE_MQTT_MAX_ID_LEN + 1];
@@ -71,20 +78,31 @@ esp_err_t fridge_mqtt_stop(void);
 // 发布设备状态快照。online=false 时可用于离线前遗嘱语义的手动上报。
 esp_err_t fridge_mqtt_publish_state(bool online);
 
-// 发布简短传感器聚合事件；v1 不发布原始高频 IMU/雷达流。
+// 发布设备诊断聚合事件；P4 v2 不依赖旧 S3 传感器模型，也不发布原始高频流。
 esp_err_t fridge_mqtt_publish_sensor_snapshot(void);
 
-// 发布当前 UI 库存同步快照。
-// 仅在用户确认保存、云端请求刷新或调试命令触发时调用；未连接时返回 ESP_ERR_INVALID_STATE。
+// 兼容旧调用点：发布 inventory 域“快照可拉取”事件，不再通过 MQTT 发送大型完整快照。
 esp_err_t fridge_mqtt_publish_inventory_snapshot(bool force_import);
 
-// 请求后台发布当前 UI 库存同步快照。
-// 注意：该接口只投递后台任务，避免 LVGL 触摸回调里直接执行大 JSON 序列化和 MQTT publish。
+// 请求后台发布 inventory 域“快照可拉取”事件。
 esp_err_t fridge_mqtt_request_inventory_publish(bool force_import);
 
-// 把本地未上报的会话历史增量作为 ai_history 域事件 push 到云端；无增量时返回 ESP_OK 跳过。
-// 由语音会话每轮结束和 MQTT 重连补发两处调用；未连接时返回 ESP_ERR_INVALID_STATE。
+// 兼容旧调用点：发布 agent_sessions 域“增量可拉取”事件，不直接上传完整会话。
 esp_err_t fridge_mqtt_publish_chat_history_delta(void);
+
+// 发布 P4 Agent v2 业务同步事件。data_json 必须是 JSON object/array/null，最大 64KiB。
+// 函数只把消息投递给 MQTT worker，不在调用方任务里执行网络 I/O。
+esp_err_t fridge_mqtt_publish_sync_event(const char *domain,
+                                         const char *entity_id,
+                                         const char *operation,
+                                         uint32_t base_entity_revision,
+                                         const char *data_json);
+
+// 应用后端 HTTP 快照 data（也接受外层 {"data": ...} ApiResponse）：
+// {"serverRevision":N,"domains":{"inventory":[{"entityId":"...","entityRevision":N,
+// "serverRevision":N,"data":{...}}], ...}}。
+// 复用 MQTT sync.apply 的版本/幂等规则并通过 Agent Storage 可恢复写入。
+esp_err_t fridge_mqtt_apply_snapshot_json(const char *json);
 
 // 发布命令回执；request_id 必须来自云端命令，便于后端幂等处理。
 esp_err_t fridge_mqtt_publish_command_ack(const char *request_id, const char *command, bool ok, const char *message);

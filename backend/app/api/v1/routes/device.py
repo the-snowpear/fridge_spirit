@@ -44,6 +44,7 @@ async def device_bind(
     db: AsyncSession = Depends(get_db),
 ) -> ApiResponse[DeviceSummary]:
     """旧版绑定：显式传 user_id / home_id / device_sn；若设备未注册则先 upsert。"""
+    raise HTTPException(status_code=410, detail="LEGACY_API_REMOVED: use /api/v2/bindings/claim")
     # 设备主表 upsert：旧 demo 设备可能尚未在 devices 表里，按 device_sn 找不到就建。
     result = await db.execute(select(Device).where(Device.device_sn == payload.device_sn))
     device = result.scalar_one_or_none()

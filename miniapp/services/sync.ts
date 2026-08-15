@@ -1,131 +1,80 @@
 /**
- * 三端同步服务：维护本地队列、dirty 域和 serverRevision。
- *
- * 第一版策略：
- * - 初次同步先请求设备上报本地快照，后端接收后再拉云端快照，避免旧云端数据抢先覆盖设备。
- * - 后续同步先 push 本地队列，再 pull 云端快照，最后把云端最新版本下发设备。
- * 失败时只记录错误和队列，不阻塞页面原有 REST 写入与离线展示。
+ * P4 v2 离线同步：稳定 eventId、逐实体 revision、显式冲突和 REST 游标补偿。
  */
-
-import {
-  getSyncStatus,
-  pullSyncChanges,
-  pushSyncSnapshotToDevice,
-  pushSyncChanges,
-} from "./api";
+import { getSyncSnapshot, pullSyncChanges, pushSyncChanges } from "./api";
 import type {
-  InventoryItem,
-  LocalSyncState,
-  RecipeRecommendation,
-  ReminderItem,
-  ShoppingItem,
-  SyncDomain,
-  SyncEvent,
-  SyncSnapshotData,
+  InventoryItem, LocalSyncState, RecipeRecommendation, ReminderItem, ShoppingItem,
+  SyncDomain, SyncEvent, SyncSnapshotData,
 } from "../types/models";
 import { getStorage, setStorage } from "../utils/storage";
-import { RequestError } from "../utils/request";
-import {
-  RECIPE_RECOMMENDATIONS_KEY,
-  NUTRITION_CACHE_KEY,
-  SHOPPING_ITEMS_KEY,
-  updateOfflineSnapshot,
-} from "../utils/localFeatures";
+import { NUTRITION_CACHE_KEY, OFFLINE_SNAPSHOT_KEY, RECIPE_RECOMMENDATIONS_KEY, SHOPPING_ITEMS_KEY, updateOfflineSnapshot } from "../utils/localFeatures";
 import { setAllFridgeZones } from "../utils/fridgeZones";
+import { normalizeInventoryItem } from "../utils/inventoryLocation";
 
-export const SYNC_QUEUE_KEY = "syncQueue";
-export const SYNC_STATE_KEY = "syncState";
+export const SYNC_QUEUE_KEY = "syncQueueV2";
+export const SYNC_STATE_KEY = "syncStateV2";
+const ENTITY_REVISION_KEY = "syncEntityRevisionsV2";
+const DEFAULT_SYNC_STATE: LocalSyncState = { serverRevision: 0, dirtyDomains: [], conflicts: [] };
+let syncInFlight: Promise<SyncSnapshotData | null> | null = null;
 
-const DEFAULT_SYNC_STATE: LocalSyncState = {
-  serverRevision: 0,
-  dirtyDomains: [],
+const DOMAIN_MAP: Record<string, SyncDomain> = {
+  reminder: "reminders", shopping_list: "shopping", recipe_cache: "recipes",
+  nutrition_cache: "nutrition", settings: "device_settings", fridge_zones: "device_settings",
+  ai_history: "agent_sessions", asr_config: "ai_config", tts_config: "ai_config",
 };
 
-const DEVICE_SEED_WAIT_MS = 1600;
-const DEVICE_SEED_POLL_COUNT = 4;
-const DEVICE_SEED_POLL_INTERVAL_MS = 1200;
-const STATUS_REFRESH_DEBOUNCE_MS = 1500;
-const DEVICE_REFRESH_DOMAINS: SyncDomain[] = [
-  "inventory",
-  "fridge_zones",
-  "ai_config",
-  "asr_config",
-  "tts_config",
-  "shopping_list",
-  "recipe_cache",
-  "nutrition_cache",
-  "reminder",
-  "settings",
-];
-const DEVICE_MANUAL_REFRESH_DOMAINS: SyncDomain[] = [
-  "inventory",
-  "fridge_zones",
-  "shopping_list",
-  "recipe_cache",
-  "nutrition_cache",
-  "reminder",
-  "settings",
-];
+function uuidV4(): string {
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (char) => {
+    const value = Math.floor(Math.random() * 16);
+    return (char === "x" ? value : (value & 0x3) | 0x8).toString(16);
+  });
+}
 
-let syncInFlight: Promise<SyncSnapshotData | null> | null = null;
-let statusInFlight: Promise<LocalSyncState> | null = null;
-let lastStatusRefreshAt = 0;
-
-function isSyncRouteMissing(err: unknown): boolean {
-  return err instanceof RequestError && err.kind === "http" && err.statusCode === 404;
+function revisions(): Record<string, number> {
+  return getStorage<Record<string, number>>(ENTITY_REVISION_KEY) || {};
+}
+function setRevision(domain: string, entityId: string, revision: number): void {
+  setStorage(ENTITY_REVISION_KEY, { ...revisions(), [`${domain}:${entityId}`]: revision });
+}
+function normalizeEntityId(domain: string, payload: Record<string, unknown>): string {
+  return String(payload.entityId || payload.itemId || payload.reminderId || payload.id ||
+    (domain === "device_settings" ? "primary" : domain === "ai_config" ? "active-profile" : "default"));
+}
+function normalizeData(payload: Record<string, unknown>): Record<string, unknown> {
+  const nested = payload.payload;
+  return nested && typeof nested === "object" ? { ...(nested as Record<string, unknown>) } : { ...payload };
 }
 
 export function getLocalSyncState(): LocalSyncState {
   return { ...DEFAULT_SYNC_STATE, ...(getStorage<LocalSyncState>(SYNC_STATE_KEY) || {}) };
 }
-
 export function saveLocalSyncState(patch: Partial<LocalSyncState>): LocalSyncState {
   const current = getLocalSyncState();
-  const next: LocalSyncState = {
-    ...current,
-    ...patch,
-    dirtyDomains: patch.dirtyDomains || current.dirtyDomains || [],
-  };
+  const next = { ...current, ...patch, dirtyDomains: patch.dirtyDomains || current.dirtyDomains || [] };
   setStorage(SYNC_STATE_KEY, next);
   return next;
 }
-
-export function getSyncQueue(): SyncEvent[] {
-  return getStorage<SyncEvent[]>(SYNC_QUEUE_KEY) || [];
-}
-
+export function getSyncQueue(): SyncEvent[] { return getStorage<SyncEvent[]>(SYNC_QUEUE_KEY) || []; }
 export function markDomainDirty(domain: SyncDomain): void {
-  const state = getLocalSyncState();
-  const dirty = new Set(state.dirtyDomains || []);
-  dirty.add(domain);
-  saveLocalSyncState({ dirtyDomains: Array.from(dirty) });
+  saveLocalSyncState({ dirtyDomains: Array.from(new Set([...getLocalSyncState().dirtyDomains, domain])) });
 }
 
-export function enqueueSyncOp(
-  domain: SyncDomain,
-  op: string,
-  payload: Record<string, unknown>,
-): SyncEvent {
-  const state = getLocalSyncState();
-  // 统一注入 updatedAtMs 作为"真实编辑时间"，供后端做 last-write-wins：
-  // 离线队列稍后 flush 时，后端据此判断这条是否比服务端现值更旧，旧的不覆盖。
-  // 调用方已显式给了 updatedAtMs/configUpdatedAt 时尊重原值，不覆盖。
-  const stampedPayload: Record<string, unknown> =
-    payload.updatedAtMs === undefined && payload.configUpdatedAt === undefined
-      ? { ...payload, updatedAtMs: Date.now() }
-      : { ...payload };
+export function enqueueSyncOp(domainInput: SyncDomain, op: string, payload: Record<string, unknown>): SyncEvent {
+  const domain = DOMAIN_MAP[domainInput] || domainInput;
+  if (domain === "ai_config" && Object.keys(payload).some((key) => key.toLowerCase().includes("apikey"))) {
+    throw new Error("AI Key 只能在线提交，禁止写入离线队列");
+  }
+  const entityId = normalizeEntityId(domain, payload);
+  const operation: SyncEvent["operation"] = op.includes("delete") ? "delete" : op.includes("append") ? "append" : "upsert";
   const event: SyncEvent = {
-    clientEventId: `miniapp:${domain}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
-    domain,
-    op,
-    source: "miniapp",
-    clientRevision: state.serverRevision || 0,
-    payload: stampedPayload,
+    // UUID 在入队时生成并随 outbox 持久化；网络重试始终复用同一个 eventId。
+    eventId: uuidV4(),
+    domain, entityId, operation,
+    baseEntityRevision: revisions()[`${domain}:${entityId}`] || 0,
+    data: operation === "delete" ? {} : normalizeData(payload),
     createdAt: new Date().toISOString(),
   };
-  const queue = getSyncQueue();
-  queue.push(event);
-  setStorage(SYNC_QUEUE_KEY, queue.slice(-100));
+  setStorage(SYNC_QUEUE_KEY, [...getSyncQueue(), event].slice(-100));
   markDomainDirty(domain);
   return event;
 }
@@ -134,211 +83,160 @@ export async function flushSyncQueue(): Promise<void> {
   const queue = getSyncQueue();
   if (!queue.length) return;
   try {
-    const result = await pushSyncChanges({ events: queue });
-    setStorage(SYNC_QUEUE_KEY, []);
+    const result = await pushSyncChanges({ events: queue.slice(0, 50) });
+    const done = new Set([...result.accepted.map((event) => event.eventId), ...result.duplicates]);
+    for (const event of result.accepted) setRevision(event.domain, event.entityId, event.entityRevision || 0);
+    setStorage(SYNC_QUEUE_KEY, queue.filter((event) => !done.has(event.eventId)));
     saveLocalSyncState({
-      serverRevision: result.serverRevision,
-      lastPushedAt: Date.now(),
-      lastSyncError: "",
-      dirtyDomains: [],
+      serverRevision: result.serverRevision, lastPushedAt: Date.now(),
+      lastSyncError: result.conflicts.length ? "存在同步冲突，请先处理" : "",
+      conflicts: result.conflicts,
+      dirtyDomains: getSyncQueue().length ? getLocalSyncState().dirtyDomains : [],
     });
   } catch (err) {
-    const message = isSyncRouteMissing(err) ? "服务器暂未启用同步接口" : err instanceof Error ? err.message : "同步上传失败";
-    saveLocalSyncState({ lastSyncError: message });
-    if (isSyncRouteMissing(err)) {
-      return;
-    }
+    saveLocalSyncState({ lastSyncError: err instanceof Error ? err.message : "同步上传失败" });
     throw err;
+  }
+}
+
+async function pullAllEvents(): Promise<void> {
+  let cursor = getLocalSyncState().serverRevision || 0;
+  while (true) {
+    const pulled = await pullSyncChanges(cursor);
+    for (const event of pulled.events) setRevision(event.domain, event.entityId, event.entityRevision || 0);
+    cursor = pulled.serverRevision;
+    saveLocalSyncState({ serverRevision: cursor, lastPulledAt: Date.now(), lastSyncError: "" });
+    if (!pulled.hasMore) break;
   }
 }
 
 export async function pullLatestSnapshot(): Promise<SyncSnapshotData | null> {
-  const state = getLocalSyncState();
-  try {
-    const pulled = await pullSyncChanges(state.serverRevision || 0);
-    if (pulled.snapshot) {
-      applySnapshotToLocalCache(pulled.snapshot);
-    }
-    saveLocalSyncState({
-      serverRevision: pulled.serverRevision,
-      lastPulledAt: Date.now(),
-      lastSyncError: "",
-    });
-    return pulled.snapshot || null;
-  } catch (err) {
-    const message = isSyncRouteMissing(err) ? "服务器暂未启用同步接口" : err instanceof Error ? err.message : "同步拉取失败";
-    saveLocalSyncState({ lastSyncError: message });
-    if (isSyncRouteMissing(err)) {
-      return null;
-    }
-    throw err;
-  }
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function waitForServerRevisionAfter(baseRevision: number): Promise<boolean> {
-  for (let i = 0; i < DEVICE_SEED_POLL_COUNT; i++) {
-    await delay(i === 0 ? DEVICE_SEED_WAIT_MS : DEVICE_SEED_POLL_INTERVAL_MS);
-    try {
-      const remote = await getSyncStatus();
-      if ((remote.serverRevision || 0) > baseRevision) {
-        saveLocalSyncState({
-          serverRevision: remote.serverRevision,
-          lastSyncError: "",
-        });
-        return true;
-      }
-    } catch {
-      // 轮询失败时继续等下一次；最终由调用方写入可读错误。
-    }
-  }
-  return false;
-}
-
-async function requestInitialDeviceSeed(): Promise<boolean> {
-  const state = getLocalSyncState();
-  if (state.initialDevicePulledAt) {
-    return true;
-  }
-  const baseRevision = state.serverRevision || 0;
-  const result = await pushSyncSnapshotToDevice({
-    requestDeviceInventory: true,
-    acceptCleanDeviceSnapshot: true,
-    pushCloudSnapshot: false,
-    domains: DEVICE_MANUAL_REFRESH_DOMAINS,
-    waitForAck: false,
-  });
-  if (result.deviceCount > 0 && result.queuedCount === 0) {
-    saveLocalSyncState({ lastSyncError: result.errors?.[0] || "设备未在线，等待初次上报" });
-    return false;
-  }
-  const imported = result.queuedCount > 0 ? await waitForServerRevisionAfter(baseRevision) : false;
-  if (!imported && result.deviceCount > 0) {
-    saveLocalSyncState({ lastSyncError: "等待设备初次上报，暂不覆盖设备数据" });
-    return false;
-  }
-  saveLocalSyncState({
-    initialDevicePulledAt: Date.now(),
-    lastPushedAt: Date.now(),
-    lastSyncError: "",
-  });
-  return true;
-}
-
-export async function syncNow(options: { forceDeviceRefresh?: boolean } = {}): Promise<SyncSnapshotData | null> {
-  const previous = syncInFlight;
-  if (previous) {
-    if (!options.forceDeviceRefresh) {
-      return previous;
-    }
-    try {
-      await previous;
-    } catch {
-      // 强制同步由用户主动触发；如果上一轮前台自动同步失败，继续执行本轮设备刷新。
-    }
-  }
-  const task = runSyncNow(options);
-  syncInFlight = task;
-  try {
-    return await task;
-  } finally {
-    if (syncInFlight === task) {
-      syncInFlight = null;
-    }
-  }
-}
-
-async function runSyncNow(options: { forceDeviceRefresh?: boolean } = {}): Promise<SyncSnapshotData | null> {
-  await flushSyncQueue();
-  if (options.forceDeviceRefresh) {
-    const baseRevision = getLocalSyncState().serverRevision || 0;
-    const result = await pushSyncSnapshotToDevice({
-      requestDeviceInventory: true,
-      acceptCleanDeviceSnapshot: true,
-      pushCloudSnapshot: false,
-      domains: DEVICE_MANUAL_REFRESH_DOMAINS,
-      waitForAck: false,
-    });
-    if (result.queuedCount > 0) {
-      await waitForServerRevisionAfter(baseRevision);
-    }
-  } else {
-    const seeded = await requestInitialDeviceSeed();
-    if (!seeded) {
-      return null;
-    }
-  }
-  const snapshot = await pullLatestSnapshot();
-  const currentRevision = getLocalSyncState().serverRevision || snapshot?.serverRevision || 0;
-  if (currentRevision <= 0) {
-    saveLocalSyncState({
-      lastSyncError: "等待设备快照导入，暂不下发空云端数据",
-    });
-    return snapshot;
-  }
-  saveLocalSyncState({
-    lastPushedAt: Date.now(),
-    lastSyncError: "",
-  });
+  await pullAllEvents();
+  const snapshot = await getSyncSnapshot();
+  applySnapshotToLocalCache(snapshot);
+  saveLocalSyncState({ serverRevision: snapshot.serverRevision, lastPulledAt: Date.now(), lastSyncError: "" });
   return snapshot;
 }
 
-export async function refreshSyncStatus(): Promise<LocalSyncState> {
-  const now = Date.now();
-  if (statusInFlight) {
-    return statusInFlight;
-  }
-  if (now - lastStatusRefreshAt < STATUS_REFRESH_DEBOUNCE_MS) {
-    return getLocalSyncState();
-  }
-  statusInFlight = runRefreshSyncStatus();
-  try {
-    return await statusInFlight;
-  } finally {
-    lastStatusRefreshAt = Date.now();
-    statusInFlight = null;
-  }
+export async function syncNow(_options: { forceDeviceRefresh?: boolean } = {}): Promise<SyncSnapshotData | null> {
+  if (syncInFlight) return syncInFlight;
+  syncInFlight = (async () => {
+    await flushSyncQueue();
+    return pullLatestSnapshot();
+  })();
+  try { return await syncInFlight; } finally { syncInFlight = null; }
 }
 
-async function runRefreshSyncStatus(): Promise<LocalSyncState> {
-  try {
-    const remote = await getSyncStatus();
-    return saveLocalSyncState({
-      serverRevision: remote.serverRevision,
-      lastSyncError: "",
-    });
-  } catch (err) {
-    const message = isSyncRouteMissing(err) ? "服务器暂未启用同步接口" : err instanceof Error ? err.message : "同步状态读取失败";
-    return saveLocalSyncState({ lastSyncError: message });
+export async function refreshSyncStatus(): Promise<LocalSyncState> {
+  try { await pullAllEvents(); } catch (err) {
+    saveLocalSyncState({ lastSyncError: err instanceof Error ? err.message : "同步状态读取失败" });
   }
+  return getLocalSyncState();
+}
+
+function domainData<T>(snapshot: SyncSnapshotData, domain: string): T[] {
+  return (snapshot.domains?.[domain] || []).map((entity) => {
+    setRevision(domain, entity.entityId, entity.entityRevision);
+    return { id: entity.entityId, ...entity.data } as T;
+  });
+}
+
+function flattenedDomainItems(
+  snapshot: SyncSnapshotData,
+  domain: string,
+): Array<Record<string, unknown>> {
+  const result = new Map<string, { revision: number; data: Record<string, unknown> }>();
+  let anonymous = 0;
+  for (const entity of (snapshot.domains?.[domain] || []).slice().sort(
+    (left, right) => left.serverRevision - right.serverRevision,
+  )) {
+    setRevision(domain, entity.entityId, entity.entityRevision);
+    const nested = entity.data.items;
+    if (Array.isArray(nested)) {
+      for (const item of nested) {
+        if (item && typeof item === "object") {
+          const data = item as Record<string, unknown>;
+          const key = String(data.id || `${entity.entityId}:${anonymous++}`);
+          result.set(key, { revision: entity.serverRevision, data: { id: key, ...data } });
+        }
+      }
+    } else {
+      const key = String(entity.data.id || entity.entityId);
+      result.set(key, {
+        revision: entity.serverRevision,
+        data: { id: key, ...entity.data },
+      });
+    }
+  }
+  return Array.from(result.values())
+    .sort((left, right) => right.revision - left.revision)
+    .map((entry) => entry.data);
 }
 
 export function applySnapshotToLocalCache(snapshot: SyncSnapshotData): void {
-  if (snapshot.fridgeZones?.length) {
-    setAllFridgeZones(snapshot.fridgeZones);
+  const inventory = (snapshot.domains?.inventory || []).map((entity) => {
+    setRevision("inventory", entity.entityId, entity.entityRevision);
+    return normalizeInventoryItem(entity.data, entity.entityId);
+  });
+  const reminders = domainData<ReminderItem>(snapshot, "reminders");
+  updateOfflineSnapshot({ inventoryItems: inventory, reminderItems: reminders });
+  const settings = domainData<Record<string, unknown>>(snapshot, "device_settings")[0];
+  const preferences = settings?.preferences as Record<string, unknown> | undefined;
+  if (preferences?.fridgeZones) setAllFridgeZones(preferences.fridgeZones as any);
+  if (settings?.privacy) setStorage("privacySettings", settings.privacy);
+  const shoppingItems = flattenedDomainItems(snapshot, "shopping").map((raw, index) => {
+    const quantity = raw.quantity == null ? "" : String(raw.quantity);
+    const unit = String(raw.unit || "");
+    const rawSource = String(raw.source || "device");
+    const source: ShoppingItem["source"] =
+      rawSource === "ai" ||
+      rawSource === "manual" ||
+      rawSource === "expire" ||
+      rawSource === "recipe"
+        ? rawSource
+        : "device";
+    return {
+      id: String(raw.id || `shopping-${index}`),
+      name: String(raw.name || ""),
+      quantityText: String(raw.quantityText || `${quantity}${unit}` || "1 份"),
+      source,
+      sourceText: String(raw.sourceText || raw.note || "设备同步"),
+      checked: Boolean(raw.checked),
+      createdAt: Number(raw.createdAt || raw.created_at || Date.now()),
+    };
+  }).filter((item) => item.name);
+  if ((snapshot.domains?.shopping || []).length) {
+    setStorage(SHOPPING_ITEMS_KEY, shoppingItems);
   }
-  if (snapshot.inventory) {
-    updateOfflineSnapshot({ inventoryItems: snapshot.inventory as InventoryItem[] });
+
+  const recipes = flattenedDomainItems(snapshot, "recipes").map((raw, index) => ({
+    id: String(raw.id || `recipe-${index}`),
+    ...raw,
+  })) as unknown as RecipeRecommendation[];
+  if ((snapshot.domains?.recipes || []).length) {
+    setStorage(RECIPE_RECOMMENDATIONS_KEY, recipes);
   }
-  if (snapshot.reminders) {
-    updateOfflineSnapshot({ reminderItems: snapshot.reminders as ReminderItem[] });
+
+  const nutritionEntities = snapshot.domains?.nutrition || [];
+  const nutritionCache = nutritionEntities
+    .map((entity) => entity.data)
+    .find((data) => data.nutrition && typeof data.nutrition === "object");
+  if (nutritionCache) {
+    setStorage(NUTRITION_CACHE_KEY, nutritionCache);
   }
-  if (snapshot.shoppingList?.items) {
-    setStorage(SHOPPING_ITEMS_KEY, snapshot.shoppingList.items as unknown as ShoppingItem[]);
-  }
-  if (snapshot.recipeCache?.items) {
-    setStorage(RECIPE_RECOMMENDATIONS_KEY, snapshot.recipeCache.items as unknown as RecipeRecommendation[]);
-  }
-  if (snapshot.nutritionCache?.nutrition) {
-    setStorage(NUTRITION_CACHE_KEY, snapshot.nutritionCache);
-  }
-  if (snapshot.settings) {
-    const settings = snapshot.settings as Record<string, unknown>;
-    if (settings.privacy) {
-      setStorage("privacySettings", settings.privacy);
-    }
-  }
+}
+
+/** 用户或家庭切换时必须丢弃旧家庭的游标、实体 revision 和业务缓存。 */
+export function clearSyncContext(): void {
+  setStorage(SYNC_QUEUE_KEY, null);
+  setStorage(SYNC_STATE_KEY, null);
+  setStorage(ENTITY_REVISION_KEY, null);
+  setStorage(SHOPPING_ITEMS_KEY, null);
+  setStorage(RECIPE_RECOMMENDATIONS_KEY, null);
+  setStorage(NUTRITION_CACHE_KEY, null);
+  setStorage(OFFLINE_SNAPSHOT_KEY, null);
+  setStorage("privacySettings", null);
+  setStorage("fridgeZonesCloudCache", null);
+  setStorage("fridgeStandardZones", null);
+  setStorage("fridgeCustomZones", null);
 }

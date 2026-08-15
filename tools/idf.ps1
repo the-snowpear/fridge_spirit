@@ -1,17 +1,11 @@
-# ESP-IDF 环境包装脚本：固定使用本项目已验证的 ESP-IDF 5.5.1。
+﻿# ESP-IDF 环境包装脚本：固定使用本项目已验证的 ESP-IDF 5.5.1。
 # 用法：powershell -NoProfile -ExecutionPolicy Bypass -File tools\idf.ps1 <idf.py 参数...>
-# 例如：tools\idf.ps1 build / tools\idf.ps1 -p COM15 flash monitor
-#
-# 2026-07-13：主固件已从 ESP-IDF 6.0.1 降级到 5.5.1，用于恢复 ESP-SR WakeNet less-v3
-# 唤醒（P4 rev1.3 的预编译 WakeNet 静态库在 IDF6/GCC15 下链接失败：R_RISCV_RVC_LUI
-# relocation truncated）。5.5.1 使用 riscv GCC 14.2.0，与 esp-sr 2.4.5 的 P4 库匹配。
-# 版本依据见 doc/IDF5.5迁移与已验证版本.md（厂商 wks_esp32p4_cb_xiaozhi 例程锁定
-# IDF 5.5.1 + esp-sr 2.4.5）。IDF6.0.1 仍保留在 D:\esp-IDF\.espressif\v6.0.1，可回退。
+# 例如：tools\idf.ps1 build / tools\idf.ps1 -p COM17 flash monitor
 
 param(
     [Parameter(Position = 0, ValueFromRemainingArguments = $true)][string[]]$IdfArgs,
     [Alias('p')][string]$Port,
-    [string]$Baud,
+    [string]$Baud = '115200',
     [string]$BuildDir,
     [Alias('C')][string]$ProjectDir,
     [Alias('D')][string[]]$DefineCacheEntry,
@@ -24,7 +18,11 @@ $ErrorActionPreference = 'Stop'
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 $IdfRoot = 'D:\esp-IDF\v5.5.1\esp-idf'
 $ToolsRoot = 'D:\esp-IDF\.espressif'
-$PythonPath = "$ToolsRoot\python_env\idf5.5_py3.14_env\Scripts\python.exe"
+$PythonCandidates = @(
+    "$ToolsRoot\python_env\idf5.5_py3.14_env\Scripts\python.exe",
+    "$ProjectRoot\tmp\cache\idf_venv\Scripts\python.exe"
+)
+$PythonPath = $PythonCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
 
 if (-not (Test-Path -LiteralPath "$IdfRoot\export.ps1")) {
     throw "Missing project-pinned ESP-IDF 5.5.1: $IdfRoot"
@@ -32,11 +30,13 @@ if (-not (Test-Path -LiteralPath "$IdfRoot\export.ps1")) {
 if (-not (Test-Path -LiteralPath $ToolsRoot)) {
     throw "Missing ESP-IDF tools directory: $ToolsRoot"
 }
-if (-not (Test-Path -LiteralPath $PythonPath)) {
-    throw "Missing ESP-IDF Python environment: $PythonPath"
+# 优先使用构建目录已记录的官方 IDF 5.5.1 Python 3.14 环境，避免 CMake 拒绝混用解释器。
+# 项目内 Python 3.9 环境仅用于官方环境不可用时的兼容回退。
+# Keep this ASCII guard line so Windows PowerShell 5 cannot merge the next statement.
+if (-not $PythonPath) {
+    throw "Missing usable ESP-IDF Python environment: $($PythonCandidates -join ', ')"
 }
 
-# Windows PowerShell 5.1 会优先解析带短横线的参数；这里显式收集常用选项，再统一交给 idf.py。
 $ForwardArgs = @()
 if ($ProjectDir) { $ForwardArgs += @('-C', $ProjectDir) }
 if ($BuildDir) { $ForwardArgs += @('-B', $BuildDir) }
@@ -50,14 +50,11 @@ if ($Version) { $ForwardArgs += '--version' }
 if ($Help) { $ForwardArgs += '--help' }
 $ForwardArgs += $IdfArgs
 
-# 从 Git Bash/MSYS 环境调用时会继承 MSYSTEM 等变量，导致 idf_tools.py 误判为 MSys 环境并拒绝激活。
-# 必须通过 Env: 提供程序删除键；SetEnvironmentVariable(..., $null) 在当前宿主会留下空字符串键，
-# 而 IDF 5.5 只检查 MSYSTEM 键是否存在，空值也会被判定为不支持的 MSYS 环境。
+# Git Bash/MSYS 环境变量会让 IDF 5.5 误判当前宿主，激活前必须从当前进程移除。
 Remove-Item Env:MSYSTEM, Env:MSYSTEM_CARCH, Env:MSYSTEM_CHOST, Env:MSYSTEM_PREFIX -ErrorAction SilentlyContinue
 
 $env:IDF_TOOLS_PATH = $ToolsRoot
-# 主线使用 5.5.1；如需临时回退 IDF6，应修改本脚本的固定路径并重新验证工具链。
-# 直接调用 activate.py 的导出结果，避免 Windows PowerShell 5.1 对嵌套 dot-source 的作用域差异。
+$env:IDF_PYTHON_ENV_PATH = Split-Path -Parent (Split-Path -Parent $PythonPath)
 $tempRoot = [System.IO.Path]::GetTempPath()
 $activationOutputPath = "$tempRoot\fridge_spirit_idf_activate_$PID.txt"
 $activationErrorPath = "$tempRoot\fridge_spirit_idf_activate_$PID.err"
@@ -73,7 +70,7 @@ if ($activationProcess.ExitCode -ne 0) {
 $idfExports = Get-Content -Raw -Encoding UTF8 $activationOutputPath
 Remove-Item -LiteralPath $activationOutputPath,$activationErrorPath -Force -ErrorAction SilentlyContinue
 if ([string]::IsNullOrWhiteSpace($idfExports)) {
-    throw "ESP-IDF environment activation failed"
+    throw 'ESP-IDF environment activation failed'
 }
 Invoke-Expression $idfExports
 
@@ -82,37 +79,29 @@ if ($env:IDF_PATH -ne $IdfRoot) {
 }
 
 $idfPy = "$IdfRoot\tools\idf.py"
-$idfVersion = (& D:\esp-IDF\.espressif\python_env\idf5.5_py3.14_env\Scripts\python.exe $idfPy --version | Select-Object -First 1).ToString().Trim()
+$idfVersion = (& $PythonPath $idfPy --version | Select-Object -First 1).ToString().Trim()
 if ($idfVersion -ne 'ESP-IDF v5.5.1') {
     throw "idf.py version mismatch; expected ESP-IDF v5.5.1, got: $idfVersion"
 }
 
 Set-Location $ProjectRoot
 
-# 当前 P4 的 CH343P 在 RAM stub 阶段会出现 Invalid head of packet；默认构建必须生成 no-stub 参数。
+# P4/CH343P 当前必须使用 ROM loader；烧录前阻止误用 RAM stub。
 $flashActions = @('flash', 'app-flash', 'bootloader-flash', 'partition-table-flash')
-$isFlashAction = $false
-foreach ($arg in $ForwardArgs) {
-    if ($flashActions -contains $arg) {
-        $isFlashAction = $true
-        break
-    }
-}
+$isFlashAction = (($ForwardArgs -join "`n") -match
+    '(?m)^(flash|app-flash|bootloader-flash|partition-table-flash)$')
 if ($isFlashAction) {
     $flasherArgsPath = Join-Path $ProjectRoot 'build\flasher_args.json'
     if (Test-Path -LiteralPath $flasherArgsPath) {
         $flasherArgs = Get-Content -Raw -Encoding UTF8 $flasherArgsPath | ConvertFrom-Json
         if ($flasherArgs.extra_esptool_args.stub -eq $true) {
-            throw "Build still uses the RAM stub. Run tools\idf.ps1 reconfigure build and verify build\flasher_args.json has stub=false before flashing."
+            throw 'Build still uses the RAM stub. Run tools\idf.ps1 reconfigure build and verify build\flasher_args.json has stub=false before flashing.'
         }
     }
 }
 
-# ROM loader 的 CH343P 实测以 115200 最稳定；用户显式传入 -b/--baud 时保留用户值。
-$hasExplicitBaud = ($ForwardArgs -contains '-b') -or ($ForwardArgs -contains '--baud')
-if ($isFlashAction -and -not $hasExplicitBaud) {
-    $ForwardArgs = @('-b', '115200') + $ForwardArgs
+if ($isFlashAction -or $DryRun) {
+    Write-Host "idf.py effective args: $($ForwardArgs -join ' ')"
 }
-
-& D:\esp-IDF\.espressif\python_env\idf5.5_py3.14_env\Scripts\python.exe $idfPy @ForwardArgs
+& $PythonPath $idfPy @ForwardArgs
 exit $LASTEXITCODE

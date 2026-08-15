@@ -1,0 +1,15 @@
+## P4 摄像头依赖：固定使用仓库内 third_party 官方源码基线，避免组件管理器静默升级。
+## 版本与 doc/ESP_CAM_SENSOR_ESP_VIDEO源码补齐与接入边界.md 一致。
+dependencies:
+  espressif/esp_video:
+    version: "==0.5.1"
+    override_path: "../../third_party/espressif__esp_video"
+    rules:
+      - if: "target == esp32p4"
+  espressif/esp_cam_sensor:
+    version: "==0.5.3"
+    override_path: "../../third_party/espressif__esp_cam_sensor"
+    rules:
+      - if: "target == esp32p4"
+  idf:
+    version: ">=5.3"

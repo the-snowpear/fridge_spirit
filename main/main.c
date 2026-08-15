@@ -1,6 +1,7 @@
 // 冰箱小精灵主控启动入口。
 // 这里只做系统初始化编排：NVS、诊断、网络、USB JSON 协议、recovery 兜底和专用硬件测试模式。
-// 硬件注意：屏幕测试与摄像头测试都会占用专用 GPIO，不能和正常运维链路同时启用。
+// 硬件注意：MIPI 独立点屏与摄像头测试会占用专用外设，不能和正常运维链路同时启用。
+// SPI/TR230S display 与 FRIDGE_SCREEN_TEST 已移除，P4 主线仅保留 MIPI-DSI。
 
 #include <stdio.h>
 #include <string.h>
@@ -8,10 +9,6 @@
 #include "esp_err.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
-
-#if (CONFIG_FRIDGE_SCREEN_TEST + CONFIG_FRIDGE_MIPI_SCREEN_TEST + CONFIG_FRIDGE_CAMERA_TEST) > 1
-#error "QSPI screen test, MIPI screen test and camera test are mutually exclusive"
-#endif
 
 #if CONFIG_FRIDGE_RECOVERY_APP
 #include "esp_app_desc.h"
@@ -24,42 +21,56 @@
 #include "fridge_network.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#elif CONFIG_FRIDGE_SCREEN_TEST
-#include "fridge_display_test.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
 #elif CONFIG_FRIDGE_MIPI_SCREEN_TEST
 #include "fridge_display_mipi_test.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #elif CONFIG_FRIDGE_P4_MINIMAL
-// P4 服务模式：Wi-Fi(板载C6) + USB JSON + QSPI 屏/FT6336U + ES8311 + WakeNet/ASR + TF 卡。
-// 触摸仅在确认使用 20-pin FPC 转接板后启用；旧 S3 业务组件不进入此构建图。
+// P4 服务模式：Wi-Fi(板载C6) + USB JSON + MIPI 屏/GT911 + ES8311/FY-SP703 + WakeNet/ASR + TF 卡。
+// 摄像头为按需全屏预览（OV5647/MIPI-CSI）。旧 S3 业务组件不进入此构建图。
 #include "esp_heap_caps.h"
 #include "esp_ota_ops.h"
+#include "fridge_agent_runtime.h"
+#include "fridge_agent_storage.h"
+#include "fridge_ai_client.h"
 #include "fridge_audio.h"
+#include "fridge_camera.h"
 #include "fridge_diagnostics.h"
-#include "fridge_display.h"
+#include "fridge_diagnostics_log.h"
+#include "fridge_device_binding.h"
+#include "fridge_display_mipi.h"
+#include "fridge_glm_realtime.h"
 #include "fridge_network.h"
+#include "fridge_mqtt_protocol.h"
+#include "fridge_screenshot.h"
+#include "fridge_ui_p4.h"
+#include "fridge_voice_asr.h"
+#include "fridge_skill_manager.h"
 #include "fridge_tfcard.h"
+#include "fridge_tool_broker.h"
+#include "fridge_trace_service.h"
 #include "fridge_usb_protocol.h"
+#include "fridge_workflow_engine.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #if CONFIG_FRIDGE_P4_TOUCH_ENABLE
 #include "fridge_touch.h"
+#if CONFIG_FRIDGE_P4_GT911_ENABLE
+#include "fridge_touch_gt911.h"
+#include "fridge_sht4x.h"
+#include "fridge_sensors.h"
+#endif
 #endif
 #else
 #include "fridge_ai_client.h"
 #include "fridge_camera.h"
 #include "fridge_diagnostics.h"
-#include "fridge_display.h"
 #include "fridge_mqtt_protocol.h"
 #include "fridge_network.h"
 #include "fridge_usb_protocol.h"
 #include "fridge_ui.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#if !CONFIG_FRIDGE_CAMERA_TEST
 #include "fridge_asr.h"
 #include "fridge_audio.h"
 #include "fridge_kitchen_tools.h"
@@ -70,11 +81,82 @@
 #include "fridge_state_machine.h"
 #include "fridge_wake_word.h"
 #endif
-#endif
 
 static const char *TAG = "fridge_main";
 
-#if !CONFIG_FRIDGE_SCREEN_TEST && !CONFIG_FRIDGE_MIPI_SCREEN_TEST
+#if CONFIG_FRIDGE_P4_MINIMAL
+// 仅统计 P4 外设可用的内部 DMA 堆；用于定位 SDMMC、JPEG 与显示 DMA 的连续内存不足。
+static void p4_log_internal_dma_heap(const char *phase)
+{
+    const uint32_t caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA;
+    ESP_LOGI(TAG, "internal_dma[%s]: free=%u largest=%u minimum=%u",
+             phase ? phase : "unknown",
+             (unsigned)heap_caps_get_free_size(caps),
+             (unsigned)heap_caps_get_largest_free_block(caps),
+             (unsigned)heap_caps_get_minimum_free_size(caps));
+}
+
+// 分配失败钩子在失败调用方的上下文中执行；只输出固定格式日志，禁止再申请内存或加锁。
+static void p4_heap_alloc_failed(size_t size, uint32_t caps, const char *function_name)
+{
+    ESP_EARLY_LOGE(TAG, "heap alloc failed: size=%u caps=0x%08lx function=%s",
+                   (unsigned)size, (unsigned long)caps,
+                   function_name ? function_name : "unknown");
+}
+
+// 绑定组件的网络任务只能推送脱敏快照；本回调只复制到 UI 的线程安全模型，
+// 不在非 UI 任务直接访问 LVGL 对象。
+static void p4_binding_status_changed(const fridge_device_binding_status_t *status,
+                                      void *user_ctx)
+{
+    (void)user_ctx;
+    if (!status) return;
+    fridge_ui_p4_binding_model_t model = {
+        .provisioned = status->provisioned,
+        .bound = status->bound,
+        .qr_ready = status->qr_ready,
+        .expires_in_seconds = status->expires_in_seconds,
+    };
+    strlcpy(model.qr_payload, status->qr_payload, sizeof(model.qr_payload));
+    strlcpy(model.device_sn, status->device_sn, sizeof(model.device_sn));
+    strlcpy(model.status, status->status, sizeof(model.status));
+    strlcpy(model.detail, status->detail, sizeof(model.detail));
+    (void)fridge_ui_p4_update_binding(&model);
+}
+
+static void p4_mqtt_autostart_task(void *arg)
+{
+    (void)arg;
+    // 未完成二维码绑定时 MQTT 配置为空；绑定任务/USB 配置成功后会主动启动 MQTT。
+    // 此处直接退出，避免在空配置上周期性重试并浪费 P4 宝贵的内部任务栈。
+    fridge_mqtt_status_t mqtt = {0};
+    if (fridge_mqtt_get_status(&mqtt) == ESP_OK &&
+        (!mqtt.enabled || !mqtt.configured)) {
+        ESP_LOGI(TAG, "P4 MQTT autostart waiting for device provisioning/binding");
+        vTaskDelete(NULL);
+    }
+
+    // Wi-Fi 与 DHCP 在后台完成。只做有限频率重试，避免网络未就绪时刷日志或抢占 UI。
+    for (uint32_t attempt = 0; attempt < 180U; attempt++) {
+        fridge_network_status_t network = {0};
+        if (fridge_network_get_status(&network) == ESP_OK && network.connected) {
+            esp_err_t err = fridge_mqtt_start();
+            if (err == ESP_OK) {
+                ESP_LOGI(TAG, "P4 MQTT v2 started after Wi-Fi connected");
+                vTaskDelete(NULL);
+            }
+            if (err != ESP_ERR_INVALID_STATE) {
+                ESP_LOGW(TAG, "P4 MQTT autostart failed: %s", esp_err_to_name(err));
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(2000));
+    }
+    ESP_LOGW(TAG, "P4 MQTT autostart stopped after timeout; binding worker can retry after provisioning");
+    vTaskDelete(NULL);
+}
+#endif
+
+#if !CONFIG_FRIDGE_MIPI_SCREEN_TEST
 static void nvs_init_safe(void)
 {
     // 初始化 NVS，用于保存 Wi-Fi、API 配置和恢复模式需要的网络参数。
@@ -88,8 +170,8 @@ static void nvs_init_safe(void)
 }
 #endif
 
-#if !CONFIG_FRIDGE_RECOVERY_APP && !CONFIG_FRIDGE_SCREEN_TEST && !CONFIG_FRIDGE_MIPI_SCREEN_TEST && \
-    !CONFIG_FRIDGE_CAMERA_TEST && !CONFIG_FRIDGE_P4_MINIMAL
+#if !CONFIG_FRIDGE_RECOVERY_APP && !CONFIG_FRIDGE_MIPI_SCREEN_TEST && \
+    !CONFIG_FRIDGE_P4_MINIMAL
 static void mqtt_autostart_task(void *arg)
 {
     (void)arg;
@@ -258,6 +340,8 @@ static void recovery_handle_boot_main(const char *request_id, const char *comman
     }
     recovery_print_json_status(request_id, command);
     vTaskDelay(pdMS_TO_TICKS(200));
+    // 记录恢复模式主动切回主固件，重启后可与真实 panic/watchdog 区分。
+    (void)fridge_diagnostics_set_planned_restart("recovery_boot_main");
     esp_restart();
 }
 
@@ -310,6 +394,8 @@ static void recovery_handle_restore_main(const char *line, const char *request_i
 
     recovery_print_json_status(request_id, command);
     vTaskDelay(pdMS_TO_TICKS(300));
+    // OTA 写入成功后的计划重启只记录原因，不把网络凭据写入 NVS 或日志。
+    (void)fridge_diagnostics_set_planned_restart("recovery_restore_main");
     esp_restart();
 }
 
@@ -349,13 +435,6 @@ static void recovery_shell_task(void *arg)
         }
     }
 }
-#elif CONFIG_FRIDGE_SCREEN_TEST
-static void display_test_task(void *arg)
-{
-    (void)arg;
-    // 独立屏幕测试任务：长期循环刷测试图案，避免阻塞 ESP-IDF 的 main_task 导致系统看门狗复位。
-    fridge_display_test_run();
-}
 #elif CONFIG_FRIDGE_MIPI_SCREEN_TEST
 static void mipi_display_test_task(void *arg)
 {
@@ -364,33 +443,6 @@ static void mipi_display_test_task(void *arg)
     fridge_display_mipi_test_run();
 }
 #elif CONFIG_FRIDGE_P4_MINIMAL
-// 在屏幕上刷静态横向色带（黑/红/绿/蓝/白循环）。
-// 目的：不引入 LVGL 的情况下验证杜邦线 QSPI-4SDA 链路、TR230S 窗口设置与整屏显存写入。
-static void p4_minimal_paint_bands(void)
-{
-    const uint16_t colors[] = {0x0000, 0xF800, 0x07E0, 0x001F, 0xFFFF}; // RGB565：黑、红、绿、蓝、白
-    const int band_rows = 40;                                   // 每条色带 40 行，720/40=18 条
-    const size_t buf_px = (size_t)FRIDGE_DISPLAY_WIDTH * band_rows;
-    uint16_t *buf = heap_caps_malloc(buf_px * sizeof(uint16_t), MALLOC_CAP_DEFAULT);
-    if (!buf) {
-        ESP_LOGW(TAG, "test pattern buffer alloc failed (%u bytes)", (unsigned)(buf_px * sizeof(uint16_t)));
-        return;
-    }
-    for (int y = 0; y < FRIDGE_DISPLAY_HEIGHT; y += band_rows) {
-        const uint16_t c = colors[(y / band_rows) % (sizeof(colors) / sizeof(colors[0]))];
-        for (size_t i = 0; i < buf_px; i++) {
-            buf[i] = c;
-        }
-        esp_err_t err = fridge_display_flush_area(0, y, FRIDGE_DISPLAY_WIDTH - 1, y + band_rows - 1, buf);
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "flush band y=%d failed: %s", y, esp_err_to_name(err));
-            break;
-        }
-    }
-    heap_caps_free(buf);
-    ESP_LOGI(TAG, "P4 minimal: 屏幕静态色带已刷新完成");
-}
-
 #if CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE
 // OTA 回滚健康确认：只有首阶段初始化已走完且 USB 控制台可用时，才确认当前 ota_0 镜像。
 // 外接屏未连接或单个外设失败不代表固件不可启动；USB 控制台仍可用于读取日志和继续排障。
@@ -421,7 +473,7 @@ static void p4_minimal_confirm_ota_image(void)
 }
 #endif
 
-#if CONFIG_FRIDGE_P4_TOUCH_ENABLE
+#if CONFIG_FRIDGE_P4_TOUCH_ENABLE && !CONFIG_FRIDGE_P4_GT911_ENABLE
 // 触摸轮询任务：20-pin FPC 转杜邦板引出 FT6336U 的 INT/SDA/SCL/RST 四根控制线。
 static void p4_minimal_touch_task(void *arg)
 {
@@ -441,6 +493,82 @@ static void p4_minimal_touch_task(void *arg)
     }
 }
 #endif
+#endif
+
+#if CONFIG_FRIDGE_P4_MINIMAL
+// Agent Runtime 与 UI 的桥仅在 main 中做字段映射：两端组件不直接相互依赖，避免
+// ui_p4 → agent_runtime → tool_system 的链路再次形成循环。所有函数均为非阻塞投递/轮询。
+static esp_err_t p4_agent_ui_submit(const char *text, void *user_ctx)
+{
+    (void)user_ctx;
+    return fridge_agent_runtime_submit_text(text);
+}
+
+static esp_err_t p4_agent_ui_cancel(void *user_ctx)
+{
+    (void)user_ctx;
+    return fridge_agent_runtime_cancel_active();
+}
+
+// 对话页确认后才调用：Runtime 会清除 TF 中的当前会话，并广播 SESSION_RESET 给 UI。
+static esp_err_t p4_agent_ui_clear_session(void *user_ctx)
+{
+    (void)user_ctx;
+    return fridge_agent_runtime_clear_session();
+}
+
+static esp_err_t p4_agent_ui_resolve(const char *run_id, const char *call_id,
+                                     bool confirmed, void *user_ctx)
+{
+    (void)user_ctx;
+    return fridge_agent_runtime_resolve_confirmation(run_id, call_id, confirmed);
+}
+
+static bool p4_agent_ui_poll(fridge_ui_p4_agent_event_t *out, void *user_ctx)
+{
+    (void)user_ctx;
+    fridge_agent_runtime_ui_event_t event = {0};
+    if (!out || !fridge_agent_runtime_poll_ui_event(&event)) return false;
+    // Runtime 事件仍由 UI 消费；这里只向连续语音协调器复制一个非阻塞通知，不能抢走队列。
+    (void)fridge_voice_asr_dialog_notify_agent_event(&event);
+    memset(out, 0, sizeof(*out));
+    switch (event.kind) {
+    case FRIDGE_AGENT_RUNTIME_EVENT_SESSION_RESET:
+        out->kind = FRIDGE_UI_P4_AGENT_EVENT_SESSION_RESET;
+        break;
+    case FRIDGE_AGENT_RUNTIME_EVENT_USER_MESSAGE:
+        out->kind = FRIDGE_UI_P4_AGENT_EVENT_USER_MESSAGE;
+        break;
+    case FRIDGE_AGENT_RUNTIME_EVENT_ASSISTANT_MESSAGE:
+        out->kind = FRIDGE_UI_P4_AGENT_EVENT_ASSISTANT_MESSAGE;
+        break;
+    case FRIDGE_AGENT_RUNTIME_EVENT_TOOL:
+        out->kind = FRIDGE_UI_P4_AGENT_EVENT_TOOL;
+        break;
+    case FRIDGE_AGENT_RUNTIME_EVENT_TTS:
+        out->kind = FRIDGE_UI_P4_AGENT_EVENT_TTS;
+        break;
+    case FRIDGE_AGENT_RUNTIME_EVENT_STATUS:
+    default:
+        out->kind = FRIDGE_UI_P4_AGENT_EVENT_STATUS;
+        break;
+    }
+    strlcpy(out->run_id, event.run_id, sizeof(out->run_id));
+    strlcpy(out->call_id, event.call_id, sizeof(out->call_id));
+    strlcpy(out->time, event.time, sizeof(out->time));
+    strlcpy(out->state, event.state, sizeof(out->state));
+    strlcpy(out->text, event.text, sizeof(out->text));
+    strlcpy(out->tool_name, event.tool_name, sizeof(out->tool_name));
+    strlcpy(out->tool_label, event.tool_label, sizeof(out->tool_label));
+    strlcpy(out->detail, event.detail, sizeof(out->detail));
+    strlcpy(out->latency, event.latency, sizeof(out->latency));
+    out->risk = event.risk;
+    out->tool_status = event.tool_status;
+    out->requires_confirmation = event.requires_confirmation;
+    out->working = event.working;
+    out->dialog_complete = event.dialog_complete;
+    return true;
+}
 #endif
 
 void app_main(void)
@@ -464,13 +592,6 @@ void app_main(void)
     if (ok != pdPASS) {
         ESP_LOGE(TAG, "create recovery_shell task failed");
     }
-#elif CONFIG_FRIDGE_SCREEN_TEST
-    // 独立屏幕测试模式：创建后台任务运行 QSPI-4SDA 点亮和彩色图案，避免 Wi-Fi 发射峰值干扰首次硬件排查。
-    ESP_LOGW(TAG, "CONFIG_FRIDGE_SCREEN_TEST is enabled");
-    BaseType_t ok = xTaskCreate(display_test_task, "display_test", 8192, NULL, 5, NULL);
-    if (ok != pdPASS) {
-        ESP_LOGE(TAG, "create display_test task failed");
-    }
 #elif CONFIG_FRIDGE_MIPI_SCREEN_TEST
     // 26-pin MIPI-DSI 独立测试模式：只启动 EK79007 全屏单色/彩条循环。
     ESP_LOGW(TAG, "CONFIG_FRIDGE_MIPI_SCREEN_TEST is enabled");
@@ -480,8 +601,21 @@ void app_main(void)
     }
 #elif CONFIG_FRIDGE_P4_MINIMAL
     // P4 最小移植模式（慧勤智远 ESP32-P4 CB V1.2）：
-    // 只初始化 NVS、诊断、USB JSON、网络、SPI 屏/触摸、ES8311、WakeNet/云端 ASR 和 TF 卡。
-    // 摄像头/传感器/雷达/AI 会话/扬声器不参与本配置的链接；不支持的 USB 命令会立即返回错误。
+    // 初始化 NVS、诊断、USB JSON、网络、MIPI 屏/触摸、ES8311、WakeNet/云端 ASR 和 TF 卡。
+    // 摄像头按需由 UI「摄像头预览」按钮启动（OV5647 MIPI-CSI 全屏流），不在上电阶段强制 init。
+    // 旧 S3 传感器/雷达业务不参与链接；MPU6050 使用 P4 共享 I2C0 独立接入。
+    // 其余未迁移的 USB 命令会立即返回错误。
+    // 日志 tee 必须在任何 P4 初始化日志之前安装；此时 TF 尚未挂载，记录先暂存于 8KB RAM 环形缓冲。
+    esp_err_t diag_log_install_ret = fridge_diagnostics_log_install();
+    if (diag_log_install_ret != ESP_OK) {
+        ESP_LOGW(TAG, "diagnostics log tee install failed: %s", esp_err_to_name(diag_log_install_ret));
+    }
+    esp_err_t heap_hook_ret = heap_caps_register_failed_alloc_callback(p4_heap_alloc_failed);
+    if (heap_hook_ret != ESP_OK) {
+        ESP_LOGW(TAG, "heap allocation failure hook register failed: %s",
+                 esp_err_to_name(heap_hook_ret));
+    }
+    p4_log_internal_dma_heap("startup_begin");
     ESP_LOGW(TAG, "CONFIG_FRIDGE_P4_MINIMAL is enabled; P4 bring-up profile");
     nvs_init_safe();
     fridge_diagnostics_init();
@@ -500,6 +634,13 @@ void app_main(void)
         ESP_LOGE(TAG, "network init failed: %s (check C6/SDIO power management)", esp_err_to_name(net_ret));
     }
 
+    // P4 Agent、AI 配置多端同步和语音会话共用同一套 NVS 配置。
+    // 这里只加载配置，不发起网络请求；必须早于 Agent Runtime 与设备绑定 seed。
+    esp_err_t ai_client_ret = fridge_ai_client_init();
+    if (ai_client_ret != ESP_OK) {
+        ESP_LOGW(TAG, "AI client config init failed: %s", esp_err_to_name(ai_client_ret));
+    }
+
     if (net_ret == ESP_OK) {
         esp_err_t saved_ret = fridge_network_connect_saved_async();
         if (saved_ret == ESP_OK) {
@@ -509,33 +650,93 @@ void app_main(void)
         }
     }
 
-    // 屏幕：复用 S3 已验证的 QSPI-4SDA 初始化与静态色带，杜邦接线阶段从 10MHz 起步。
-    esp_err_t disp_ret = fridge_display_init();
-    if (disp_ret == ESP_OK) {
-        p4_minimal_paint_bands();
-    } else {
-        ESP_LOGW(TAG, "display init failed: %s (check QSPI D0-D3 Dupont wiring/WAIT#)", esp_err_to_name(disp_ret));
+#if CONFIG_FRIDGE_P4_MIPI_UI_ENABLE
+    // 正常 P4 UI 使用 26-pin MIPI-DSI 屏；DSI PHY、RST=GPIO22 和 BL=GPIO23 参数沿用已验证点屏路径。
+    // SPI/TR230S 驱动已移除，关闭本选项时不再有 QSPI 色带回退。
+    esp_err_t disp_ret = fridge_display_mipi_init();
+    if (disp_ret != ESP_OK) {
+        ESP_LOGW(TAG, "MIPI display init failed: %s (check 26-pin FPC/5V power)", esp_err_to_name(disp_ret));
     }
+#else
+    esp_err_t disp_ret = ESP_ERR_NOT_SUPPORTED;
+    ESP_LOGW(TAG, "P4 MIPI UI disabled and SPI/TR230S display removed; no screen backend");
+#endif
 
 #if CONFIG_FRIDGE_P4_TOUCH_ENABLE
-    // 触摸：20-pin FPC 转接线使用独立 I2C0（SCL=GPIO16、SDA=GPIO17）轮询。
+#if CONFIG_FRIDGE_P4_GT911_ENABLE
+    // MIPI 屏触摸：WKS70 GT911 使用 GPIO15/16/17/18；优先 0x14，对齐厂商 7 寸复位与软复位。
+    esp_err_t touch_ret = fridge_touch_gt911_init();
+#else
+    // 旧 QSPI/FT6336U 触摸保留给排障配置。
     esp_err_t touch_ret = fridge_touch_init();
+#endif
     if (touch_ret == ESP_OK) {
+#if CONFIG_FRIDGE_P4_GT911_ENABLE
+        ESP_LOGI(TAG, "GT911 touch ready addr=0x%02X; use touch_status/touch_scan over USB for diagnostics",
+                 (unsigned)fridge_touch_gt911_get_address());
+#else
         if (xTaskCreate(p4_minimal_touch_task, "p4_touch", 3072, NULL, 4, NULL) != pdPASS) {
             ESP_LOGW(TAG, "create touch poll task failed");
         }
+#endif
     } else {
-        ESP_LOGW(TAG, "touch init failed: %s", esp_err_to_name(touch_ret));
+        ESP_LOGW(TAG, "touch init failed: %s (WKS70: check 26-pin FPC CTP lines INT15/SCL16/SDA17/RST18)",
+                 esp_err_to_name(touch_ret));
     }
 #else
     ESP_LOGI(TAG, "P4 direct touch disabled by configuration");
 #endif
 
-    // 麦克风：ES8311 编解码器录音路径；PA_CTRL 保持低电平（本阶段不放音）。
+#if CONFIG_FRIDGE_P4_GT911_ENABLE
+    // SHT40 温湿度：复用 GT911 已建的 I2C0 共享总线（GPIO16/17），必须在 GT911 init 之后调用。
+    esp_err_t sht4x_ret = fridge_sht4x_init();
+    if (sht4x_ret != ESP_OK) {
+        ESP_LOGW(TAG, "SHT40 init failed: %s (check GPIO16/17 wiring, addr 0x44/0x45)",
+                 esp_err_to_name(sht4x_ret));
+    }
+
+    // MPU6050 姿态传感器：复用同一 I2C0，模块使用 3.3V、AD0 接地（0x68），INT 首版悬空。
+    // 驱动只添加 device handle；探测失败不会阻断启动，后台会按 1Hz 慢速恢复。
+    esp_err_t sensors_ret = fridge_sensors_init();
+    if (sensors_ret != ESP_OK) {
+        ESP_LOGW(TAG, "MPU6050 monitor init failed: %s (check GT911 bus and GPIO16/17)",
+                 esp_err_to_name(sensors_ret));
+    }
+#endif
+
+    // 在 UI、TF 与 Agent Runtime 申请大量内存前，提前保留 JPEG 的内部 DMA 描述符。
+    // 该操作不启动 OV5647、不申请 CSI 帧缓冲，也不访问与 ES8311 共用的 GPIO28/29。
+    // 失败不能影响启动和实时取景；抓拍时仍会再次尝试并返回明确错误。
+    esp_err_t jpeg_prewarm_ret = fridge_camera_prepare_jpeg_encoder();
+    if (jpeg_prewarm_ret != ESP_OK) {
+        ESP_LOGW(TAG, "early JPEG encoder prewarm failed: %s", esp_err_to_name(jpeg_prewarm_ret));
+    }
+
+    // 截图保存到 TF 时，SDMMC 仍需要内部 DMA 可寻址缓冲；PSRAM 只能承载整帧和文件源。
+    // 在 UI/FreeType/WakeNet 分配前预留 2KiB DMA 暂存区，保持已验证的切页堆布局。
+    esp_err_t screenshot_init_ret = fridge_screenshot_init();
+    if (screenshot_init_ret != ESP_OK) {
+        ESP_LOGW(TAG, "screenshot SDMMC DMA reserve failed: %s",
+                 esp_err_to_name(screenshot_init_ret));
+    }
+
+    // 麦克风：ES8311 编解码器；Realtime 双工时才打开 PA_CTRL，空闲保持低电平防爆音。
     esp_err_t audio_ret = fridge_audio_init();
     if (audio_ret != ESP_OK) {
         ESP_LOGW(TAG, "audio init failed: %s (check ES8311/shared I2C GPIO28-29)", esp_err_to_name(audio_ret));
     }
+
+    // 尽早启动 LVGL UI：屏幕首帧优先于 Agent/Realtime 重型初始化，避免用户看到长时间黑屏。
+#if CONFIG_FRIDGE_P4_UI_ENABLE
+    if (disp_ret == ESP_OK) {
+        esp_err_t ui_ret = fridge_ui_p4_init();
+        if (ui_ret != ESP_OK) {
+            ESP_LOGW(TAG, "P4 LVGL UI early start failed: %s", esp_err_to_name(ui_ret));
+        } else {
+            ESP_LOGI(TAG, "P4 LVGL UI task started early (before TF/agent/realtime)");
+        }
+    }
+#endif
 
     // TF 与 C6 hosted 共用 LDO4 电源域。只有 network/hosted 成功持有并开启 LDO4 后才初始化 Slot0。
     // 否则继续访问 TF 会把电源域故障误报成无卡或文件系统损坏。
@@ -543,13 +744,122 @@ void app_main(void)
         esp_err_t tf_ret = fridge_tfcard_init();
         if (tf_ret != ESP_OK) {
             ESP_LOGW(TAG, "tfcard init failed: %s", esp_err_to_name(tf_ret));
+        } else {
+            // TF 已挂载后启动低优先级日志任务，并优先处理上一次启动遗留的 Flash coredump。
+            // coredump 只有 ELF 与摘要都原子写入受保护目录后才擦除，失败会留到下次继续重试。
+            esp_err_t diag_log_start_ret = fridge_diagnostics_log_start();
+            if (diag_log_start_ret != ESP_OK) {
+                ESP_LOGW(TAG, "diagnostics log writer start failed: %s", esp_err_to_name(diag_log_start_ret));
+            }
+            fridge_diagnostic_snapshot_t diag_snapshot = {0};
+            if (fridge_diagnostics_get_snapshot(&diag_snapshot) == ESP_OK) {
+                esp_err_t coredump_ret = fridge_diagnostics_log_process_coredump(diag_snapshot.boot_sequence);
+                if (coredump_ret != ESP_OK) {
+                    ESP_LOGW(TAG, "coredump export pending: %s", esp_err_to_name(coredump_ret));
+                }
+            }
+            // Agent 数据目录：只有 TF 卡成功挂载后才创建 /sdcard/agent，避免把无卡/电源域问题误写成业务失败。
+            esp_err_t agent_store_ret = fridge_agent_storage_init();
+            if (agent_store_ret != ESP_OK) {
+                ESP_LOGW(TAG, "agent storage init failed: %s", esp_err_to_name(agent_store_ret));
+            } else {
+                // Trace Service 写入 /sdcard/agent/logs，必须在 Agent Storage 创建目录后初始化。
+                esp_err_t trace_ret = fridge_trace_service_init();
+                if (trace_ret != ESP_OK) {
+                    ESP_LOGW(TAG, "trace service init failed: %s", esp_err_to_name(trace_ret));
+                }
+                // Tool Broker 依赖 Agent TF 数据目录，注册只读与业务写入工具；所有副作用都从这里统一过权限。
+                esp_err_t tool_ret = fridge_tool_broker_init();
+                if (tool_ret != ESP_OK) {
+                    ESP_LOGW(TAG, "tool broker init failed: %s", esp_err_to_name(tool_ret));
+                } else {
+                    // UI Tool 由 ui_p4 自己注册。Broker 已完成 Registry 初始化后再调用，
+                    // 保持 tool_system 不依赖 UI，避免 Agent Runtime 链路出现静态组件循环。
+                    esp_err_t ui_tools_ret = fridge_ui_p4_register_tools();
+                    if (ui_tools_ret != ESP_OK) {
+                        ESP_LOGW(TAG, "P4 UI tool registration failed: %s", esp_err_to_name(ui_tools_ret));
+                    }
+                    // Skill 文档落在 TF 卡，便于后续不刷固件直接调整厨房场景提示和流程说明。
+                    esp_err_t skill_ret = fridge_skill_manager_init();
+                    if (skill_ret != ESP_OK) {
+                        ESP_LOGW(TAG, "skill manager init failed: %s", esp_err_to_name(skill_ret));
+                    }
+                    // Workflow Engine 只执行确定性本地流程，副作用步骤仍回到 Tool Broker。
+                    esp_err_t workflow_ret = fridge_workflow_engine_init();
+                    if (workflow_ret != ESP_OK) {
+                        ESP_LOGW(TAG, "workflow engine init failed: %s", esp_err_to_name(workflow_ret));
+                    }
+                    // 最小 Agent Runtime 依赖 Tool Broker，先启用本地确定性 Router → Tool 调用闭环。
+                    esp_err_t agent_runtime_ret = fridge_agent_runtime_init();
+                    if (agent_runtime_ret != ESP_OK) {
+                        ESP_LOGW(TAG, "agent runtime init failed: %s", esp_err_to_name(agent_runtime_ret));
+                    } else {
+                        fridge_ui_p4_agent_actions_t agent_actions = {
+                            .submit_text = p4_agent_ui_submit,
+                            .cancel_active = p4_agent_ui_cancel,
+                            .clear_session = p4_agent_ui_clear_session,
+                            .resolve_confirmation = p4_agent_ui_resolve,
+                            .poll_event = p4_agent_ui_poll,
+                        };
+                        esp_err_t agent_ui_ret = fridge_ui_p4_register_agent_actions(&agent_actions);
+                        if (agent_ui_ret != ESP_OK) {
+                            ESP_LOGW(TAG, "agent UI bridge registration failed: %s", esp_err_to_name(agent_ui_ret));
+                        }
+                    }
+                    // GLM Realtime：依赖 network/audio/Tool Broker；失败不阻断 USB 调试控制台。
+                    esp_err_t glm_rt_ret = fridge_glm_realtime_init();
+                    if (glm_rt_ret != ESP_OK) {
+                        ESP_LOGW(TAG, "glm realtime init failed: %s", esp_err_to_name(glm_rt_ret));
+                    }
+                }
+            }
         }
     } else {
         fridge_tfcard_mark_unavailable("esp_hosted/LDO4 未就绪，已跳过 TF 初始化；请重启设备");
         ESP_LOGW(TAG, "TF card skipped because esp_hosted/LDO4 is not ready");
     }
 
+    // 即使 Tool Broker/TF 未就绪，也尽量初始化 Realtime（文本+配置调试可用；工具在 start 时再检查）。
+    // 若上面已 init，则此处幂等返回 ESP_OK。
+    {
+        esp_err_t glm_rt_ret = fridge_glm_realtime_init();
+        if (glm_rt_ret != ESP_OK) {
+            ESP_LOGW(TAG, "glm realtime late init failed: %s", esp_err_to_name(glm_rt_ret));
+        }
+    }
+
+    // P4 云端连接必须在 NVS、网络和 Agent/Tool 基础设施之后启动。旧 S3 MQTT 数据模型
+    // 不进入此路径；二维码绑定成功后只写入 P4 v2 配置并由 MQTT worker 执行同步。
+    esp_err_t mqtt_ret = fridge_mqtt_protocol_init();
+    if (mqtt_ret != ESP_OK) {
+        ESP_LOGW(TAG, "P4 MQTT v2 init failed: %s", esp_err_to_name(mqtt_ret));
+    } else {
+        esp_err_t binding_ret =
+            fridge_device_binding_init(p4_binding_status_changed, NULL);
+        if (binding_ret != ESP_OK) {
+            ESP_LOGW(TAG, "device binding worker init failed: %s",
+                     esp_err_to_name(binding_ret));
+        }
+        // MQTT 启动路径包含 TLS/JSON 配置检查，任务栈保留 6 KiB 内部 SRAM，
+        // 避免 4 KiB 边界在中断切换时触发 P4 栈保护；大消息/Outbox 仍放 PSRAM。
+        if (xTaskCreate(p4_mqtt_autostart_task, "p4_mqtt_start", 6144,
+                        NULL, 3, NULL) != pdPASS) {
+            ESP_LOGW(TAG, "create P4 MQTT autostart task failed");
+        }
+    }
+
+// UI 已在 audio 之后尽早启动；此处仅作幂等兜底（若早期路径因 disp 失败跳过）。
+#if CONFIG_FRIDGE_P4_UI_ENABLE
+    if (disp_ret == ESP_OK && !fridge_ui_p4_is_ready()) {
+        esp_err_t ui_ret = fridge_ui_p4_init();
+        if (ui_ret != ESP_OK) {
+            ESP_LOGW(TAG, "P4 LVGL UI late start failed: %s", esp_err_to_name(ui_ret));
+        }
+    }
+#endif
+
     // 初始化屏障：从此刻起串口发送 ready，并允许配网、录音和 TF 等硬件命令。
+    p4_log_internal_dma_heap("startup_complete");
     if (usb_ret == ESP_OK) {
         fridge_usb_protocol_set_hardware_ready();
         ESP_LOGI(TAG, "P4 minimal bring-up sequence finished; USB hardware commands enabled");
@@ -559,22 +869,6 @@ void app_main(void)
     } else {
         ESP_LOGI(TAG, "P4 minimal bring-up sequence finished; USB console unavailable");
     }
-#else
-#if CONFIG_FRIDGE_CAMERA_TEST
-    // 摄像头专用测试模式：跳过屏幕、触摸、传感器和麦克风，避免 OV3660 DVP 引脚与既有外设互相冲突。
-    // 注意：上电前必须确认 OV3660 模组是 3.3V 直连版，且 PWDN/XCLK/SCCB/DVP 接线与计划表一致。
-    ESP_LOGW(TAG, "CONFIG_FRIDGE_CAMERA_TEST is enabled; screen/sensors/audio are skipped");
-    nvs_init_safe();
-    fridge_diagnostics_init();
-
-    ESP_ERROR_CHECK(fridge_network_init());
-    ESP_ERROR_CHECK(fridge_ai_client_init());
-    ESP_ERROR_CHECK(fridge_mqtt_protocol_init());
-    // 摄像头测试模式下先启动 USB 控制台，再由 Web Serial 的 camera_capture 命令按需初始化 OV3660。
-    // 这样即使摄像头断开或供电异常，主控也能保持在线，避免上电阶段卡在 SCCB 探测导致看门狗复位。
-    ESP_LOGW(TAG, "camera init is deferred until camera_capture; keep OV3660 disconnected until power rails are verified");
-    ESP_ERROR_CHECK(fridge_usb_protocol_start());
-    ESP_LOGI(TAG, "camera-only USB console is ready");
 #else
     // 正常主控模式：初始化 NVS、诊断、Wi-Fi、AI 配置和 USB 配网控制台。
     // 注意：此路径会启动 Wi-Fi，真实硬件调试时需确认 5V/USB 供电足够稳定。
@@ -587,20 +881,9 @@ void app_main(void)
     ESP_ERROR_CHECK(fridge_sensors_init());
 
 #if CONFIG_FRIDGE_UI_ENABLE
-    // 屏幕 SPI 刷新需要一块连续的 DMA 内部 SRAM。UI 先启动可避免音频、
-    // 扬声器和唤醒词组件占用/碎片化内部内存后导致屏幕初始化失败。
-    esp_err_t ui_ret = fridge_ui_init();
-    if (ui_ret == ESP_OK) {
-        ESP_LOGI(TAG, "local LVGL touch UI started");
-        for (int i = 0; i < 30 && !fridge_display_is_ready(); i++) {
-            vTaskDelay(pdMS_TO_TICKS(100));
-        }
-        if (!fridge_display_is_ready()) {
-            ESP_LOGW(TAG, "display not ready after early UI wait; keep booting with USB diagnostics");
-        }
-    } else {
-        ESP_LOGW(TAG, "local LVGL touch UI skipped: %s", esp_err_to_name(ui_ret));
-    }
+    // 旧 S3 LVGL UI 路径仍可能存在于源码树，但 SPI/TR230S display 组件已移除。
+    // 此分支无法再初始化物理屏幕，仅保留日志提示，避免误链已删除的 fridge_display API。
+    ESP_LOGW(TAG, "legacy FRIDGE_UI_ENABLE path has no SPI display backend on P4; use CONFIG_FRIDGE_P4_MINIMAL + ui_p4");
 #endif
 
     esp_err_t usb_ret = fridge_usb_protocol_start();
@@ -633,6 +916,5 @@ void app_main(void)
     // WakeNet 的初始化（含较大内部 SRAM 占用）推迟到用户首次打开“语音唤醒”开关、
     // 由策略层在亮屏空闲时惰性触发；NVS 默认 user_en=false，保证升级后启动内存基线不变。
     ESP_LOGI(TAG, "wake word available; lazily initialized on first enable, gated by screen-awake policy");
-#endif
 #endif
 }

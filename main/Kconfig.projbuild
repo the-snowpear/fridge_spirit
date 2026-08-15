@@ -9,18 +9,18 @@ config FRIDGE_RECOVERY_APP
         AI、语音、雷达和 LVGL 主业务。
 
 config FRIDGE_P4_MINIMAL
-    bool "ESP32-P4 service profile (Wi-Fi + mic/ASR/WakeNet + SPI screen/touch + TF card)"
+    bool "ESP32-P4 service profile (Wi-Fi + mic/ASR/WakeNet + MIPI screen/touch + TF card)"
     depends on IDF_TARGET_ESP32P4
     default n
     help
         ESP32-P4 CB V1.2 最小移植启动模式。只初始化：NVS、诊断、网络
-        （esp_hosted/板载C6）、USB JSON 控制台、TR230S QSPI-4SDA 屏与
-        FT6336U 触摸（静态图案，无 LVGL）、ES8311 麦克风录音、
+        （esp_hosted/板载C6）、USB JSON 控制台、MIPI-DSI 屏与 GT911 触摸、
+        ES8311 麦克风录音、
         ESP-SR WakeNet、云端 ASR 和 TF 卡。
         只链接首阶段组件，
         不把旧 S3 摄像头、传感器、雷达、AI 会话或扬声器实现带入 P4 固件。
-        注意：CONFIG_FRIDGE_SCREEN_TEST=y 时优先进入屏幕测试模式，本选项
-        被忽略；正常 P4 联调请保持本选项开启、屏幕测试关闭。
+        注意：CONFIG_FRIDGE_MIPI_SCREEN_TEST=y 时优先进入独立 MIPI 点屏模式，
+        本选项被忽略；正常 P4 联调请保持本选项开启、MIPI 点屏测试关闭。
 
 config FRIDGE_P4_TOUCH_ENABLE
     bool "Enable direct FT6336U touch wiring in P4 minimal profile"
@@ -30,5 +30,49 @@ config FRIDGE_P4_TOUCH_ENABLE
         仅当使用 20-pin FPC 转接板并把 FT6336U 的 SDA/SCL/INT/RST 单独接到
         GPIO17/16/15/18 时开启。当前 P4 方案固定使用 20-pin FPC 转杜邦板；
         FPC pin19 TP-VCC 按模组规格保持悬空，I2C 上拉只能接 3.3V。
+
+config FRIDGE_P4_UI_ENABLE
+    bool "Enable P4 MIPI LVGL Agent UI"
+    depends on FRIDGE_P4_MINIMAL
+    default y
+    help
+        启用 P4 原生 1024x600 MIPI-DSI LVGL UI、TF 字体管理器和 26 键全拼输入法。
+        该路径使用现有 MIPI 双帧缓冲和 GT911，不链接旧 S3 UI 页面。
+
+config FRIDGE_P4_GT911_ENABLE
+    bool "Enable GT911 touch for P4 MIPI display"
+    depends on FRIDGE_P4_UI_ENABLE
+    default y
+    help
+        使用 MIPI 屏座 GPIO15/16/17/18 上的 GT911 触摸控制器。
+        仅当屏幕模组确认带 GT911 且 I2C 信号上拉到 3.3V 时开启。
+
+config FRIDGE_P4_MIPI_UI_ENABLE
+    bool "Use MIPI display for normal P4 profile"
+    depends on FRIDGE_P4_UI_ENABLE
+    default y
+    help
+        正常 P4 服务固件使用 1024x600 MIPI-DSI 屏。
+        SPI/TR230S 驱动已移除；关闭本选项时不会有屏幕后端回退。
+
+config FRIDGE_FY_SP703_ENABLE
+    bool "Enable FY-SP703 external noise-cancelling microphone"
+    depends on FRIDGE_P4_MINIMAL && FRIDGE_P4_MIPI_UI_ENABLE
+    default y
+    help
+        启用扩展板 FY-SP703 数字麦克风。模组使用 GPIO7=LRCK、GPIO8=BCLK、
+        GPIO9=SDIO，当前烧写固件输出 16kHz/32-bit/Philips I2S；ESP32-P4 使用 I2S1
+        从机 RX 接收。该引脚组与板上 SPI 屏座历史接线冲突，因此只有
+        MIPI-DSI 正常 UI 配置可启用。
+
+config FRIDGE_MQ5_ENABLE
+    bool "Enable MQ-5 gas/smoke sensor (AO on GPIO20/ADC1_CH4)"
+    depends on IDF_TARGET_ESP32P4
+    default y
+    help
+        启用 MQ-5 可燃气体/烟雾传感器（首阶段只用 AO，DO 不接）。
+        GPIO20=ADC1_CH4，AO 经 22kΩ 串联 + 33kΩ 对地分压并 100nF 滤波后接入，
+        分压后最高约 3.0V（0.6×5V）；模块由 P6 SYS_5V 供电，5V 只到模块 VCC，严禁直接进入 GPIO。
+        本选项仅在 ESP32-P4 目标上有效；关闭后传感器状态机进入 DISABLED。
 
 endmenu

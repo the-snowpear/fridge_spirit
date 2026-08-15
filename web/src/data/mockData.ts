@@ -134,6 +134,7 @@ export function createMockWakeStatus(overrides: Partial<WakeStatus> = {}): WakeS
     state: "idle",
     wakeWord: "小冰小冰",
     model: "wn9_xiaobinxiaobin_tts",
+    audioSource: "fy_sp703",
     triggerCount: 0,
     lastTriggerMs: 0,
     vadState: -1,
@@ -172,17 +173,12 @@ export function createMockWifiNetworks(): WifiNetwork[] {
 
 export function createMockPins(): PinInfo[] {
   return [
-    { gpio: "GPIO1", signal: "LIGHT_AO", usage: "光敏 ADC", level: "safe", note: "AO 模拟输出，只允许 3.3V 供电后接入 ADC1_CH0。", readonly: true },
-    { gpio: "GPIO4/5", signal: "I2C_SCCB", usage: "触摸 / MPU6050 / OV3660", level: "caution", note: "SDA=GPIO4，SCL=GPIO5，所有上拉只到 3.3V。", readonly: true },
-    { gpio: "GPIO6/7", signal: "LCD_WAIT_RST", usage: "屏幕 WAIT#/RESET#", level: "caution", note: "WAIT#=GPIO6，RESET#=GPIO7。", readonly: true },
-    { gpio: "GPIO9/10/11/12/13/14", signal: "LCD_QSPI", usage: "屏幕 QSPI", level: "caution", note: "D3=9，CS=10，D0=11，SCLK=12，D1=13，D2=14。", readonly: true },
-    { gpio: "GPIO15", signal: "TOUCH_INT", usage: "FT6336U 触摸", level: "safe", note: "TP_INT=GPIO15，TP_RST 不接。", readonly: true },
-    { gpio: "GPIO17/18/8/3/46/48/45/16", signal: "CAM_D0_D7", usage: "OV3660 DVP 数据", level: "caution", note: "D0-D7=17/18/8/3/46/48/45/16；GPIO3/45/46 启动敏感，GPIO48 与板载 RGB LED 共用。", readonly: true },
-    { gpio: "GPIO2/38/19/47", signal: "CAM_SYNC_CLK", usage: "OV3660 同步与时钟", level: "caution", note: "VSYNC=2，HREF=38，PCLK=19，XCLK=47；GPIO35/36/37 禁用。", readonly: true },
-    { gpio: "GPIO40/41/42/39", signal: "I2S_AUDIO", usage: "麦克风 + 扬声器", level: "caution", note: "BCLK=40、WS=41 共用，MIC_SD=42，SPK_DIN=39；首轮避免同时录放。", readonly: true },
-    { gpio: "GPIO21/20", signal: "RADAR_UART", usage: "24G 雷达", level: "safe", note: "雷达 TX->GPIO21，GPIO20->雷达 RX，OT2 不接。", readonly: true },
-    { gpio: "GPIO35/36/37", signal: "FORBIDDEN", usage: "N8R8 禁用", level: "danger", note: "Flash/PSRAM 相关，不接任何外设。", readonly: true },
-    { gpio: "GPIO0", signal: "RESERVED_STRAP", usage: "启动绑带预留", level: "danger", note: "本版不接，避免再次分给摄像头 DVP。", readonly: true },
+    { gpio: "GPIO15/18", signal: "TOUCH_GT911_CTRL", usage: "WKS70 GT911", level: "caution", note: "INT=15、RST=18；仅 GT911 使用。", readonly: true },
+    { gpio: "GPIO16/17", signal: "I2C0_SHARED", usage: "GT911 + SHT40 + MPU6050", level: "caution", note: "SCL=16、SDA=17；MPU6050 地址 0x68、100kHz、AD0 接地、INT 悬空；所有上拉只能到 3.3V。", readonly: true },
+    { gpio: "GPIO2/3/4/5/6/11/28/29", signal: "ES8311_AUDIO", usage: "板载音频", level: "caution", note: "GPIO28/29 与 OV5647 SCCB 分时复用。", readonly: true },
+    { gpio: "GPIO39-45", signal: "TF_SDMMC", usage: "板载 TF 卡", level: "caution", note: "D0-D3=39-42、CLK=43、CMD=44、PWR_EN=45 低有效。", readonly: true },
+    { gpio: "GPIO47-54", signal: "C6_SDIO", usage: "板载 ESP32-C6", level: "danger", note: "板载专用，不接外设。", readonly: true },
+    { gpio: "GPIO0/1/35/36", signal: "RESERVED_STRAP_XTAL", usage: "晶振/启动敏感", level: "danger", note: "GPIO0/1 为 32.768kHz 晶振，GPIO35/36 为启动敏感脚。", readonly: true },
   ];
 }
 
@@ -306,23 +302,23 @@ export function createMockRadar(previous?: RadarSnapshot | null): RadarSnapshot 
 }
 
 export function createMockSensors(): SensorSnapshot {
-  const raw = Math.round(900 + Math.random() * 2400);
-  const brightness10 = Math.round(((4095 - raw) * 1023) / 4095);
   const accelX = Number((Math.random() * 0.08 - 0.04).toFixed(4));
   const accelY = Number((Math.random() * 0.08 - 0.04).toFixed(4));
   const accelZ = Number((1 + Math.random() * 0.05).toFixed(4));
   return {
-    pir: Math.random() > 0.65,
-    lux: brightness10,
-    lightRaw12bit: raw,
-    lightValue10bit: brightness10,
-    lightPercent: Math.round((brightness10 * 100) / 1023),
-    lightPolarity: "raw_high_dark",
-    lightDelta: Number((8 + Math.random() * 22).toFixed(1)),
+    profile: "p4_mpu6050",
     imuReady: true,
+    baselineReady: true,
     imuAddress: 0x68,
     imuWhoAmI: 0x68,
     imuError: 0,
+    imuErrorName: "ESP_OK",
+    consecutiveFailures: 0,
+    sampleCount: Math.floor(1200 + Math.random() * 10000),
+    i2cBus: 0,
+    sclGpio: 16,
+    sdaGpio: 17,
+    sampleRateHz: 50,
     accelXG: accelX,
     accelYG: accelY,
     accelZG: accelZ,
@@ -332,36 +328,33 @@ export function createMockSensors(): SensorSnapshot {
     imuTemperatureC: Number((28 + Math.random() * 2).toFixed(2)),
     pitchDeg: Number((Math.random() * 3 - 1.5).toFixed(2)),
     rollDeg: Number((Math.random() * 3 - 1.5).toFixed(2)),
-    angleDelta: Number((1.2 + Math.random() * 3).toFixed(1)),
+    angleDelta: Number((Math.random() * 3).toFixed(1)),
     // 震动峰值与固件保持一致：去重力的动态加速度 |‖a‖ - 1g|，静止时约等于 0。
     vibrationPeak: Number(Math.abs(Math.sqrt(accelX * accelX + accelY * accelY + accelZ * accelZ) - 1).toFixed(4)),
-    radar: createMockRadar(),
-    touch: "FT6336U idle / addr 0x38",
-    display: "TR230S QSPI planned / line buffer",
-    buzzer: "LEDC idle",
-    doorState: "CLOSED",
-    stateMachine: {
-      state: brightness10 < 250 ? "NIGHT_SAVE" : "SLEEP",
-      doorState: "CLOSED",
-      offline: false,
-      isNight: brightness10 < 250,
-      radarSoftwarePaused: brightness10 < 250,
-      radarPresenceReliable: false,
-      radarWithin2m: false,
-      radarWithin1m: false,
-      radarApproaching: false,
-      imuMotionStrength: 0.08,
-      lightValue10bit: brightness10,
-      lightDelta: 12,
-      radarDistanceRaw: 0,
-      radarGate: 0,
-      lastReason: "Mock 状态机：光照亮、雷达无人、IMU 静止",
-      autoVoiceState: "IDLE",
-      autoVoiceError: "",
-      updatedAtMs: Date.now(),
-      stateSinceMs: Date.now() - 5000,
-    },
     updatedAt: now(),
+  };
+}
+
+/** MQ-5 燃气模块稳定示例：相对 ADC 读数，不是 ppm；供 Mock 面板与状态迁移演示使用。 */
+export function createMockMq5Sensor(overrides: Partial<SensorSnapshot> = {}): Partial<SensorSnapshot> {
+  const raw12bit = Math.floor(900 + Math.random() * 500); // 相对 12-bit ADC 读数（约 900-1400），非 ppm
+  const baselineRaw12bit = 1050;
+  return {
+    mq5State: "monitoring",
+    mq5Ready: true,
+    mq5Error: 0,
+    mq5Raw12bit: raw12bit,
+    mq5Value10bit: Math.round((raw12bit * 1023) / 4095),
+    mq5AdcPercent: Math.round((raw12bit * 100) / 4095),
+    mq5SampleCount: 2400,
+    mq5UpdatedAtMs: Date.now(),
+    mq5WarmupElapsedSec: 60,
+    mq5DailyWarmupComplete: true,
+    mq5BurnInConfirmed: true,
+    mq5BaselineReady: true,
+    mq5BaselineRaw12bit: baselineRaw12bit,
+    mq5DeltaFromBaseline: raw12bit - baselineRaw12bit,
+    ...overrides,
   };
 }
 

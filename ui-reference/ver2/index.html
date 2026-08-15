@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<!--
+  冰箱小精灵 ver2 UI 参考预览（ESP32-P4）
+  ==================================================================
+  双模式：
+    · 横屏标准 1024×600：主区 | 导航 | 状态舱（摄像头可用）
+    · 竖屏隐私 600×1024：上主区 / 中导航 / 下状态舱（摄像头关闭）
+  打开方式：双击本文件（file:// 可直接运行：零依赖、无 ES Module、
+  无 fetch、无网络字体）；或在 ver2 目录下 python -m http.server 8000。
+  布局切换：工具栏「横屏标准 / 竖屏隐私」，或 ?layout=portrait|landscape。
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>冰箱小精灵 ver2 · UI 参考预览（横/竖双模式）</title>
+<link rel="stylesheet" href="styles/tokens.css">
+<link rel="stylesheet" href="styles/base.css">
+<link rel="stylesheet" href="styles/components.css">
+<link rel="stylesheet" href="styles/cabin.css">
+<link rel="stylesheet" href="styles/overlays.css">
+<link rel="stylesheet" href="styles/gallery.css">
+<link rel="stylesheet" href="styles/pages-home.css">
+<link rel="stylesheet" href="styles/pages-inventory.css">
+<link rel="stylesheet" href="styles/pages-chat.css">
+<link rel="stylesheet" href="styles/pages-plan.css">
+<link rel="stylesheet" href="styles/pages-more.css">
+<link rel="stylesheet" href="styles/pages-system.css">
+</head>
+<body>
+
+<!-- 预览工具栏（设备框之外，由 shell.js 填充） -->
+<div id="toolbar"></div>
+
+<!-- 视口：设备舞台（1:1 1024×600，JS 缩放适配）或页面总览 -->
+<div id="viewport">
+  <div id="stage-wrap">
+    <div id="stage">
+      <div id="shell">
+        <main id="main-area"></main>
+        <nav id="sidenav"></nav>
+        <aside id="cabin"></aside>
+      </div>
+      <!-- 全局浮层根（阻塞/非阻塞统一在此入栈） -->
+      <div id="ovl-root"></div>
+    </div>
+  </div>
+  <div id="gallery-root" style="display:none"></div>
+</div>
+
+<!-- 核心运行时（普通 script 标签，file:// 安全；顺序即依赖序） -->
+<script src="js/core/icons.js"></script>
+<script src="js/core/ui.js"></script>
+<script src="js/data/mock-data.js"></script>
+<script src="js/core/mode.js"></script>
+<script src="js/core/router.js"></script>
+<script src="js/core/overlays.js"></script>
+<script src="js/core/cabin.js"></script>
+<script src="js/core/states.js"></script>
+<script src="js/core/shell.js"></script>
+<script src="js/core/flows.js"></script>
+<script src="js/core/gallery.js"></script>
+
+<!-- 页面模块（各自向 FS.router 注册页面，并可注册 FS.flows 流程） -->
+<script src="js/pages/pages-system.js"></script>
+<script src="js/pages/pages-home.js"></script>
+<script src="js/pages/pages-inventory.js"></script>
+<script src="js/pages/pages-chat.js"></script>
+<script src="js/pages/pages-plan.js"></script>
+<script src="js/pages/pages-more.js"></script>
+
+<script>
+  /* 全部脚本就绪后启动外壳（含工具栏/路由/缩放/事件委托） */
+  FS.shell.start();
+</script>
+</body>
+</html>

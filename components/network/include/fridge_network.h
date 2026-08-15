@@ -64,8 +64,17 @@ esp_err_t fridge_network_scan(fridge_wifi_ap_t *aps, size_t max_count, size_t *o
 // 连接 Wi-Fi；save 为 true 时保存 SSID/密码到 NVS，重启后可自动连接。
 esp_err_t fridge_network_connect(const fridge_wifi_config_t *config, bool save);
 
+// 保存已经通过连接和 SNTP 校验的当前 Wi-Fi 凭据。
+// 仅当设备仍关联 config->ssid、Wi-Fi 驱动中保存的 SSID/密码与 config 一致，且 internet_ready=true 时成功；
+// 因此配网 UI 可先 connect(..., false) + sync_time()，验证成功后调用本接口，不会因失败测试覆盖旧凭据。
+// 密码只与 Wi-Fi 驱动/NVS 比对，不会写入日志或网络状态。
+esp_err_t fridge_network_save_config(const fridge_wifi_config_t *config);
+
 // 使用 NVS 中保存的 SSID/密码自动连接；没有凭据时返回 ESP_ERR_NOT_FOUND。
 esp_err_t fridge_network_connect_saved(void);
+
+// 读取已验证并保存的 SSID。只返回 SSID，绝不向 UI、日志或调用方暴露密码。
+esp_err_t fridge_network_get_saved_ssid(char *ssid, size_t ssid_size);
 
 // 后台尝试连接 NVS 中保存的 Wi-Fi；不会阻塞 USB/Web Serial 调试面板启动。
 esp_err_t fridge_network_connect_saved_async(void);

@@ -2,7 +2,7 @@
 
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,6 +25,7 @@ async def mqtt_event_ingest(
     db: AsyncSession = Depends(get_db),
 ) -> MqttEventIngestResponse:
     """接收 EMQX Webhook 或内部 MQTT 消费者转发的设备事件。"""
+    raise HTTPException(status_code=410, detail="LEGACY_API_REMOVED: backend consumes MQTT v2 directly")
     device = (await db.execute(select(Device).where(Device.device_sn == payload.device_sn))).scalar_one_or_none()
     if device:
         device.status = "online"
@@ -46,6 +47,7 @@ async def mqtt_event_ingest(
 @router.post("/command/publish", response_model=MqttCommandPublishResponse)
 async def mqtt_command_publish(payload: MqttCommandPublishRequest) -> MqttCommandPublishResponse:
     """发布设备命令的占位接口，后续替换为真实 MQTT 客户端。"""
+    raise HTTPException(status_code=410, detail="LEGACY_API_REMOVED: use authenticated v2 APIs")
     result = await mqtt_gateway.publish_command(
         device_sn=payload.device_sn,
         command=payload.command,

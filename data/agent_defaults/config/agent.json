@@ -1,0 +1,9 @@
+{
+  "context": {
+    "max_history_messages": 30,
+    "session_ttl_hours": 48
+  },
+  "language": "zh-CN",
+  "max_model_steps": 6,
+  "schema_version": 1
+}

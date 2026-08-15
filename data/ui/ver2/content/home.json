@@ -1,0 +1,87 @@
+{
+  "agent_tips": [
+    {
+      "action": "加入购物清单",
+      "text": "卤牛肉今天到期，晚餐推荐「卤牛肉拌面」，缺少面条和青菜，要加入购物清单吗？"
+    },
+    {
+      "action": "去确认",
+      "text": "吐司面包已过期 3 天，需要我帮你从库存中移除吗？"
+    }
+  ],
+  "expiring": [
+    {
+      "badge": "估算",
+      "expiry": "今天到期",
+      "location": "右冷藏/第2层/B2+B3 奶制品位",
+      "name": "原味酸奶",
+      "quantity": "4杯",
+      "tone": "danger"
+    },
+    {
+      "badge": "",
+      "expiry": "今天到期",
+      "location": "左冷藏/第2层",
+      "name": "卤牛肉",
+      "quantity": "200g",
+      "tone": "danger"
+    },
+    {
+      "badge": "",
+      "expiry": "明天到期",
+      "location": "果蔬抽屉/抽屉",
+      "name": "菠菜",
+      "quantity": "1把",
+      "tone": "warn"
+    }
+  ],
+  "last_sync": "14:31 库存变更已同步到云端 · 语音识别新增「内酯豆腐」待补充位置",
+  "recommendation": {
+    "coverage": 90,
+    "difficulty": "简单",
+    "primary_action": "开始烹饪",
+    "ready": true,
+    "reason": "番茄 3 天后到期、鸡蛋充足；15 分钟快手菜。",
+    "secondary_action": "换一个",
+    "time": "15分钟",
+    "title": "番茄炒蛋"
+  },
+  "schema_version": 1,
+  "stats": [
+    {
+      "icon": "box",
+      "key": "inventory",
+      "label": "库存食材",
+      "tone": "normal",
+      "value": 20
+    },
+    {
+      "icon": "clock",
+      "key": "expiring",
+      "label": "3天内临期",
+      "tone": "warn",
+      "value": 7
+    },
+    {
+      "icon": "warn",
+      "key": "expired",
+      "label": "已过期",
+      "tone": "danger",
+      "value": 2
+    },
+    {
+      "icon": "location",
+      "key": "unlocated",
+      "label": "待补充位置",
+      "tone": "normal",
+      "value": 2
+    }
+  ],
+  "summaries": {
+    "dinner": "晚：番茄炒蛋 + 菠菜鸡蛋汤",
+    "next_remaining": "08:00",
+    "next_source": "菜谱·番茄炒蛋",
+    "next_title": "煮蛋",
+    "shopping": "3 项待买 · 2 项建议"
+  }
+}

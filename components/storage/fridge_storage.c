@@ -9,6 +9,7 @@
 #include <string.h>
 #include <time.h>
 #include <sys/time.h>
+#include <unistd.h>
 
 #include "cJSON.h"
 #include "esp_check.h"
@@ -19,13 +20,11 @@
 #include "nvs.h"
 
 #define STORAGE_NVS_NAMESPACE "fridge_store"
-#define STORAGE_NVS_KEY_MEMORY "memory"
 // 会话历史上行同步游标：记录"最近一条已成功推送到云端的消息 created_at（秒）"。
 // 用于设备每轮对话后只增量上报新增消息，避免重连时重发整窗导致云端重复落库。
 #define STORAGE_NVS_KEY_CHAT_SYNCED_AT "chat_sync_at"
 #define STORAGE_CACHE_PARTITION_LABEL "cache"
 #define STORAGE_CACHE_BASE_PATH "/cache"
-#define STORAGE_MEMORY_PATH STORAGE_CACHE_BASE_PATH "/memory_summary.json"
 #define STORAGE_REMINDER_PATH STORAGE_CACHE_BASE_PATH "/reminder_queue.json"
 #define STORAGE_PREFERENCES_PATH STORAGE_CACHE_BASE_PATH "/user_preferences.json"
 #define STORAGE_OFFLINE_QUEUE_PATH STORAGE_CACHE_BASE_PATH "/pending_queue.json"
@@ -48,47 +47,47 @@ static uint32_t s_inventory_version = 1;
 
 static esp_err_t open_storage_nvs(nvs_open_mode_t mode, nvs_handle_t *handle);
 
-static const char *DEFAULT_MEMORY_JSON =
-    "{\"schema_version\":1,"
-    "\"memory_policy\":\"只保存结构化摘要，不保存完整聊天记录\","
-    "\"family_size\":2,"
-    "\"taste\":[\"清淡\",\"少油\"],"
-    "\"avoid\":[\"不吃香菜\"],"
-    "\"allergies\":[],"
-    "\"recent_summary\":[\"用户希望优先处理临期食材\",\"早餐偏快手，晚餐偏家常\"]}";
-
 static const char *UI_INVENTORY_JSON =
-    "{\"schema_version\":1,"
-    "\"snapshot_version\":1,"
-    "\"source\":\"ui_reference_seed\","
+    "{\"schema_version\":2,\"snapshot_version\":1,\"source\":\"ui_reference_seed\","
     "\"zones\":["
-    "{\"id\":0,\"name\":\"上层冷冻\",\"custom\":false},"
-    "{\"id\":1,\"name\":\"左侧冷藏\",\"custom\":false},"
-    "{\"id\":2,\"name\":\"右侧冷藏\",\"custom\":false},"
-    "{\"id\":3,\"name\":\"门架\",\"custom\":false}"
-    "],"
+    "{\"id\":0,\"key\":\"freezer\",\"name\":\"冷冻区\",\"custom\":false},"
+    "{\"id\":1,\"key\":\"left\",\"name\":\"左冷藏\",\"custom\":false},"
+    "{\"id\":2,\"key\":\"right\",\"name\":\"右冷藏\",\"custom\":false},"
+    "{\"id\":3,\"key\":\"door\",\"name\":\"门架\",\"custom\":false},"
+    "{\"id\":4,\"key\":\"drawer\",\"name\":\"果蔬抽屉\",\"custom\":false}],"
+    "\"layers\":["
+    "{\"id\":\"f1\",\"zone_id\":\"freezer\",\"name\":\"第1层\",\"order\":0},"
+    "{\"id\":\"f2\",\"zone_id\":\"freezer\",\"name\":\"第2层\",\"order\":1},"
+    "{\"id\":\"l1\",\"zone_id\":\"left\",\"name\":\"第1层\",\"order\":0},"
+    "{\"id\":\"l2\",\"zone_id\":\"left\",\"name\":\"第2层\",\"order\":1},"
+    "{\"id\":\"l3\",\"zone_id\":\"left\",\"name\":\"第3层\",\"order\":2},"
+    "{\"id\":\"r1\",\"zone_id\":\"right\",\"name\":\"第1层\",\"order\":0},"
+    "{\"id\":\"r2\",\"zone_id\":\"right\",\"name\":\"第2层\",\"order\":1},"
+    "{\"id\":\"d1\",\"zone_id\":\"door\",\"name\":\"上格\",\"order\":0},"
+    "{\"id\":\"d2\",\"zone_id\":\"door\",\"name\":\"下格\",\"order\":1},"
+    "{\"id\":\"v1\",\"zone_id\":\"drawer\",\"name\":\"抽屉\",\"order\":0}],"
     "\"items\":["
-    "{\"name\":\"速冻水饺\",\"quantity\":\"12个\",\"expire_date\":\"30天后\",\"days_left\":30,\"location\":\"上层冷冻 A1\",\"zone\":0,\"cell\":0},"
-    "{\"name\":\"鸡胸肉\",\"quantity\":\"1份\",\"expire_date\":\"12天后\",\"days_left\":12,\"location\":\"上层冷冻 A2\",\"zone\":0,\"cell\":1},"
-    "{\"name\":\"玉米粒\",\"quantity\":\"半袋\",\"expire_date\":\"20天后\",\"days_left\":20,\"location\":\"上层冷冻 B1\",\"zone\":0,\"cell\":3},"
-    "{\"name\":\"虾仁\",\"quantity\":\"200g\",\"expire_date\":\"15天后\",\"days_left\":15,\"location\":\"上层冷冻 B2\",\"zone\":0,\"cell\":4},"
-    "{\"name\":\"牛肉卷\",\"quantity\":\"1盒\",\"expire_date\":\"18天后\",\"days_left\":18,\"location\":\"上层冷冻 C2\",\"zone\":0,\"cell\":7},"
-    "{\"name\":\"鸡蛋\",\"quantity\":\"3个\",\"expire_date\":\"2天后\",\"days_left\":2,\"location\":\"左侧冷藏 A1\",\"zone\":1,\"cell\":0},"
-    "{\"name\":\"酸奶\",\"quantity\":\"2杯\",\"expire_date\":\"3天后\",\"days_left\":3,\"location\":\"左侧冷藏 A2\",\"zone\":1,\"cell\":1},"
-    "{\"name\":\"菠菜\",\"quantity\":\"1把\",\"expire_date\":\"今天\",\"days_left\":0,\"location\":\"左侧冷藏 B1\",\"zone\":1,\"cell\":3},"
-    "{\"name\":\"番茄\",\"quantity\":\"2个\",\"expire_date\":\"3天后\",\"days_left\":3,\"location\":\"左侧冷藏 B2\",\"zone\":1,\"cell\":4},"
-    "{\"name\":\"黄瓜\",\"quantity\":\"1根\",\"expire_date\":\"4天后\",\"days_left\":4,\"location\":\"左侧冷藏 B3\",\"zone\":1,\"cell\":5},"
-    "{\"name\":\"豆腐\",\"quantity\":\"1盒\",\"expire_date\":\"明天\",\"days_left\":1,\"location\":\"左侧冷藏 C1\",\"zone\":1,\"cell\":6},"
-    "{\"name\":\"生菜\",\"quantity\":\"1颗\",\"expire_date\":\"2天后\",\"days_left\":2,\"location\":\"右侧冷藏 A1\",\"zone\":2,\"cell\":0},"
-    "{\"name\":\"胡萝卜\",\"quantity\":\"2根\",\"expire_date\":\"7天后\",\"days_left\":7,\"location\":\"右侧冷藏 A2\",\"zone\":2,\"cell\":1},"
-    "{\"name\":\"蘑菇\",\"quantity\":\"1盒\",\"expire_date\":\"2天后\",\"days_left\":2,\"location\":\"右侧冷藏 A3\",\"zone\":2,\"cell\":2},"
-    "{\"name\":\"蓝莓\",\"quantity\":\"1盒\",\"expire_date\":\"3天后\",\"days_left\":3,\"location\":\"右侧冷藏 B2\",\"zone\":2,\"cell\":4},"
-    "{\"name\":\"苹果\",\"quantity\":\"3个\",\"expire_date\":\"9天后\",\"days_left\":9,\"location\":\"右侧冷藏 C2\",\"zone\":2,\"cell\":7},"
-    "{\"name\":\"番茄酱\",\"quantity\":\"半瓶\",\"expire_date\":\"30天后\",\"days_left\":30,\"location\":\"门架 A1\",\"zone\":3,\"cell\":0},"
-    "{\"name\":\"沙拉酱\",\"quantity\":\"1瓶\",\"expire_date\":\"25天后\",\"days_left\":25,\"location\":\"门架 A2\",\"zone\":3,\"cell\":1},"
-    "{\"name\":\"牛奶\",\"quantity\":\"1盒\",\"expire_date\":\"明天\",\"days_left\":1,\"location\":\"门架 B1\",\"zone\":3,\"cell\":3},"
-    "{\"name\":\"黄油\",\"quantity\":\"1块\",\"expire_date\":\"14天后\",\"days_left\":14,\"location\":\"门架 B2\",\"zone\":3,\"cell\":4}"
-    "]}";
+    "{\"id\":\"it01\",\"name\":\"鸡蛋\",\"quantity\":\"12个\",\"expire_date\":\"07-27\",\"days_left\":5,\"location\":\"右冷藏 / 第2层 / B2\",\"zone_id\":\"right\",\"layer_id\":\"r2\",\"cell\":4,\"note\":\"\"},"
+    "{\"id\":\"it02\",\"name\":\"鲜牛奶\",\"quantity\":\"950ml\",\"expire_date\":\"07-24\",\"days_left\":2,\"location\":\"右冷藏 / 第2层 / B3\",\"zone_id\":\"right\",\"layer_id\":\"r2\",\"cell\":5,\"note\":\"全脂\"},"
+    "{\"id\":\"it03\",\"name\":\"原味酸奶\",\"quantity\":\"4杯\",\"expire_date\":\"07-22\",\"days_left\":0,\"location\":\"右冷藏 / 第2层 / C1\",\"zone_id\":\"right\",\"layer_id\":\"r2\",\"cell\":6,\"note\":\"日期为估算\"},"
+    "{\"id\":\"it04\",\"name\":\"番茄\",\"quantity\":\"3个\",\"expire_date\":\"07-25\",\"days_left\":3,\"location\":\"果蔬抽屉 / 抽屉 / A1\",\"zone_id\":\"drawer\",\"layer_id\":\"v1\",\"cell\":0,\"note\":\"\"},"
+    "{\"id\":\"it05\",\"name\":\"菠菜\",\"quantity\":\"1把\",\"expire_date\":\"07-23\",\"days_left\":1,\"location\":\"果蔬抽屉 / 抽屉 / A2\",\"zone_id\":\"drawer\",\"layer_id\":\"v1\",\"cell\":1,\"note\":\"\"},"
+    "{\"id\":\"it06\",\"name\":\"剩米饭\",\"quantity\":\"1盒\",\"expire_date\":\"07-21\",\"days_left\":-1,\"location\":\"左冷藏 / 第1层 / A1\",\"zone_id\":\"left\",\"layer_id\":\"l1\",\"cell\":0,\"note\":\"建议丢弃\"},"
+    "{\"id\":\"it07\",\"name\":\"卤牛肉\",\"quantity\":\"200g\",\"expire_date\":\"07-22\",\"days_left\":0,\"location\":\"左冷藏 / 第2层 / A1\",\"zone_id\":\"left\",\"layer_id\":\"l2\",\"cell\":0,\"note\":\"今天优先吃\"},"
+    "{\"id\":\"it08\",\"name\":\"速冻水饺\",\"quantity\":\"半袋(约20个)\",\"expire_date\":\"08-21\",\"days_left\":30,\"location\":\"冷冻区 / 第1层 / A1\",\"zone_id\":\"freezer\",\"layer_id\":\"f1\",\"cell\":0,\"note\":\"\"},"
+    "{\"id\":\"it09\",\"name\":\"鸡胸肉\",\"quantity\":\"400g\",\"expire_date\":\"10-20\",\"days_left\":90,\"location\":\"冷冻区 / 第2层 / A1\",\"zone_id\":\"freezer\",\"layer_id\":\"f2\",\"cell\":0,\"note\":\"日期为估算\"},"
+    "{\"id\":\"it10\",\"name\":\"黄油\",\"quantity\":\"1块\",\"expire_date\":\"08-05\",\"days_left\":14,\"location\":\"门架 / 上格 / A1\",\"zone_id\":\"door\",\"layer_id\":\"d1\",\"cell\":0,\"note\":\"227g装\"},"
+    "{\"id\":\"it11\",\"name\":\"蚝油\",\"quantity\":\"半瓶\",\"expire_date\":\"09-20\",\"days_left\":60,\"location\":\"门架 / 下格 / A1\",\"zone_id\":\"door\",\"layer_id\":\"d2\",\"cell\":0,\"note\":\"\"},"
+    "{\"id\":\"it12\",\"name\":\"可口可乐\",\"quantity\":\"3罐\",\"expire_date\":\"11-19\",\"days_left\":120,\"location\":\"门架 / 下格 / A2\",\"zone_id\":\"door\",\"layer_id\":\"d2\",\"cell\":1,\"note\":\"\"},"
+    "{\"id\":\"it13\",\"name\":\"吐司面包\",\"quantity\":\"6片\",\"expire_date\":\"07-19\",\"days_left\":-3,\"location\":\"左冷藏 / 第1层 / A2\",\"zone_id\":\"left\",\"layer_id\":\"l1\",\"cell\":1,\"note\":\"已过期，待确认处理\"},"
+    "{\"id\":\"it14\",\"name\":\"芝士片\",\"quantity\":\"8片\",\"expire_date\":\"07-29\",\"days_left\":7,\"location\":\"右冷藏 / 第1层 / A1\",\"zone_id\":\"right\",\"layer_id\":\"r1\",\"cell\":0,\"note\":\"\"},"
+    "{\"id\":\"it15\",\"name\":\"胡萝卜\",\"quantity\":\"2根\",\"expire_date\":\"07-28\",\"days_left\":6,\"location\":\"果蔬抽屉 / 抽屉 / A3\",\"zone_id\":\"drawer\",\"layer_id\":\"v1\",\"cell\":2,\"note\":\"\"},"
+    "{\"id\":\"it16\",\"name\":\"苹果\",\"quantity\":\"5个\",\"expire_date\":\"08-01\",\"days_left\":10,\"location\":\"左冷藏 / 第3层 / A1\",\"zone_id\":\"left\",\"layer_id\":\"l3\",\"cell\":0,\"note\":\"\"},"
+    "{\"id\":\"it17\",\"name\":\"某绿叶菜\",\"quantity\":\"1把\",\"expire_date\":\"07-24\",\"days_left\":2,\"location\":\"\",\"zone_id\":\"\",\"layer_id\":\"\",\"note\":\"低置信度识别，名称待确认\"},"
+    "{\"id\":\"it18\",\"name\":\"内酯豆腐\",\"quantity\":\"1盒\",\"expire_date\":\"07-23\",\"days_left\":1,\"location\":\"\",\"zone_id\":\"\",\"layer_id\":\"\",\"note\":\"位置待补充\"},"
+    "{\"id\":\"it19\",\"name\":\"午餐肉罐头\",\"quantity\":\"1罐\",\"expire_date\":\"01-18\",\"days_left\":180,\"location\":\"右冷藏 / 第1层 / A2\",\"zone_id\":\"right\",\"layer_id\":\"r1\",\"cell\":1,\"note\":\"\"},"
+    "{\"id\":\"it20\",\"name\":\"虾仁\",\"quantity\":\"250g\",\"expire_date\":\"09-05\",\"days_left\":45,\"location\":\"冷冻区 / 第2层 / A2\",\"zone_id\":\"freezer\",\"layer_id\":\"f2\",\"cell\":1,\"note\":\"\"}],"
+    "\"layout_drafts\":[]}";
 
 static const char *REMINDER_JSON =
     "{\"schema_version\":1,"
@@ -216,28 +215,51 @@ static esp_err_t storage_write_json_document(const char *path, const char *json_
     return err;
 }
 
-static esp_err_t storage_ensure_memory_file_exists(void)
+// 购物清单由 UI 和 AI 都可能更新。写入先落到同分区临时文件，经 flush/读回校验后替换，
+// 任一步失败恢复 .bak，避免掉电或空间不足留下半份清单。
+static esp_err_t storage_write_shopping_json_atomic(const char *json_text)
 {
-    FILE *file = fopen(STORAGE_MEMORY_PATH, "rb");
-    if (file) {
-        fclose(file);
-        return ESP_OK;
-    }
+    ESP_RETURN_ON_FALSE(json_text && json_text[0] == '{', ESP_ERR_INVALID_ARG, TAG,
+                        "shopping document must be JSON object");
+    ESP_RETURN_ON_FALSE(strlen(json_text) < FRIDGE_STORAGE_MAX_JSON_LEN, ESP_ERR_INVALID_SIZE,
+                        TAG, "shopping document too large");
+    ESP_RETURN_ON_ERROR(fridge_storage_init(), TAG, "storage init failed");
+    cJSON *root = cJSON_Parse(json_text);
+    ESP_RETURN_ON_FALSE(root && cJSON_IsObject(root), ESP_ERR_INVALID_ARG, TAG,
+                        "shopping document JSON invalid");
+    char *printed = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (!printed) return ESP_ERR_NO_MEM;
 
-    char memory[FRIDGE_STORAGE_MAX_MEMORY_LEN + 1] = {0};
-    nvs_handle_t handle;
-    esp_err_t err = open_storage_nvs(NVS_READONLY, &handle);
-    if (err == ESP_OK) {
-        size_t len = sizeof(memory);
-        err = nvs_get_str(handle, STORAGE_NVS_KEY_MEMORY, memory, &len);
-        nvs_close(handle);
-        if (err == ESP_OK && memory[0] == '{') {
-            // 生产迁移：旧版本写在 NVS 的结构化记忆，首次升级时搬到 cache LittleFS。
-            return storage_write_text_file(STORAGE_MEMORY_PATH, memory);
-        }
-    }
+    const char *part = STORAGE_CACHE_BASE_PATH "/shopping_list.json.part";
+    const char *backup = STORAGE_CACHE_BASE_PATH "/shopping_list.json.bak";
+    remove(part);
+    FILE *file = fopen(part, "wb");
+    if (!file) { cJSON_free(printed); return ESP_FAIL; }
+    size_t len = strlen(printed);
+    bool written = fwrite(printed, 1, len, file) == len && fflush(file) == 0 && fsync(fileno(file)) == 0;
+    fclose(file);
+    if (!written) { remove(part); cJSON_free(printed); return ESP_FAIL; }
 
-    return storage_write_text_file(STORAGE_MEMORY_PATH, DEFAULT_MEMORY_JSON);
+    remove(backup);
+    bool had_old = rename(STORAGE_SHOPPING_LIST_PATH, backup) == 0;
+    if (rename(part, STORAGE_SHOPPING_LIST_PATH) != 0) {
+        if (had_old) (void)rename(backup, STORAGE_SHOPPING_LIST_PATH);
+        remove(part);
+        cJSON_free(printed);
+        return ESP_FAIL;
+    }
+    char verify[FRIDGE_STORAGE_MAX_JSON_LEN] = {0};
+    esp_err_t verify_err = storage_read_text_file(STORAGE_SHOPPING_LIST_PATH, verify, sizeof(verify));
+    if (verify_err != ESP_OK || strcmp(verify, printed) != 0) {
+        remove(STORAGE_SHOPPING_LIST_PATH);
+        if (had_old) (void)rename(backup, STORAGE_SHOPPING_LIST_PATH);
+        cJSON_free(printed);
+        return ESP_FAIL;
+    }
+    remove(backup);
+    cJSON_free(printed);
+    return ESP_OK;
 }
 
 static esp_err_t open_storage_nvs(nvs_open_mode_t mode, nvs_handle_t *handle)
@@ -348,20 +370,6 @@ static void storage_copy_utf8_safe(char *out, size_t out_size, const char *text)
     out[copy_len] = '\0';
 }
 
-static esp_err_t storage_print_memory_with_limit(cJSON *root, char *out, size_t out_size)
-{
-    ESP_RETURN_ON_FALSE(root && out && out_size > 0, ESP_ERR_INVALID_ARG, TAG, "invalid memory print args");
-    char *printed = cJSON_PrintUnformatted(root);
-    ESP_RETURN_ON_FALSE(printed, ESP_ERR_NO_MEM, TAG, "print memory json failed");
-    if (strlen(printed) + 1 > out_size) {
-        cJSON_free(printed);
-        return ESP_ERR_NO_MEM;
-    }
-    strlcpy(out, printed, out_size);
-    cJSON_free(printed);
-    return ESP_OK;
-}
-
 static bool storage_replace_json_item(cJSON *root, const char *key, cJSON *item)
 {
     if (!root || !key || !item) {
@@ -423,12 +431,61 @@ static void storage_json_copy_string(const cJSON *root, const char *key, char *o
     }
 }
 
+// 库存是 UI 与云同步共同使用的主快照。写入必须保留上一版并在同一 LittleFS 分区改名，
+// 这样断电、空间耗尽或写入失败都不会把可恢复的库存替换成半份 JSON。
+static esp_err_t storage_write_ui_inventory_json_atomic(const char *json)
+{
+    ESP_RETURN_ON_FALSE(json && json[0] == '{', ESP_ERR_INVALID_ARG, TAG, "invalid ui inventory json");
+    const char *part = STORAGE_CACHE_BASE_PATH "/ui_inventory.json.part";
+    const char *backup = STORAGE_CACHE_BASE_PATH "/ui_inventory.json.bak";
+    remove(part);
+    FILE *file = fopen(part, "wb");
+    if (!file) return ESP_FAIL;
+    size_t len = strlen(json);
+    bool written = fwrite(json, 1, len, file) == len && fflush(file) == 0 && fsync(fileno(file)) == 0;
+    fclose(file);
+    if (!written) {
+        remove(part);
+        return ESP_FAIL;
+    }
+    remove(backup);
+    bool had_old = rename(STORAGE_UI_INVENTORY_PATH, backup) == 0;
+    if (rename(part, STORAGE_UI_INVENTORY_PATH) != 0) {
+        if (had_old) (void)rename(backup, STORAGE_UI_INVENTORY_PATH);
+        remove(part);
+        return ESP_FAIL;
+    }
+    char verify[STORAGE_UI_INVENTORY_FILE_BUFFER_SIZE] = {0};
+    esp_err_t verify_err = storage_read_text_file(STORAGE_UI_INVENTORY_PATH, verify, sizeof(verify));
+    if (verify_err != ESP_OK || strcmp(verify, json) != 0) {
+        remove(STORAGE_UI_INVENTORY_PATH);
+        if (had_old) (void)rename(backup, STORAGE_UI_INVENTORY_PATH);
+        return ESP_FAIL;
+    }
+    remove(backup);
+    return ESP_OK;
+}
+
+// 若掉电发生在“旧快照改名为 .bak”与“新快照改名为正式文件”之间，启动时恢复旧快照。
+// 没有备份时返回 NOT_FOUND，由首次初始化路径写入种子数据。
+static esp_err_t storage_recover_ui_inventory_backup(void)
+{
+    FILE *current = fopen(STORAGE_UI_INVENTORY_PATH, "rb");
+    if (current) {
+        fclose(current);
+        return ESP_OK;
+    }
+    return rename(STORAGE_CACHE_BASE_PATH "/ui_inventory.json.bak", STORAGE_UI_INVENTORY_PATH) == 0
+               ? ESP_OK
+               : ESP_ERR_NOT_FOUND;
+}
+
 static esp_err_t storage_print_json_to_file(cJSON *root)
 {
     char *printed = cJSON_PrintUnformatted(root);
     ESP_RETURN_ON_FALSE(printed, ESP_ERR_NO_MEM, TAG, "print ui inventory failed");
     esp_err_t err = strlen(printed) < STORAGE_UI_INVENTORY_FILE_BUFFER_SIZE
-                        ? storage_write_text_file(STORAGE_UI_INVENTORY_PATH, printed)
+                        ? storage_write_ui_inventory_json_atomic(printed)
                         : ESP_ERR_INVALID_SIZE;
     cJSON_free(printed);
     return err;
@@ -863,40 +920,6 @@ static size_t storage_repair_inventory_root_quantities(cJSON *root)
     return count;
 }
 
-static bool storage_memory_key_allowed(const char *key)
-{
-    return key && (strcmp(key, "taste") == 0 ||
-                   strcmp(key, "avoid") == 0 ||
-                   strcmp(key, "allergies") == 0 ||
-                   strcmp(key, "family_size") == 0 ||
-                   strcmp(key, "kitchen_tools") == 0 ||
-                   strcmp(key, "recent_summary") == 0);
-}
-
-static bool storage_memory_action_allowed(const char *action)
-{
-    return action && (strcmp(action, "append") == 0 ||
-                      strcmp(action, "replace") == 0 ||
-                      strcmp(action, "clear") == 0);
-}
-
-static cJSON *storage_memory_get_or_create_array(cJSON *root, const char *key)
-{
-    cJSON *array = cJSON_GetObjectItemCaseSensitive(root, key);
-    if (!cJSON_IsArray(array)) {
-        cJSON_DeleteItemFromObjectCaseSensitive(root, key);
-        array = cJSON_AddArrayToObject(root, key);
-    }
-    return array;
-}
-
-static void storage_memory_prune_array(cJSON *array, int max_items)
-{
-    while (cJSON_IsArray(array) && cJSON_GetArraySize(array) > max_items) {
-        cJSON_DeleteItemFromArray(array, 0);
-    }
-}
-
 static size_t storage_prune_history_inplace(fridge_storage_chat_history_t *history, bool time_ready)
 {
     if (!history) {
@@ -1170,9 +1193,9 @@ esp_err_t fridge_storage_init(void)
 
     // 生产运行时的业务数据统一从 cache LittleFS 读取；这些默认内容只在文件缺失时落盘。
     // 库存以 UI 快照作为单一来源，避免屏幕显示和 AI 上下文读到两份不同库存。
-    ESP_RETURN_ON_ERROR(storage_ensure_memory_file_exists(),
-                        TAG,
-                        "init memory summary file failed");
+    // 原子替换掉电后可能只留下 .bak。必须在“缺失时写种子”之前恢复，
+    // 否则 ensure 会先创建新种子并掩盖用户库存备份。
+    (void)storage_recover_ui_inventory_backup();
     ESP_RETURN_ON_ERROR(storage_ensure_text_file_exists(STORAGE_UI_INVENTORY_PATH, UI_INVENTORY_JSON),
                         TAG,
                         "init ui inventory file failed");
@@ -1213,9 +1236,24 @@ esp_err_t fridge_storage_init(void)
             err = storage_write_text_file(STORAGE_UI_INVENTORY_PATH, UI_INVENTORY_JSON);
             s_inventory_version = 1;
         } else {
-            fridge_storage_inventory_sync_status_t status = {0};
-            storage_fill_inventory_sync_status_from_root(root, &status);
-            s_inventory_version = status.snapshot_version > 0 ? status.snapshot_version : 1;
+            const cJSON *schema = cJSON_GetObjectItemCaseSensitive(root, "schema_version");
+            const cJSON *source = cJSON_GetObjectItemCaseSensitive(root, "source");
+            // 只升级仓库自带的旧参考种子；任何已经由 UI 写成 ui_p4_local 的真实库存
+            // 都原样保留，避免固件升级覆盖用户的增删改结果。
+            const bool old_reference_seed =
+                cJSON_IsNumber(schema) && schema->valueint < 2 &&
+                cJSON_IsString(source) && source->valuestring &&
+                strcmp(source->valuestring, "ui_reference_seed") == 0;
+            if (old_reference_seed) {
+                err = storage_write_text_file(STORAGE_UI_INVENTORY_PATH,
+                                              UI_INVENTORY_JSON);
+                s_inventory_version = 1;
+            } else {
+                fridge_storage_inventory_sync_status_t status = {0};
+                storage_fill_inventory_sync_status_from_root(root, &status);
+                s_inventory_version =
+                    status.snapshot_version > 0 ? status.snapshot_version : 1;
+            }
         }
         cJSON_Delete(root);
     }
@@ -1236,6 +1274,7 @@ esp_err_t fridge_storage_get_inventory_snapshot(char *out, size_t out_size)
 esp_err_t fridge_storage_get_ui_inventory_snapshot(char *out, size_t out_size)
 {
     ESP_RETURN_ON_ERROR(fridge_storage_init(), TAG, "storage init failed");
+    (void)storage_recover_ui_inventory_backup();
     esp_err_t err = storage_read_text_file(STORAGE_UI_INVENTORY_PATH, out, out_size);
     if (err == ESP_ERR_NOT_FOUND) {
         ESP_RETURN_ON_ERROR(storage_write_text_file(STORAGE_UI_INVENTORY_PATH, UI_INVENTORY_JSON), TAG, "create ui inventory failed");
@@ -1497,13 +1536,21 @@ esp_err_t fridge_storage_set_user_preferences(const char *preferences_json)
 esp_err_t fridge_storage_get_shopping_list(char *out, size_t out_size)
 {
     ESP_RETURN_ON_ERROR(fridge_storage_init(), TAG, "storage init failed");
+    // 上次替换若在断电时停在“旧文件已改名”阶段，优先恢复可读的备份。
+    FILE *current = fopen(STORAGE_SHOPPING_LIST_PATH, "rb");
+    if (current) {
+        fclose(current);
+    } else {
+        (void)rename(STORAGE_CACHE_BASE_PATH "/shopping_list.json.bak",
+                     STORAGE_SHOPPING_LIST_PATH);
+    }
     return storage_read_or_create_text_file(STORAGE_SHOPPING_LIST_PATH, SHOPPING_LIST_JSON, out, out_size);
 }
 
 esp_err_t fridge_storage_set_shopping_list(const char *shopping_json)
 {
     // 购物清单可离线查看，云端恢复后通过 MQTT 写入本地 JSON 文档。
-    return storage_write_json_document(STORAGE_SHOPPING_LIST_PATH, shopping_json, FRIDGE_STORAGE_MAX_JSON_LEN);
+    return storage_write_shopping_json_atomic(shopping_json);
 }
 
 esp_err_t fridge_storage_get_recipe_cache(char *out, size_t out_size)
@@ -1540,187 +1587,6 @@ esp_err_t fridge_storage_set_kitchen_ai_meta(const char *meta_json)
 {
     // 每日生成节流状态写入 Flash，后台任务只在自动尝试或成功生成时更新，避免高频磨损。
     return storage_write_json_document(STORAGE_KITCHEN_AI_META_PATH, meta_json, FRIDGE_STORAGE_MAX_JSON_LEN);
-}
-
-esp_err_t fridge_storage_get_memory_summary(char *out, size_t out_size)
-{
-    ESP_RETURN_ON_FALSE(out && out_size > 0, ESP_ERR_INVALID_ARG, TAG, "invalid memory output args");
-    ESP_RETURN_ON_ERROR(fridge_storage_init(), TAG, "storage init failed");
-    return storage_read_or_create_text_file(STORAGE_MEMORY_PATH, DEFAULT_MEMORY_JSON, out, out_size);
-}
-
-esp_err_t fridge_storage_set_memory_summary(const char *memory_json)
-{
-    ESP_RETURN_ON_FALSE(memory_json && memory_json[0] == '{', ESP_ERR_INVALID_ARG, TAG, "memory summary must be a JSON object");
-    ESP_RETURN_ON_FALSE(strlen(memory_json) < FRIDGE_STORAGE_MAX_MEMORY_LEN, ESP_ERR_INVALID_SIZE, TAG, "memory summary too large");
-    ESP_RETURN_ON_ERROR(fridge_storage_init(), TAG, "storage init failed");
-    cJSON *root = cJSON_Parse(memory_json);
-    ESP_RETURN_ON_FALSE(root, ESP_ERR_INVALID_ARG, TAG, "memory summary json invalid");
-    cJSON_Delete(root);
-    // 结构化记忆保存到 cache LittleFS，避免小摘要反复写 NVS；完整对话历史仍走独立短期历史文件。
-    return storage_write_text_file(STORAGE_MEMORY_PATH, memory_json);
-}
-
-esp_err_t fridge_storage_clear_memory_summary(void)
-{
-    ESP_RETURN_ON_ERROR(fridge_storage_init(), TAG, "storage init failed");
-    return storage_write_text_file(STORAGE_MEMORY_PATH,
-                                   "{\"schema_version\":1,\"memory_policy\":\"已清空结构化记忆摘要，不保存完整聊天记录\",\"family_size\":0,\"taste\":[],\"avoid\":[],\"allergies\":[],\"recent_summary\":[]}");
-}
-
-esp_err_t fridge_storage_apply_memory_directive(const char *assistant_text,
-                                                char *clean_reply,
-                                                size_t clean_reply_size,
-                                                bool *memory_updated)
-{
-    ESP_RETURN_ON_FALSE(assistant_text && clean_reply && clean_reply_size > 0,
-                        ESP_ERR_INVALID_ARG,
-                        TAG,
-                        "invalid memory directive args");
-    ESP_RETURN_ON_ERROR(fridge_storage_init(), TAG, "storage init failed");
-    if (memory_updated) {
-        *memory_updated = false;
-    }
-
-    const char *marker = strstr(assistant_text, "MEMORY_OP:");
-    if (!marker) {
-        strlcpy(clean_reply, assistant_text, clean_reply_size);
-        return ESP_OK;
-    }
-
-    size_t visible_len = (size_t)(marker - assistant_text);
-    while (visible_len > 0 && (assistant_text[visible_len - 1] == '\n' ||
-                               assistant_text[visible_len - 1] == '\r' ||
-                               assistant_text[visible_len - 1] == ' ')) {
-        visible_len--;
-    }
-    size_t copy_len = visible_len < clean_reply_size - 1 ? visible_len : clean_reply_size - 1;
-    memcpy(clean_reply, assistant_text, copy_len);
-    clean_reply[copy_len] = '\0';
-
-    const char *json_start = marker + strlen("MEMORY_OP:");
-    while (*json_start == ' ' || *json_start == '\t') {
-        json_start++;
-    }
-    if (*json_start != '{') {
-        return ESP_OK;
-    }
-
-    cJSON *op = cJSON_Parse(json_start);
-    if (!op) {
-        ESP_LOGW(TAG, "ignore invalid MEMORY_OP json");
-        return ESP_OK;
-    }
-
-    const cJSON *action_json = cJSON_GetObjectItemCaseSensitive(op, "action");
-    const cJSON *key_json = cJSON_GetObjectItemCaseSensitive(op, "key");
-    const cJSON *value_json = cJSON_GetObjectItemCaseSensitive(op, "value");
-    const char *action = cJSON_IsString(action_json) ? action_json->valuestring : "";
-    const char *key = cJSON_IsString(key_json) ? key_json->valuestring : "";
-    const char *value = cJSON_IsString(value_json) ? value_json->valuestring : "";
-    if (!storage_memory_action_allowed(action) || !storage_memory_key_allowed(key)) {
-        ESP_LOGW(TAG, "ignore MEMORY_OP with action/key not allowed");
-        cJSON_Delete(op);
-        return ESP_OK;
-    }
-    if (strcmp(action, "clear") != 0 && (!value || value[0] == '\0')) {
-        ESP_LOGW(TAG, "ignore MEMORY_OP without value");
-        cJSON_Delete(op);
-        return ESP_OK;
-    }
-
-    char memory[FRIDGE_STORAGE_MAX_MEMORY_LEN + 1] = {0};
-    esp_err_t ret = fridge_storage_get_memory_summary(memory, sizeof(memory));
-    if (ret != ESP_OK) {
-        cJSON_Delete(op);
-        ESP_RETURN_ON_ERROR(ret, TAG, "read memory before directive failed");
-    }
-
-    cJSON *root = cJSON_Parse(memory);
-    if (!root) {
-        root = cJSON_Parse(DEFAULT_MEMORY_JSON);
-    }
-    if (!root) {
-        cJSON_Delete(op);
-        ESP_RETURN_ON_FALSE(false, ESP_ERR_NO_MEM, TAG, "create memory root failed");
-    }
-
-    ESP_GOTO_ON_FALSE(storage_replace_json_item(root, "schema_version", cJSON_CreateNumber(1)),
-                      ESP_ERR_NO_MEM,
-                      cleanup,
-                      TAG,
-                      "update memory schema failed");
-    ESP_GOTO_ON_FALSE(storage_replace_json_item(root, "memory_policy", cJSON_CreateString("AI 按 MEMORY_OP 指令自主更新结构化记忆；固件校验 action/key；不保存完整聊天记录")),
-                      ESP_ERR_NO_MEM,
-                      cleanup,
-                      TAG,
-                      "update memory policy failed");
-    ESP_GOTO_ON_FALSE(storage_replace_json_item(root, "ai_directive_write", cJSON_CreateBool(true)),
-                      ESP_ERR_NO_MEM,
-                      cleanup,
-                      TAG,
-                      "update memory directive flag failed");
-    ESP_GOTO_ON_FALSE(storage_replace_json_item(root, "updated_at", cJSON_CreateNumber((double)storage_now_seconds())),
-                      ESP_ERR_NO_MEM,
-                      cleanup,
-                      TAG,
-                      "update memory timestamp failed");
-
-    if (strcmp(action, "clear") == 0) {
-        cJSON_DeleteItemFromObjectCaseSensitive(root, key);
-        if (strcmp(key, "family_size") != 0) {
-            ESP_GOTO_ON_FALSE(cJSON_AddArrayToObject(root, key), ESP_ERR_NO_MEM, cleanup, TAG, "clear memory array failed");
-        }
-    } else if (strcmp(key, "family_size") == 0) {
-        int family_size = atoi(value);
-        ESP_GOTO_ON_FALSE(family_size >= 0 && family_size <= 12, ESP_ERR_INVALID_ARG, cleanup, TAG, "family size out of range");
-        ESP_GOTO_ON_FALSE(storage_replace_json_item(root, key, cJSON_CreateNumber(family_size)),
-                          ESP_ERR_NO_MEM,
-                          cleanup,
-                          TAG,
-                          "replace family size failed");
-    } else if (strcmp(action, "replace") == 0) {
-        cJSON_DeleteItemFromObjectCaseSensitive(root, key);
-        cJSON *array = cJSON_AddArrayToObject(root, key);
-        ESP_GOTO_ON_FALSE(array, ESP_ERR_NO_MEM, cleanup, TAG, "replace memory array failed");
-        char safe_value[81] = {0};
-        storage_copy_utf8_safe(safe_value, sizeof(safe_value), value);
-        ESP_GOTO_ON_FALSE(cJSON_AddItemToArray(array, cJSON_CreateString(safe_value)),
-                          ESP_ERR_NO_MEM,
-                          cleanup,
-                          TAG,
-                          "replace memory value failed");
-    } else {
-        cJSON *array = storage_memory_get_or_create_array(root, key);
-        ESP_GOTO_ON_FALSE(array, ESP_ERR_NO_MEM, cleanup, TAG, "append memory array failed");
-        char safe_value[81] = {0};
-        storage_copy_utf8_safe(safe_value, sizeof(safe_value), value);
-        ESP_GOTO_ON_FALSE(cJSON_AddItemToArray(array, cJSON_CreateString(safe_value)),
-                          ESP_ERR_NO_MEM,
-                          cleanup,
-                          TAG,
-                          "append memory value failed");
-        storage_memory_prune_array(array, strcmp(key, "recent_summary") == 0 ? 6 : 8);
-    }
-
-    char printed[FRIDGE_STORAGE_MAX_MEMORY_LEN + 1] = {0};
-    ret = storage_print_memory_with_limit(root, printed, sizeof(printed));
-    cJSON *recent_summary = cJSON_GetObjectItemCaseSensitive(root, "recent_summary");
-    while (ret == ESP_ERR_NO_MEM && cJSON_IsArray(recent_summary) && cJSON_GetArraySize(recent_summary) > 1) {
-        cJSON_DeleteItemFromArray(recent_summary, 0);
-        ret = storage_print_memory_with_limit(root, printed, sizeof(printed));
-    }
-    ESP_GOTO_ON_ERROR(ret, cleanup, TAG, "memory summary too large after prune");
-
-    ret = storage_write_text_file(STORAGE_MEMORY_PATH, printed);
-    if (ret == ESP_OK && memory_updated) {
-        *memory_updated = true;
-    }
-
-cleanup:
-    cJSON_Delete(op);
-    cJSON_Delete(root);
-    return ret;
 }
 
 esp_err_t fridge_storage_get_chat_history(fridge_storage_chat_history_t *out, size_t *pruned_count)
@@ -1821,30 +1687,6 @@ esp_err_t fridge_storage_append_chat_messages(const fridge_storage_chat_message_
     if (err != ESP_OK) {
         free(prepared);
         ESP_RETURN_ON_ERROR(err, TAG, "write chat history failed");
-    }
-
-    if (message_count >= 2) {
-        fridge_storage_chat_message_t *assistant_message = &prepared[message_count - 1];
-        if (strcmp(prepared[message_count - 2].role, "user") == 0 && strcmp(assistant_message->role, "assistant") == 0) {
-            char clean_reply[FRIDGE_STORAGE_MAX_CHAT_CONTENT_LEN + 1] = {0};
-            bool memory_updated = false;
-            esp_err_t memory_err = fridge_storage_apply_memory_directive(assistant_message->content,
-                                                                         clean_reply,
-                                                                         sizeof(clean_reply),
-                                                                         &memory_updated);
-            if (memory_err != ESP_OK) {
-                ESP_LOGW(TAG, "apply AI memory directive failed: %s", esp_err_to_name(memory_err));
-            } else if (memory_updated && clean_reply[0] != '\0') {
-                fridge_storage_chat_history_t *clean_history = calloc(1, sizeof(*clean_history));
-                if (clean_history && storage_read_history_file(clean_history) == ESP_OK && clean_history->count > 0) {
-                    strlcpy(clean_history->messages[clean_history->count - 1].content,
-                            clean_reply,
-                            sizeof(clean_history->messages[clean_history->count - 1].content));
-                    (void)storage_write_history_file(clean_history);
-                }
-                free(clean_history);
-            }
-        }
     }
 
     free(prepared);

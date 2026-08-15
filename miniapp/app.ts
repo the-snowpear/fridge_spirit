@@ -27,10 +27,9 @@ import type {
 } from "./types/models";
 import { getStorage, setStorage } from "./utils/storage";
 import { updateOfflineSnapshot } from "./utils/localFeatures";
-import { syncNow } from "./services/sync";
+import { clearSyncContext, syncNow } from "./services/sync";
+import { startRealtime, stopRealtime } from "./services/realtime";
 import type { SyncSnapshotData } from "./types/models";
-
-const FOREGROUND_SYNC_INTERVAL_MS = 15_000;
 
 /** 全局状态。所有 setX 方法都会同步写 storage（缓存 key 与 storage 函数对齐）。 */
 export interface MiniAppGlobalData {
@@ -49,8 +48,6 @@ export interface MiniAppGlobalData {
   lastLoginError?: string;
   /** 从库存分区进入拍照页时暂存推荐 zone；scan 是 tabBar 页，不能用 navigateTo query 传参。 */
   pendingScanZone?: string;
-  /** 前台轻量同步定时器：用于接收设备端主动修改，不需要用户每次点同步。 */
-  foregroundSyncTimer?: number;
   /** 最近一次已通知页面刷新的同步版本，避免 15 秒轮询反复重绘。 */
   notifiedSyncRevision?: number;
 }
@@ -132,19 +129,14 @@ App<MiniAppGlobalData>({
   },
 
   startForegroundSync() {
-    if (this.globalData.foregroundSyncTimer) return;
-    this.globalData.foregroundSyncTimer = setInterval(() => {
-      if (!this.globalData.session?.token) return;
-      void this.runForegroundSyncOnce().catch((err) => {
-        console.warn("foreground periodic sync failed", err);
-      });
-    }, FOREGROUND_SYNC_INTERVAL_MS) as unknown as number;
+    if (!this.globalData.session?.token) return;
+    startRealtime(() => {
+      void this.runForegroundSyncOnce().catch((err) => console.warn("realtime revision compensation failed", err));
+    });
   },
 
   stopForegroundSync() {
-    if (!this.globalData.foregroundSyncTimer) return;
-    clearInterval(this.globalData.foregroundSyncTimer);
-    this.globalData.foregroundSyncTimer = 0;
+    stopRealtime();
   },
 
   async runForegroundSyncOnce() {
@@ -254,11 +246,31 @@ App<MiniAppGlobalData>({
   },
 
   setSession(session: AuthSession | null) {
+    const oldUser = this.globalData.session?.userId;
+    if (oldUser && oldUser !== session?.userId) {
+      stopRealtime();
+      clearSyncContext();
+      this.setOverview(null);
+      this.setActiveDevice(null);
+    }
     this.globalData.session = session;
     setStorage("authSession", session);
+    if (session?.token) {
+      startRealtime(() => {
+        void this.runForegroundSyncOnce().catch((err) => console.warn("realtime revision compensation failed", err));
+      });
+    } else {
+      stopRealtime();
+    }
   },
 
   setActiveHome(home: HomeInfo | null) {
+    const previous = this.globalData.activeHome?.homeId;
+    if (previous && previous !== home?.homeId) {
+      stopRealtime();
+      clearSyncContext();
+      this.setOverview(null);
+    }
     this.globalData.activeHome = home;
     setStorage("activeHome", home);
   },

@@ -6,6 +6,12 @@
 CONFIG_ESPTOOLPY_NO_STUB=y
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+# P4 启动阶段串行初始化 hosted、MIPI/GT911、ES8311、TF 和 UI；使用厂商例程同级的 10KB 主任务栈，
+# 避免 app_main 深层初始化调用在 3584 字节默认栈下触发硬件 Stack protection fault。
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=10240
+# ESP-Hosted/Remote Wi-Fi 会在系统事件任务中执行 newlib 锁和事件回调；2304 字节在 P4
+# 启动阶段会触发 sys_evt 栈保护异常，按已验证的 Hosted 示例保留 4KB 余量。
+CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_recovery_p4.csv"
 CONFIG_PARTITION_TABLE_FILENAME="partitions_recovery_p4.csv"
 
@@ -28,14 +34,31 @@ CONFIG_LCD_DSI_ISR_IRAM_SAFE=y
 CONFIG_SPIRAM_MODE_HEX=y
 CONFIG_SPIRAM_SPEED_200M=y
 
-# 控制台走 UART0（CH343P，GPIO37/38）：一根 USB 线完成烧录 + 监视器 + JSON Lines 运维。
-# USB-C JTAG 口作为次级控制台镜像日志，方便双口调试。
-CONFIG_ESP_CONSOLE_UART_DEFAULT=y
-CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG=y
+# 1024x600 LVGL 交互性能：P4 以 -O2 编译；不提高已验证的 CPU/DSI/PSRAM 时钟。
+# L2 保持 128KB/64B：256KB 真机短测会把最大内部 DMA 块压到 40KB，导致需 48KB 的 WakeNet 跳过启动。
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+CONFIG_CACHE_L2_CACHE_128KB=y
+CONFIG_CACHE_L2_CACHE_LINE_64B=y
+# 1024x600 双 PSRAM 帧缓冲叠加 FreeType/PPA 时，偶发缓存同步可能超过原 800ms；
+# 放宽到 1600ms，任务看门狗放宽到 8s，但继续保留双核检测和 panic/coredump。
+CONFIG_ESP_INT_WDT_TIMEOUT_MS=1600
+# P4 现场诊断：中断/任务看门狗均走 panic 路径，配合 Flash coredump 记录卡死现场。
+CONFIG_ESP_TASK_WDT_PANIC=y
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=8
+CONFIG_ESP_COREDUMP_FLASH_NO_OVERWRITE=y
+
+# 当前 WebUI/烧录日志使用 ESP32-P4 原生 USB-Serial/JTAG（VID=303A, PID=1001，常见 COM17）。
+# ESP-IDF 的 secondary USB console 只能输出日志，不能读取 JSON Lines；必须设为 primary，
+# 否则 WebUI 看似已连接但所有 get_status/mic_record 命令都会超时。
+CONFIG_ESP_CONSOLE_UART_DEFAULT=n
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG=n
 
 # ---- 板载 ESP32-C6 Wi-Fi（esp_hosted + esp_wifi_remote，SDIO Slot1）----
 # Slot1 固定引脚：CMD=47 CLK=48 D0-D3=49-52（与手册 §1.5 一致，必须覆盖组件的通用板默认值）。
 CONFIG_ESP_HOSTED_ENABLED=y
+CONFIG_ESP_HOSTED_CP_TARGET_ESP32C6=y
 CONFIG_ESP_HOSTED_P4_DEV_BOARD_NONE=y
 CONFIG_ESP_HOSTED_IDF_SLAVE_TARGET="esp32c6"
 CONFIG_ESP_WIFI_REMOTE_ENABLED=y
@@ -71,10 +94,51 @@ CONFIG_ESP_HOSTED_HOST_POWER_SAVE_ENABLED=n
 # hosted 自带交互 CLI 不读取本项目 UART0，串口只保留 JSON Lines 协议和正常日志。
 CONFIG_ESP_HOSTED_CLI_ENABLED=n
 
-# ---- P4 最小移植启动模式（Wi-Fi + 麦克风/ASR/WakeNet + SPI 屏/触摸 + TF 卡）----
+# ---- P4 最小移植启动模式（Wi-Fi + 麦克风/ASR/WakeNet + MIPI 屏/触摸 + TF 卡）----
 CONFIG_FRIDGE_P4_MINIMAL=y
+CONFIG_LV_USE_QRCODE=y
+CONFIG_MQTT_USE_CUSTOM_CONFIG=y
+CONFIG_MQTT_OUTBOX_DATA_ON_EXTERNAL_MEMORY=y
+CONFIG_FRIDGE_RECOVERY_APP=n
 # 20-pin FPC 转杜邦板已作为当前接线方案，启用 FT6336U 独立 I2C 触摸。
 CONFIG_FRIDGE_P4_TOUCH_ENABLE=y
+CONFIG_FRIDGE_P4_UI_ENABLE=y
+CONFIG_FRIDGE_P4_GT911_ENABLE=y
+CONFIG_FRIDGE_P4_MIPI_UI_ENABLE=y
+CONFIG_FRIDGE_FY_SP703_ENABLE=y
+
+# MQ-5 可燃气体/烟雾传感器：GPIO20=ADC1_CH4，AO 经 22k/33k 分压 + 100nF 滤波，
+# 模块由 P6 SYS_5V 供电（5V 只到模块，严禁直入 GPIO），DO 本阶段悬空。
+CONFIG_FRIDGE_MQ5_ENABLE=y
+
+# ---- P4 LVGL/FreeType 文件字体 ----
+# LVGL 只在 P4 正常 UI 闭包中拉入；recovery 不包含 ui_p4/font_manager。
+CONFIG_LV_USE_CLIB_MALLOC=y
+# 10ms 刷新请求与 100Hz FreeRTOS tick 对齐，不人为锁 30fps；实际由约 56.8Hz 面板和绘制耗时限速。
+CONFIG_LV_DEF_REFR_PERIOD=10
+# 复杂 HOME-01 对象较多，每对象增加 8 字节缓存常用样式属性，减少绘制期样式链遍历。
+CONFIG_LV_OBJ_STYLE_CACHE=y
+# 双 SW draw unit 真机 A/B 未缩短 61.3% 左侧重绘的约 120ms 帧耗时，且持续负载仍触发 HP WDT；
+# 保持单绘制，避免额外的两个 32KB 内部栈和双核 PSRAM 争用。后续性能提升应减少重绘面积或接 PPA。
+CONFIG_LV_OS_NONE=y
+CONFIG_LV_DRAW_SW_DRAW_UNIT_CNT=1
+# LVGL 热路径整体放入 IRAM 的真机 A/B 没有降低约 120ms 的大面积滚动帧耗时，
+# 却额外占用约 62KB DIRAM 并产生段属性警告，因此保持关闭，给 WakeNet/驱动留内部内存。
+CONFIG_LV_ATTRIBUTE_FAST_MEM_USE_IRAM=n
+# TF 位图字体由 lv_font_conv 以压缩格式生成；关闭此项会导致字形描述可见、
+# 但实际位图解码返回 NULL，最终整屏中文显示为方框。
+CONFIG_LV_USE_FONT_COMPRESSED=y
+CONFIG_LV_USE_FREETYPE=y
+# HOME-01 静止时生成一次有界 RGB565 页面缓存，滚动热路径交由 ESP32-P4 PPA 裁剪搬运。
+CONFIG_LV_USE_SNAPSHOT=y
+# CONFIG_LV_FREETYPE_USE_LVGL_PORT is not set
+CONFIG_LV_FREETYPE_CACHE_FT_GLYPH_CNT=512
+CONFIG_LV_USE_FS_STDIO=y
+CONFIG_LV_FS_STDIO_LETTER=83
+CONFIG_LV_FS_STDIO_PATH="/sdcard"
+CONFIG_LV_FS_STDIO_CACHE_SIZE=4096
+CONFIG_LV_USE_IME_PINYIN=n
+CONFIG_LV_BUILD_EXAMPLES=n
 
 # ---- ESP-SR WakeNet：P4 板载 ES8311 单麦克风，“小冰小冰”模型写入 model 分区 ----
 # 只加载 WakeNet 与 P4 官方示例使用的 VADNet；首版不加载 MultiNet 固定命令模型。
@@ -91,3 +155,18 @@ CONFIG_FATFS_LFN_HEAP=y
 CONFIG_FATFS_MAX_LFN=255
 CONFIG_FATFS_API_ENCODING_UTF_8=y
 CONFIG_FATFS_CODEPAGE_936=y
+
+# ---- OV5647 MIPI-CSI 高清预览（esp_video + esp_cam_sensor）----
+# 传感器默认 RAW8 800x800@50fps，ISP 输出 RGB565；DVP 本板无接口，关闭以减体积。
+# DSI 已启用 DW-GDMA IRAM-safe；CSI 必须同步启用，使 DMA 回调上下文固定在内部 RAM。
+# 否则 esp_cam_new_csi_ctlr() 会在注册回调时以 ESP_ERR_INVALID_ARG 失败。
+CONFIG_CAM_CTLR_MIPI_CSI_ISR_CACHE_SAFE=y
+CONFIG_ESP_VIDEO_ENABLE_MIPI_CSI_VIDEO_DEVICE=y
+CONFIG_ESP_VIDEO_ENABLE_DVP_VIDEO_DEVICE=n
+CONFIG_CAMERA_OV5647=y
+CONFIG_CAMERA_OV5647_AUTO_DETECT=y
+CONFIG_CAMERA_OV5647_AUTO_DETECT_MIPI_INTERFACE_SENSOR=y
+CONFIG_CAMERA_OV5647_MIPI_RAW8_800x800_50FPS=y
+# 多数模组无 VCM 对焦马达；关闭 AF 避免驱动无用 IO。
+CONFIG_CAMERA_OV5647_ISP_AF_ENABLE=n
+CONFIG_FRIDGE_CAMERA_HD_PREVIEW=y

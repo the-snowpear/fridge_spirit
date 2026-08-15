@@ -1,54 +1,73 @@
 <view class="page inventory-page rise">
   <view class="hello-bar">
     <view class="col">
-      <view class="kicker">分区库存</view>
-      <view class="title">食材清单</view>
+      <view class="kicker">三级库存</view>
+      <view class="title">食材位置</view>
     </view>
-    <view class="row" style="gap: var(--space-3);">
-      <view class="pill" bindtap="onTapRefreshDevice">↻ 刷新冰箱</view>
-      <view class="pill" bindtap="onTapScan">+ 拍照入库</view>
+    <view class="row actions">
+      <view class="pill" bindtap="onTapRefreshDevice">↻ 刷新</view>
+      <view class="pill" bindtap="onTapScan">+ 入库</view>
     </view>
   </view>
 
-  <scroll-view class="zone-tabs" scroll-x="true" enhanced="true" show-scrollbar="false">
-    <view wx:for="{{zones}}" wx:key="key" class="tab {{activeZone === item.key ? 'active' : ''}}" data-zone="{{item.key}}" bindtap="onTapTab">
-      {{item.label}}
-    </view>
-  </scroll-view>
+  <view class="breadcrumb">
+    <text class="{{level === 'zone' ? 'current' : ''}}" bindtap="onTapRootLevel">冰箱</text>
+    <block wx:if="{{activeZone}}">
+      <text class="divider">/</text>
+      <text class="{{level === 'layer' ? 'current' : ''}}" bindtap="onTapZoneLevel">{{activeZoneLabel}}</text>
+    </block>
+    <block wx:if="{{activeLayer}}">
+      <text class="divider">/</text>
+      <text class="current">{{activeLayerLabel}}</text>
+    </block>
+  </view>
 
-  <view wx:if="{{errorText}}" class="panel" style="border-color: var(--color-tomato-soft);">
-    <view class="kicker" style="color: var(--color-tomato);">加载失败</view>
+  <view wx:if="{{errorText}}" class="panel error-panel">
+    <view class="kicker error-title">加载失败</view>
     <view class="subtitle">{{errorText}}</view>
-    <button class="btn ghost" style="margin-top: var(--space-3);" bindtap="load">重试</button>
+    <button class="btn ghost retry" bindtap="load">重试</button>
   </view>
 
-  <view wx:if="{{showAsGrid && !errorText}}" class="grid-board">
-    <view wx:for="{{cells}}" wx:key="slot" class="cell {{item.occupied ? 'occupied' : 'empty'}} {{item.level || ''}}" data-slot="{{item.slot}}" bindtap="onTapCell">
-      <view class="cell-slot">{{item.slot}}</view>
+  <view wx:if="{{!errorText && level !== 'cell'}}" class="summary-list">
+    <view wx:for="{{summaries}}" wx:key="key" class="panel summary-card" data-key="{{item.key}}" bindtap="onTapSummary">
+      <view>
+        <view class="summary-title">{{item.label}}</view>
+        <view class="subtitle">{{item.hint}}</view>
+      </view>
+      <view class="summary-meta">
+        <view wx:if="{{item.warnCount}}" class="warn-dot">{{item.warnCount}} 临期</view>
+        <view class="count">{{item.count}} 件</view>
+        <view class="arrow">›</view>
+      </view>
+    </view>
+  </view>
+
+  <view wx:if="{{!errorText && level === 'cell'}}" class="grid-board">
+    <view wx:for="{{cells}}" wx:key="cell" class="cell {{item.occupied ? 'occupied' : 'empty'}} {{item.level || ''}}" data-cell="{{item.cell}}" bindtap="onTapCell">
+      <view class="cell-slot">{{item.code}}</view>
       <block wx:if="{{item.occupied}}">
         <view class="cell-name">{{item.item.name}}</view>
         <view class="cell-meta">{{item.item.quantityText}}</view>
         <view wx:if="{{item.expireText}}" class="cell-expire">{{item.expireText}}</view>
       </block>
-      <block wx:else>
-        <view class="cell-plus">+</view>
-      </block>
+      <view wx:else class="cell-plus">+</view>
     </view>
   </view>
 
-  <view wx:if="{{showAsGrid && listView.length > 0}}" class="kicker" style="margin-top: var(--space-3);">待归位</view>
-  <view wx:if="{{!showAsGrid || listView.length > 0}}" class="list">
-    <view wx:for="{{listView}}" wx:key="id" class="panel item-card" data-id="{{item.id}}" bindtap="onTapItem">
-      <view class="row">
-        <view class="col">
-          <view class="title" style="font-size: var(--text-md); margin: 0;">{{item.name}}</view>
-          <view class="subtitle">{{item.category || '未分类'}} · {{item.quantityText}}</view>
+  <block wx:if="{{unplaced.length}}">
+    <view class="kicker unplaced-title">待归位</view>
+    <view class="list">
+      <view wx:for="{{unplaced}}" wx:key="id" class="panel item-card" data-id="{{item.id}}" bindtap="onTapItem">
+        <view class="row">
+          <view>
+            <view class="item-name">{{item.name}}</view>
+            <view class="subtitle">{{item.quantityText}} · {{item.locationText}}</view>
+          </view>
+          <view class="arrow">›</view>
         </view>
-        <view wx:if="{{item.expireDate}}" class="tag warn">{{item.expireDate}}</view>
       </view>
-      <view class="soft" style="margin-top: var(--space-2);">{{item.locationText}}</view>
     </view>
-  </view>
+  </block>
 
-  <view wx:if="{{!loading && !errorText && items.length === 0}}" class="empty">还没有库存数据，去 +拍照入库 添加一条吧</view>
+  <view wx:if="{{!loading && !errorText && items.length === 0}}" class="empty">还没有库存，点击“入库”添加食材</view>
 </view>

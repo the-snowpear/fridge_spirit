@@ -5,6 +5,13 @@ from app.models.device import Device, DeviceBinding, DeviceStatusEvent
 from app.models.home import Home, HomeMember
 from app.models.inventory import InventoryEvent, InventoryItem
 from app.models.notification import NotificationSubscription
+from app.models.p4_sync import (
+    P4BindingSession,
+    P4DeviceCredential,
+    P4SyncEntity,
+    P4SyncEvent,
+    P4SyncState,
+)
 from app.models.reminder import Reminder
 from app.models.system_config import SystemConfig
 from app.models.sync import SyncEvent, SyncState
@@ -21,6 +28,11 @@ __all__ = [
     "InventoryEvent",
     "InventoryItem",
     "NotificationSubscription",
+    "P4BindingSession",
+    "P4DeviceCredential",
+    "P4SyncEntity",
+    "P4SyncEvent",
+    "P4SyncState",
     "Reminder",
     "SystemConfig",
     "SyncEvent",

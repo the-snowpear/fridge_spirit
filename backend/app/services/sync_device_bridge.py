@@ -61,6 +61,14 @@ _SLOT_TO_CELL = {
     "C3": 8,
 }
 
+_DEFAULT_LAYERS = {
+    "freezer": (("f1", "第1层"), ("f2", "第2层")),
+    "left": (("l1", "第1层"), ("l2", "第2层"), ("l3", "第3层")),
+    "right": (("r1", "第1层"), ("r2", "第2层")),
+    "door": (("d1", "上格"), ("d2", "下格")),
+    "drawer": (("v1", "抽屉"),),
+}
+
 
 def _collapse_repeated_unit(unit: str) -> str:
     known_units = ["克", "个", "份", "盒", "瓶", "袋", "根", "把", "颗", "杯", "块"]
@@ -281,6 +289,26 @@ def _device_zones(zones: list[FridgeZoneConfig]) -> list[dict[str, Any]]:
     return device_zones
 
 
+def _device_layers(zones: list[FridgeZoneConfig]) -> list[dict[str, Any]]:
+    """生成与 P4 UI 相同的第二级层结构；自定义区默认只有一层。"""
+    layers: list[dict[str, Any]] = []
+    for zone in zones[:6]:
+        definitions = _DEFAULT_LAYERS.get(
+            zone.key,
+            ((f"{zone.key}-layer-1", "第1层"),),
+        )
+        for order, (layer_id, name) in enumerate(definitions):
+            layers.append(
+                {
+                    "id": layer_id,
+                    "zone_id": zone.key,
+                    "name": name,
+                    "order": order,
+                }
+            )
+    return layers
+
+
 async def build_device_inventory_document(
     db: AsyncSession,
     *,
@@ -308,9 +336,21 @@ async def build_device_inventory_document(
         if item.updated_at is not None:
             data_updated_at_ms = max(data_updated_at_ms, int(item.updated_at.timestamp() * 1000))
         zone_id = _device_zone_id(item.zone, zones)
-        cell = _SLOT_TO_CELL.get(str(item.slot or "").upper(), 4)
-        quantity = float(item.quantity) if item.quantity is not None else 1.0
         extra = item.extra if isinstance(item.extra, dict) else {}
+        default_layers = _DEFAULT_LAYERS.get(
+            item.zone or "",
+            ((f"{item.zone}-layer-1", "第1层"),) if item.zone else (),
+        )
+        layer_id = extra.get("layerId")
+        if not isinstance(layer_id, str) or not layer_id:
+            layer_id = default_layers[0][0] if default_layers else None
+        stored_cell = extra.get("cell")
+        cell = (
+            int(stored_cell)
+            if isinstance(stored_cell, int) and 0 <= stored_cell <= 8
+            else _SLOT_TO_CELL.get(str(item.slot or "").upper(), 4)
+        )
+        quantity = float(item.quantity) if item.quantity is not None else 1.0
         device_quantity_text = extra.get("deviceQuantityText")
         if isinstance(device_quantity_text, str) and device_quantity_text.strip():
             quantity_text = _clean_device_quantity_text(device_quantity_text)
@@ -342,6 +382,8 @@ async def build_device_inventory_document(
                 "storedAt": stored_at if isinstance(stored_at, str) else "",
                 "zone": zone_id,
                 "zoneKey": item.zone,
+                "zone_id": item.zone,
+                "layer_id": layer_id,
                 "slot": item.slot,
                 "cell": cell,
                 "source": item.source,
@@ -349,12 +391,13 @@ async def build_device_inventory_document(
         )
 
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "snapshotVersion": server_revision,
         "serverRevision": server_revision,
         "updatedAtMs": data_updated_at_ms or _now_ms(),
         "source": "cloud_snapshot",
         "zones": _device_zones(zones),
+        "layers": _device_layers(zones),
         "items": device_items,
     }
 

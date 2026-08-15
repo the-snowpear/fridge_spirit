@@ -1,0 +1,467 @@
+{
+  "files": [
+    {
+      "kind": "content",
+      "path": "content/home.json",
+      "schema_version": 1,
+      "sha256": "3d173e3a61b378ed5c40c132c2699f49dc6d401d94bdf339b39072d13730516d",
+      "size": 2119
+    },
+    {
+      "kind": "content",
+      "path": "content/more.json",
+      "schema_version": 1,
+      "sha256": "c9c224f044bc2195d620b711bab5e1824ade0a8d5e3ece3b783706b53f28623d",
+      "size": 645
+    },
+    {
+      "format": "A8",
+      "height": 28,
+      "kind": "icon",
+      "name": "back",
+      "path": "icons/back.a8",
+      "sha256": "ee6b0b842d7963eac99641f85feb500a4ef1d21faec85674461d2271247805a8",
+      "size": 784,
+      "width": 28
+    },
+    {
+      "format": "A8",
+      "height": 28,
+      "kind": "icon",
+      "name": "bell",
+      "path": "icons/bell.a8",
+      "sha256": "937cbdfb2d3335c9e06cfc6d9070dc15a3b12db528d9479cd7cf2d23acc59e32",
+      "size": 784,
+      "width": 28
+    },
+    {
+      "format": "A8",
+      "height": 28,
+      "kind": "icon",
+      "name": "box",
+      "path": "icons/box.a8",
+      "sha256": "9bfa8ef5906314d8fe1083b1bbf71cc093abdc54f3798e0c067cb2939d666c40",
+      "size": 784,
+      "width": 28
+    },
+    {
+      "format": "A8",
+      "height": 28,
+      "kind": "icon",
+      "name": "camera",
+      "path": "icons/camera.a8",
+      "sha256": "ba3b5d93d4613ad1c29fe6d38d2a2e09c61ad66391c91729528ff458d6aafc6d",
+      "size": 784,
+      "width": 28
+    },
+    {
+      "format": "A8",
+      "height": 28,
+      "kind": "icon",
+      "name": "cart",
+      "path": "icons/cart.a8",
+      "sha256": "45f0d6f246df74dee8f9e0447857039da0bd23db7f3688f8c610b03b65a3d6b4",
+      "size": 784,
+      "width": 28
+    },
+    {
+      "format": "A8",
+      "height": 28,
+      "kind": "icon",
+      "name": "chat",
+      "path": "icons/chat.a8",
+      "sha256": "3fc9b0da42fbd5598592c15d17ec76953953972c89a90e1ddeb0afae7d343a2d",
+      "size": 784,
+      "width": 28
+    },
+    {
+      "format": "A8",
+      "height": 28,
+      "kind": "icon",
+      "name": "check",
+      "path": "icons/check.a8",
+      "sha256": "e431926d631095e656fd6b2fa9502ddea519e7ced843b1be7de69621947e16b4",
+      "size": 784,
+      "width": 28
+    },
+    {
+      "format": "A8",
+      "height": 28,
+      "kind": "icon",
+      "name": "clock",
+      "path": "icons/clock.a8",
+      "sha256": "901a4f12d424294623db8c59eb731291593469155a56da56891b3597b725a9b1",
+      "size": 784,
+      "width": 28
+    },
+    {
+      "format": "A8",
+      "height": 28,
+      "kind": "icon",
+      "name": "close",
+      "path": "icons/close.a8",
+      "sha256": "ee73950850b46f2e37bfcb71d75f462af2d11ab60b712120bf6a7bbd35d376ea",
+      "size": 784,
+      "width": 28
+    },
+    {
+      "format": "A8",
+      "height": 28,
+      "kind": "icon",
+      "name": "cloud",
+      "path": "icons/cloud.a8",
+      "sha256": "a58be28b676cd6cb426983dd5fab1581ce35c7a174fdfc85c02bf70222b2e77f",
+      "size": 784,
+      "width": 28
+    },
+    {
+      "format": "A8",
+      "height": 28,
+      "kind": "icon",
+      "name": "door",
+      "path": "icons/door.a8",
+      "sha256": "434a2f1de7d8ed6bbbcafb52f383ee0b7bf963a5f4242774208fc463a57b64c4",
+      "size": 784,
+      "width": 28
+    },
+    {
+      "format": "A8",
+      "height": 28,
+      "kind": "icon",
+      "name": "drop",
+      "path": "icons/drop.a8",
+      "sha256": "966be6014b13854fdd8db48851e602b4e6d97d2e00b9ad4e0a514a196f3005c3",
+      "size": 784,
+      "width": 28
+    },
+    {
+      "format": "A8",
+      "height": 28,
+      "kind": "icon",
+      "name": "edit",
+      "path": "icons/edit.a8",
+      "sha256": "bf6defe1a768a6705cc977a2a12d6245b813f2fbb04a9c7d570ef17027926c3f",
+      "size": 784,
+      "width": 28
+    },
+    {
+      "format": "A8",
+      "height": 28,
+      "kind": "icon",
+      "name": "food",
+      "path": "icons/food.a8",
+      "sha256": "20c5a1481bdc68b78cec74b8c967aa29d196cc975078a9888aefe82b37469adb",
+      "size": 784,
+      "width": 28
+    },
+    {
+      "format": "A8",
+      "height": 28,
+      "kind": "icon",
+      "name": "fridge",
+      "path": "icons/fridge.a8",
+      "sha256": "730fe68d46a6101066a3620c07e783f0dbdf9fddeec04d3800dd906d9ebef54e",
+      "size": 784,
+      "width": 28
+    },
+    {
+      "format": "A8",
+      "height": 28,
+      "kind": "icon",
+      "name": "fwd",
+      "path": "icons/fwd.a8",
+      "sha256": "f79628c576c1d9eddf3b6a21692ec969d1e17f101f611259f98673bac3cd4b85",
+      "size": 784,
+      "width": 28
+    },
+    {
+      "format": "A8",
+      "height": 28,
+      "kind": "icon",
+      "name": "grid",
+      "path": "icons/grid.a8",
+      "sha256": "9759c93d646a115094e4a2bfb6b5654719c1f3535244cd0051595ee2e446de13",
+      "size": 784,
+      "width": 28
+    },
+    {
+      "format": "A8",
+      "height": 28,
+      "kind": "icon",
+      "name": "home",
+      "path": "icons/home.a8",
+      "sha256": "e3e02c5fd9c78f06b5fc968ac3a4c01b2a2c280b2eec055df93f0b5e6b04288a",
+      "size": 784,
+      "width": 28
+    },
+    {
+      "format": "A8",
+      "height": 28,
+      "kind": "icon",
+      "name": "info",
+      "path": "icons/info.a8",
+      "sha256": "7b2f73974125963a858da5acbdf96c87652caa89b3936a58629be25303971210",
+      "size": 784,
+      "width": 28
+    },
+    {
+      "format": "A8",
+      "height": 28,
+      "kind": "icon",
+      "name": "keyboard",
+      "path": "icons/keyboard.a8",
+      "sha256": "e8fd88191b671f9fd1cfaef8171511b08ed4b4b5bc59c194b2a489ac47e7b53b",
+      "size": 784,
+      "width": 28
+    },
+    {
+      "format": "A8",
+      "height": 28,
+      "kind": "icon",
+      "name": "list",
+      "path": "icons/list.a8",
+      "sha256": "9e90a68f207dc2e458065542f5a3d2f4df3d981dcff93d3f4b228c18d5615433",
+      "size": 784,
+      "width": 28
+    },
+    {
+      "format": "A8",
+      "height": 28,
+      "kind": "icon",
+      "name": "location",
+      "path": "icons/location.a8",
+      "sha256": "0e0dc84125ee23c921fcb720cc7913e9b83dfd4a0ab0763e81e3f8671cb0be3e",
+      "size": 784,
+      "width": 28
+    },
+    {
+      "format": "A8",
+      "height": 28,
+      "kind": "icon",
+      "name": "lock",
+      "path": "icons/lock.a8",
+      "sha256": "e173fb1345475babc40fadcc136e57893c947d413755dd130a730e0d152a8c66",
+      "size": 784,
+      "width": 28
+    },
+    {
+      "format": "A8",
+      "height": 28,
+      "kind": "icon",
+      "name": "mic",
+      "path": "icons/mic.a8",
+      "sha256": "88e002c2f4e9ccaefbbb2e3c4cdccad259c00207e0a6529913d35a5d8f3fd4bd",
+      "size": 784,
+      "width": 28
+    },
+    {
+      "format": "A8",
+      "height": 28,
+      "kind": "icon",
+      "name": "minus",
+      "path": "icons/minus.a8",
+      "sha256": "cf2cf0041c794230c2ce3ef6a6dca289b52978beee63baa0b60df82927d523fd",
+      "size": 784,
+      "width": 28
+    },
+    {
+      "format": "A8",
+      "height": 28,
+      "kind": "icon",
+      "name": "more",
+      "path": "icons/more.a8",
+      "sha256": "0ef1ca006acb71fe8f8b0d2310ef6d59457ca64dffd8acb63fc4969901104713",
+      "size": 784,
+      "width": 28
+    },
+    {
+      "format": "A8",
+      "height": 28,
+      "kind": "icon",
+      "name": "pause",
+      "path": "icons/pause.a8",
+      "sha256": "78008166bb960fc32337f4882276edc945593a32b4f98c982297205138746fff",
+      "size": 784,
+      "width": 28
+    },
+    {
+      "format": "A8",
+      "height": 28,
+      "kind": "icon",
+      "name": "plan",
+      "path": "icons/plan.a8",
+      "sha256": "35460228240c1a9387e9739b0f67b4e15548760227e960586ca3273a86c20549",
+      "size": 784,
+      "width": 28
+    },
+    {
+      "format": "A8",
+      "height": 28,
+      "kind": "icon",
+      "name": "play",
+      "path": "icons/play.a8",
+      "sha256": "a4210bf97bba5c06eecc928d54ae47d48b1600ecd29b1cba6c46904bb3e60c4a",
+      "size": 784,
+      "width": 28
+    },
+    {
+      "format": "A8",
+      "height": 28,
+      "kind": "icon",
+      "name": "plus",
+      "path": "icons/plus.a8",
+      "sha256": "4355e783c336738f7c27a00a19865de1692cedd7c31a5e9340f0eb13a132f986",
+      "size": 784,
+      "width": 28
+    },
+    {
+      "format": "A8",
+      "height": 28,
+      "kind": "icon",
+      "name": "retry",
+      "path": "icons/retry.a8",
+      "sha256": "a72daf837f6ea1ad5a0c522b54fba4574f75bf12969e94bd155e9bd5a6d1c69d",
+      "size": 784,
+      "width": 28
+    },
+    {
+      "format": "A8",
+      "height": 28,
+      "kind": "icon",
+      "name": "search",
+      "path": "icons/search.a8",
+      "sha256": "620ebc99e075d4c90aa6d7e2f6253393e02463d1c4929baf67c988abda3a5346",
+      "size": 784,
+      "width": 28
+    },
+    {
+      "format": "A8",
+      "height": 28,
+      "kind": "icon",
+      "name": "shield",
+      "path": "icons/shield.a8",
+      "sha256": "bf41057a78ad9fe1b6e2925228287112bb50358cda8673a72b6839856be41f91",
+      "size": 784,
+      "width": 28
+    },
+    {
+      "format": "A8",
+      "height": 28,
+      "kind": "icon",
+      "name": "star",
+      "path": "icons/star.a8",
+      "sha256": "a228d47147d45ed181af0d1fe9acfc2fcf4a3e243e3223a7bd4c7eeec61c1cbf",
+      "size": 784,
+      "width": 28
+    },
+    {
+      "format": "A8",
+      "height": 28,
+      "kind": "icon",
+      "name": "stopwatch",
+      "path": "icons/stopwatch.a8",
+      "sha256": "30b0ad9e2189e863f2df7b749e8df8b34936ff8777767ee8fb8dd66cf7dd2aa6",
+      "size": 784,
+      "width": 28
+    },
+    {
+      "format": "A8",
+      "height": 28,
+      "kind": "icon",
+      "name": "temp",
+      "path": "icons/temp.a8",
+      "sha256": "f09d6340ac4e101fa78828e21e5272944fe10506fbcf7c6863f4dbdbc0f0eebc",
+      "size": 784,
+      "width": 28
+    },
+    {
+      "format": "A8",
+      "height": 28,
+      "kind": "icon",
+      "name": "tf",
+      "path": "icons/tf.a8",
+      "sha256": "ee8fd8af2192fd4449c074a67f76bc610d199fe92d9478e98d0f8644181d62de",
+      "size": 784,
+      "width": 28
+    },
+    {
+      "format": "A8",
+      "height": 28,
+      "kind": "icon",
+      "name": "timer",
+      "path": "icons/timer.a8",
+      "sha256": "47a7604951f1cfb8ddab666844f282b87cfed8e6cb30da6994cd400805dba32e",
+      "size": 784,
+      "width": 28
+    },
+    {
+      "format": "A8",
+      "height": 28,
+      "kind": "icon",
+      "name": "trash",
+      "path": "icons/trash.a8",
+      "sha256": "0ef952ae65410beef512655b22fd6026411e2243fc143aa53e99ab3a16cb952d",
+      "size": 784,
+      "width": 28
+    },
+    {
+      "format": "A8",
+      "height": 28,
+      "kind": "icon",
+      "name": "undo",
+      "path": "icons/undo.a8",
+      "sha256": "8974acabd54b77806b72b51428085f55a37a67de5503615645b6efd1748d3b26",
+      "size": 784,
+      "width": 28
+    },
+    {
+      "format": "A8",
+      "height": 28,
+      "kind": "icon",
+      "name": "warn",
+      "path": "icons/warn.a8",
+      "sha256": "b5cd569dcbf12bcc6c613f83d2c68ef3eee712691b270d7594950f5ae4b580bb",
+      "size": 784,
+      "width": 28
+    },
+    {
+      "format": "A8",
+      "height": 28,
+      "kind": "icon",
+      "name": "wifi",
+      "path": "icons/wifi.a8",
+      "sha256": "9c06a4bb7db79a325f76270808936f3dfe58b9064554d1b1f582043fab584d67",
+      "size": 784,
+      "width": 28
+    },
+    {
+      "format": "A8",
+      "height": 28,
+      "kind": "icon",
+      "name": "zap",
+      "path": "icons/zap.a8",
+      "sha256": "266db426c02a10fc307000f0f844d2051936a1151c40db6acfeb21eb909fba20",
+      "size": 784,
+      "width": 28
+    }
+  ],
+  "icon_defaults": {
+    "format": "A8",
+    "height": 28,
+    "width": 28
+  },
+  "layout": {
+    "cabin_width": 248,
+    "height": 600,
+    "main_width": 704,
+    "navigation_width": 72,
+    "orientation": "landscape",
+    "width": 1024
+  },
+  "lvgl": {
+    "color_format": "RGB565",
+    "version": "9.2.2"
+  },
+  "package_version": "2.0.0-portrait.1",
+  "schema_version": 1
+}

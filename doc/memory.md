@@ -263,3 +263,34 @@
 - 已验证的恢复方法是：背光关闭时调用 `esp_lcd_dpi_panel_set_pattern(..., MIPI_DSI_PATTERN_BAR_VERTICAL)`，等待 40ms，再切回 `MIPI_DSI_PATTERN_NONE`。这会重新打开 DPI bridge，使 DMA 连续刷新恢复；主驱动已在初始化首帧前自动执行，用户看不到诊断图案。
 - 排查优先级：若日志没有 `DSI video bridge rearmed`，先查软件初始化；若有 rearm 和 `MIPI-DSI ready` 但屏无图，再查 5V 屏电源、FPC 锁扣/接触和背光；不要改 lane 走线或猜 GPIO。官方 DSI Pattern Generator 能绕过 PSRAM/DMA，可用于区分物理链路与帧缓冲问题。
 - 已验证启动日志：`tmp/logs/20260713-2008_mipi_bridge_rearm_main_com15.log`。该日志完成两轮图案且无 refresh timeout、panic、brownout、watchdog、PSRAM 错误或 DSI underrun。
+
+----
+
+## 2026-07-21 WKS70WSV114-WCT GT911 触控驱动对齐（软件已构建，真机待烧录验收）
+
+- 目标屏：WKS70WSV114-WCT（EK79007 1024x600 + GT911），26-pin DSI 座触摸线：INT=GPIO15、SCL=GPIO16、SDA=GPIO17、RST=GPIO18，逻辑 3.3V。
+- 自研 ridge_touch_gt911_p4.c 已按厂商 comprehensive_routine_70inch_mipilcd 的 gt9xxx 行为对齐：优先 I2C 地址 **0x14**（备选 0x5D）、**400kHz**（失败回退 100kHz）、RST 低/高各 10ms 后再 settle、读 PID 后写 **0x8040** 软复位、触点从 **0x8150** 读 4 字节 XY（不做 EK79007 镜像翻转）。
+- USB 最小协议新增 	ouch_status、	ouch_scan；get_pins 触摸说明改为 GT911。UI 前 8 次按下会 INFO 打坐标。
+- 构建通过：ridge_spirit.bin 2680960 字节，SHA-256 E931BAA2A14101EC3DC40E054C16F2394C730FA0B1DB45ABD32746B97786F667；既有 ota_1 2MiB overflow 警告不变。
+- 本机烧录时 COM15 不存在，COM17（USB-Serial/JTAG）被占用（PermissionError）；**未完成真机烧录**。请释放串口后执行：	ools\idf.ps1 -p COMxx flash 与 monitor，确认日志 GT911 ready addr=0x14 product=911，再用 	ouch_scan/	ouch_status 与软键盘点按验收。
+- 备份：	mp/backups/manual/20260721-011918_wks70_gt911_touch/。
+
+----
+
+## 2026-07-23 SHT40 共享 I2C0 接入经验
+
+- SHT40 温湿度模块挂在 GPIO16（SCL）/ GPIO17（SDA），与 GT911 触摸共用 I2C0 总线。
+- **红线**：整条 I2C0 只能有一个 bus handle。SHT40 驱动通过 `i2c_master_get_bus_handle(I2C_NUM_0, &bus)` 复用 GT911 已建总线，**不得再调用 `i2c_new_master_bus`**。
+- `fridge_sht4x_init()` 必须在 `fridge_touch_gt911_init()` 之后调用，否则 `i2c_master_get_bus_handle` 返回 `ESP_ERR_INVALID_STATE`。
+- SHT40 命令集与 SHT30 不同：测量命令 `0xFD`（单字节，无 clock stretching），等待 ≥10ms，读 6 字节，CRC-8 poly=0x31 init=0xFF。
+- 地址默认 0x44，ADDR 引脚接 VDD 时为 0x45；驱动按顺序探测两个地址。
+
+----
+
+## 2026-07-23 Codex 截屏调用链验证
+
+- 当前 P4 USB-Serial/JTAG 实机端口为 `COM17`。WebUI 首页的“截取屏幕”按钮已由用户实测成功；Codex 使用 `tools\capture_screenshot.ps1` 可复用同一套 `screenshot_capture` + `tf_transfer_*` 协议。
+- **串口控制线经验：** P4 原生 USB-Serial/JTAG 需要 `DTR=false、RTS=true` 才能稳定把主机输入交给固件 `stdin`；`RTS=false` 时端口虽然能打开，但脚本收不到任何响应。脚本已固定该状态，不能简单改成 DTR/RTS 全低。
+- Codex 入口默认命令：`powershell -NoProfile -ExecutionPolicy Bypass -File tools\capture_screenshot.ps1`。默认输出基名为 `tmp\cache\screenshot_test\codex_latest`，按设备实际格式落为 `.jpg` 或 `.bmp`；最后 JSON 的 `local_path` 是图像查看路径。
+- 2026-07-23 实机结果：设备返回 `.fridge_spirit/exports/shot_102.jpg`，JPEG；通过 TF 分块读回 101251 bytes，CRC32、JPEG 文件头均通过，`tmp\cache\screenshot_test\codex_latest.jpg` 已用图像查看器确认内容为当前 1024×600 首页，无花屏、截断或明显色彩损坏。
+- WebUI、Codex 脚本、ESP-IDF monitor 或其他串口工具不能同时打开 `COM17`；切换调用方前必须先断开上一个串口读者。摄像头忙时 BMP 降级路径尚未单独完成实机验证。

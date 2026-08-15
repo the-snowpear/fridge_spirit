@@ -1,0 +1,147 @@
+/* ==================================================================
+ * 冰箱小精灵 ver2 —— 对话模块页面样式（CHAT-01..04）
+ * 统一 chat- 前缀；仅 flex/grid、px、字号只用 var(--fs-*) 六档、
+ * 圆角 ≤8px、触控目标 ≥48px。复用 components.css 的 .chat-row/.chat-bubble/
+ * .chat-avatar/.tool-card/.result-card/.ctx-step/.ap-dot，不重名、不覆盖。
+ * ================================================================== */
+
+/* ---------------- 公共：消息/列表滚动容器 ---------------- */
+.chat-body { gap: var(--sp-3); }
+.chat-scroll-wrap { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.chat-scroll-wrap .scroll-area { flex: 1; }
+
+/* ---------------- CHAT-01 顶部状态行 ---------------- */
+.chat-status {
+  flex: none;
+  display: flex; align-items: center; gap: var(--sp-3);
+  padding: 6px var(--sp-5);
+  border-bottom: 1px solid var(--line);
+  background: var(--paper);
+}
+.chat-status-left { display: flex; align-items: center; gap: var(--sp-3); }
+.chat-hist-link {
+  margin-left: auto;
+  display: inline-flex; align-items: center; gap: 5px;
+  min-height: var(--touch); padding: 0 var(--sp-2);
+  color: var(--sage-dark); font-size: var(--fs-cap); cursor: pointer;
+}
+.chat-hist-link .ic { width: 18px; height: 18px; }
+
+/* ---------------- CHAT-01 待确认工具卡下的「去确认」条 ---------------- */
+.chat-tool-act {
+  display: flex; align-items: center; gap: var(--sp-3);
+  margin: calc(-1 * var(--sp-2)) 0 var(--sp-3) 48px;
+  padding: 8px var(--sp-3);
+  background: var(--warn-bg); border: 1px solid var(--line); border-top: none;
+  border-radius: 0 0 var(--r-m) var(--r-m);
+}
+.chat-tool-note { font-size: var(--fs-cap); color: var(--warn-ink); }
+
+/* ---------------- CHAT-01 底部输入区 ---------------- */
+.chat-input {
+  flex: none;
+  padding: var(--sp-2) var(--sp-5) var(--sp-3);
+  border-top: 1px solid var(--line);
+  background: var(--paper);
+  display: flex; flex-direction: column; gap: var(--sp-2);
+}
+.chat-cmds { display: flex; gap: var(--sp-2); flex-wrap: wrap; }
+.chat-cmd { height: 36px; padding: 0 14px; font-size: var(--fs-cap); cursor: pointer; background: var(--mint); color: var(--sage-dark); }
+.chat-cmd:hover { background: var(--ok-bg); }
+
+.chat-input-row { display: flex; align-items: center; gap: var(--sp-2); }
+.chat-input-row .input-like { flex: 1; min-width: 0; }
+.chat-input-row .icon-btn { flex: none; }
+
+/* 发送/停止同一槽位：Agent 空闲=发送，工作中=停止（警示色） */
+.chat-btn-send {
+  background: var(--sage);
+  border-color: var(--sage);
+  color: #fff;
+}
+.chat-btn-send:hover { background: var(--sage-dark); border-color: var(--sage-dark); color: #fff; }
+.chat-btn-stop {
+  background: var(--danger-bg);
+  border-color: rgba(217, 87, 69, .45);
+  color: var(--danger);
+}
+.chat-btn-stop:hover { background: #f5d4cf; color: var(--danger); }
+
+/* ---------------- CHAT-02 搜索条 + 会话列表 ---------------- */
+.chat-srch { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; }
+.chat-srch .input-like { flex: 1; min-width: 240px; }
+
+.chat-sess {
+  display: flex; align-items: center; gap: var(--sp-3);
+  padding: var(--sp-3);
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-m);
+  margin-bottom: var(--sp-3);
+}
+.chat-sess-main { flex: 1; min-width: 0; cursor: pointer; display: flex; flex-direction: column; gap: 3px; }
+.chat-sess-title { font-size: var(--fs-body); font-weight: 600; color: var(--ink); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.chat-sess-sub { font-size: var(--fs-cap); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-sess-meta { display: flex; align-items: center; gap: 8px; }
+.chat-sess-time { font-size: 15px; color: var(--muted); }
+.chat-sess-ops { flex: none; display: flex; gap: var(--sp-1); }
+
+/* ---------------- CHAT-03 权限决策说明 ---------------- */
+.chat-perm {
+  display: flex; align-items: flex-start; gap: var(--sp-2);
+  margin-top: var(--sp-2); padding: var(--sp-3);
+  background: var(--info-bg); border-radius: var(--r-m);
+  font-size: var(--fs-cap); color: var(--ink); line-height: 1.5;
+}
+.chat-perm .ic { color: var(--info); flex: none; margin-top: 2px; }
+
+/* 执行时间线（复用 .ctx-step，适当放大字号） */
+.chat-timeline { gap: 10px; }
+.chat-timeline .ctx-step { font-size: var(--fs-body); min-height: 34px; }
+.chat-timeline .ctx-step .ic { width: 18px; height: 18px; }
+
+/* 结果 / 错误 / 等待 状态块 */
+.chat-okbox, .chat-errbox, .chat-waitbox {
+  display: flex; align-items: flex-start; gap: var(--sp-3);
+  padding: var(--sp-3); border-radius: var(--r-m);
+}
+.chat-okbox { background: var(--ok-bg); }
+.chat-okbox .ic { color: var(--sage-dark); flex: none; margin-top: 2px; }
+.chat-errbox { background: var(--danger-bg); }
+.chat-errbox .ic { color: var(--danger); flex: none; margin-top: 2px; }
+.chat-waitbox { background: var(--warn-bg); }
+.chat-waitbox .ic { color: var(--warn-ink); flex: none; margin-top: 2px; }
+.chat-err-title { font-size: var(--fs-body); font-weight: 600; color: var(--ink); }
+.chat-err-sub { font-size: var(--fs-cap); color: var(--muted); margin-top: 2px; }
+.chat-retry-row { display: flex; margin-top: var(--sp-2); }
+
+/* 操作日志（等宽字体） */
+.chat-log {
+  margin-top: var(--sp-2); padding: var(--sp-3);
+  background: var(--cream); border-radius: var(--r-m);
+  font-family: var(--font-mono); font-size: 15px; color: var(--ink);
+  display: flex; flex-direction: column; gap: 4px;
+}
+.chat-log-line { white-space: pre-wrap; word-break: break-all; }
+
+/* ---------------- CHAT-04 计划摘要 + 待确认动作 ---------------- */
+.chat-plan-desc { display: flex; align-items: flex-start; gap: var(--sp-2); font-size: var(--fs-cap); color: var(--ink); line-height: 1.5; }
+.chat-plan-desc .ic { color: var(--sage-dark); flex: none; margin-top: 2px; }
+
+.chat-pa {
+  padding: var(--sp-3);
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-m);
+  margin-bottom: var(--sp-3);
+  display: flex; flex-direction: column; gap: var(--sp-2);
+}
+.chat-pa-head { display: flex; align-items: center; gap: var(--sp-3); }
+.chat-pa-title { font-size: var(--fs-body); font-weight: 600; color: var(--ink); flex: 1; min-width: 0; }
+.chat-pa-desc { font-size: var(--fs-cap); color: var(--muted); line-height: 1.5; }
+.chat-pa-obj { display: flex; align-items: center; gap: var(--sp-2); font-size: var(--fs-cap); color: var(--ink); }
+.chat-pa-obj .ic { color: var(--sage-dark); width: 18px; height: 18px; }
+.chat-irrev {
+  display: flex; align-items: center; gap: var(--sp-2);
+  padding: 8px var(--sp-3);
+  background: var(--danger-bg); color: var(--danger);
+  border-radius: var(--r-m); font-size: var(--fs-cap);
+}
+.chat-irrev .ic { width: 16px; height: 16px; flex: none; }
+.chat-pa-ops { display: flex; gap: var(--sp-2); margin-top: 2px; }

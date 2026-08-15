@@ -1,0 +1,5 @@
+dependencies:
+  lvgl/lvgl:
+    version: "9.2.2"
+  espressif/freetype:
+    version: "2.13.3"

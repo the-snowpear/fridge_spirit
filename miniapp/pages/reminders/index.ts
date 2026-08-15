@@ -2,13 +2,12 @@
  * 提醒页：列出当前 home 待处理提醒；点击确认（POST /reminders/{id}/confirm，status=acked）。
  *
  * - 数据来源：getReminders() 返回 ReminderListData.items；
- * - 仅展示 status === "pending" 的；其它（acked / dismissed）默认隐藏；
- * - 点击"忽略"传 status=dismissed；
+ * - 展示 pending / triggered；完成写 completed，忽略写 cancelled，与 P4 域一致；
  * - 删除后用 setData 局部更新，不重新整页拉。
  */
 
 import { confirmReminder, getReminders } from "../../services/api";
-import { enqueueSyncOp, syncNow } from "../../services/sync";
+import { syncNow } from "../../services/sync";
 import type { ReminderItem } from "../../types/models";
 import { RequestError } from "../../utils/request";
 import { updateOfflineSnapshot } from "../../utils/localFeatures";
@@ -72,7 +71,7 @@ Page({
       updateOfflineSnapshot({ reminderItems: data.items || [] });
       this.setData({
         items: (data.items || [])
-          .filter((it) => it.status === "pending")
+          .filter((it) => it.status === "pending" || it.status === "triggered")
           .map(toViewItem),
       });
     } catch (err) {
@@ -89,14 +88,14 @@ Page({
   },
 
   async onConfirm(event: WechatMiniprogram.BaseEvent) {
-    await this.actOn(event, "acked");
+    await this.actOn(event, "completed");
   },
 
   async onDismiss(event: WechatMiniprogram.BaseEvent) {
-    await this.actOn(event, "dismissed");
+    await this.actOn(event, "cancelled");
   },
 
-  async actOn(event: WechatMiniprogram.BaseEvent, status: "acked" | "dismissed") {
+  async actOn(event: WechatMiniprogram.BaseEvent, status: "completed" | "cancelled") {
     const id = event.currentTarget.dataset.id as string;
     this.markConfirming(id, true);
     try {
@@ -107,15 +106,11 @@ Page({
       });
       this.setData({ items: this.data.items.filter((x) => x.id !== id) });
       wx.showToast({
-        title: status === "acked" ? "已确认" : "已忽略",
+        title: status === "completed" ? "已完成" : "已忽略",
         icon: "success",
       });
     } catch (err) {
-      // 离线/REST 失败才入队，等待恢复后补写。
-      enqueueSyncOp("reminder", "set_status_pending", {
-        reminderId: id,
-        status,
-      });
+      // v2 API 已用原 eventId 持久化 outbox。
       this.setData({ items: this.data.items.filter((x) => x.id !== id) });
       wx.showToast({ title: "已加入待同步", icon: "none" });
     }

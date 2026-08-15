@@ -1,0 +1,17 @@
+{
+  "id": "inventory.query",
+  "steps": [
+    {
+      "id": "list_inventory",
+      "save_as": "inventory",
+      "tool": "inventory.list",
+      "type": "tool"
+    },
+    {
+      "id": "done",
+      "ok": true,
+      "type": "return"
+    }
+  ],
+  "version": "1.0.0"
+}

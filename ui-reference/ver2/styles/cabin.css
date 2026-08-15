@@ -1,0 +1,769 @@
+/* ==================================================================
+ * 冰箱小精灵 ver2 —— 状态侧舱（248×600）与 CTX-01..08 情境面板
+ * 侧舱 = 固定区（时钟|日期星期两行 + 温湿度/健康）+ CTX 动态区 + 底部语音/拍照大按钮。
+ * 竖屏见文末：左状态卡+横屏同款 CTX，右语音/摄像大按钮占满舱高。
+ * ================================================================== */
+
+#cabin {
+  width: 248px;
+  height: 600px;
+  flex: none;
+  background: var(--cream);
+  border-left: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  padding: var(--sp-3);
+  gap: var(--sp-3);
+  overflow: hidden;
+}
+
+/* ---------------- 固定区（压缩纵向：时间 | 日期两行 横排，把高度让给 CTX） ---------------- */
+.cabin-fixed { flex: none; display: flex; flex-direction: column; gap: 6px; }
+
+/* 时钟 + 日期/星期：时间在左，日期与星期两行在右 */
+.cabin-clock {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.cabin-time {
+  font-size: var(--fs-big);
+  font-weight: 700;
+  font-family: var(--font-mono);
+  color: var(--ink);
+  line-height: 1;
+  flex: none;
+  letter-spacing: -0.02em;
+}
+.cabin-date-block {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  min-width: 0;
+  padding-top: 2px;
+}
+.cabin-date {
+  font-size: var(--fs-cap);
+  color: var(--ink);
+  font-weight: 600;
+  line-height: 1.15;
+  white-space: nowrap;
+}
+.cabin-weekday {
+  font-size: var(--fs-cap);
+  color: var(--muted);
+  line-height: 1.15;
+  white-space: nowrap;
+}
+
+/* 温湿度 + 健康图标同一视觉块，进一步压固定区高度 */
+.cabin-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.cabin-env { display: flex; align-items: center; gap: 6px; font-size: var(--fs-cap); color: var(--sage-dark); }
+.cabin-env .ic { width: 18px; height: 18px; }
+.cabin-health { display: flex; gap: 6px; flex-wrap: wrap; }
+
+/* ---------------- CTX 动态区 ---------------- */
+.cabin-ctx {
+  flex: 1; min-height: 0;
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-m);
+  position: relative;
+  scrollbar-width: thin;
+}
+.ctx-id {
+  position: absolute; top: 6px; right: 8px;
+  font-size: 12px; font-family: var(--font-mono); color: var(--line-strong);
+}
+#stage.hide-pgid .ctx-id { display: none; }
+
+.ctx-panel { padding: var(--sp-3); display: flex; flex-direction: column; gap: var(--sp-2); }
+.ctx-panel.warn { background: var(--warn-bg); }
+.ctx-title {
+  font-size: var(--fs-cap); font-weight: 700; color: var(--sage-dark);
+  border-bottom: 1px solid var(--line); padding-bottom: 4px; margin-top: 4px;
+}
+.ctx-title:first-child { margin-top: 0; }
+.ctx-card {
+  display: flex; gap: var(--sp-2); align-items: flex-start;
+  background: var(--cream); border-radius: var(--r-m); padding: var(--sp-2);
+  font-size: var(--fs-cap); line-height: 1.4;
+}
+.ctx-card .ic { color: var(--sage-dark); flex: none; margin-top: 2px; }
+.ctx-card.danger-card { background: var(--danger-bg); color: var(--ink); }
+.ctx-card.danger-card .ic { color: var(--danger); }
+.ctx-sub { font-size: 15px; color: var(--muted); }
+.ctx-path { font-size: var(--fs-body); font-weight: 600; color: var(--ink); }
+.ctx-hint { font-size: 15px; color: var(--muted); background: var(--cream); border-radius: var(--r-s); padding: 6px 8px; }
+.ctx-act {
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+  min-height: var(--touch); border-radius: var(--r-m);
+  background: var(--mint); color: var(--sage-dark);
+  font-size: var(--fs-body); font-weight: 500;
+  margin-top: 4px;
+}
+.ctx-act:hover { background: var(--ok-bg); }
+.ctx-act.danger { background: var(--danger-bg); color: var(--danger); }
+/* ver1 风格：右侧动态上下文只保留名称、宽度、高度、备注四项。 */
+.ctx-layout-form { display: flex; flex-direction: column; gap: var(--sp-3); }
+.ctx-layout-title { font-size: var(--fs-body); font-weight: 700; color: var(--sage-dark); }
+.ctx-layout-selected { display: flex; flex-direction: column; gap: 2px; color: var(--sage-dark); font-size: var(--fs-cap); font-weight: 600; }
+.ctx-layout-selected span { color: var(--muted); font-weight: 400; }
+.ctx-layout-form label { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: var(--fs-cap); color: var(--muted); }
+.ctx-layout-form input[type="text"] {
+  width: 100%; min-height: 38px; padding: 0 var(--sp-2); border: 1px solid var(--line-strong);
+  border-radius: var(--r-s); background: var(--surface); color: var(--ink); font: inherit; font-size: var(--fs-body);
+}
+.ctx-layout-form input[type="range"] { width: 100%; accent-color: var(--sage); }
+.ctx-layout-form output { margin-left: auto; color: var(--sage-dark); font-weight: 700; }
+.ctx-layout-empty { color: var(--muted); font-size: var(--fs-cap); }
+.ctx-btn-row { display: flex; gap: var(--sp-2); justify-content: center; margin-top: 4px; }
+.ctx-steps { display: flex; flex-direction: column; gap: 6px; }
+.ctx-step { display: flex; align-items: center; gap: 6px; font-size: var(--fs-cap); }
+.ctx-step.done { color: var(--sage-dark); }
+.ctx-step.doing { color: var(--info); font-weight: 600; }
+.ctx-step.todo { color: var(--muted); }
+.ctx-voice-state { display: flex; align-items: center; gap: var(--sp-2); font-size: var(--fs-sub); color: var(--sage-dark); font-weight: 600; }
+.ctx-timer-face { font-size: var(--fs-big); font-weight: 700; font-family: var(--font-mono); text-align: center; color: var(--sage-dark); }
+
+/* Agent 步骤小圆点（与浮层 ap-dot 同款） */
+.ap-dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; display: inline-block; flex: none; }
+
+/* ---------------- 底部语音/拍照大按钮（64px 触控） ---------------- */
+.cabin-actions { flex: none; display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-3); }
+.cabin-act {
+  height: var(--touch-lg);
+  border-radius: var(--r-m);
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
+  font-size: var(--fs-cap); font-weight: 600;
+  border: 1px solid var(--line-strong);
+}
+.cabin-act.voice { background: var(--sage); color: #fff; border-color: var(--sage); }
+.cabin-act.camera { background: var(--surface); color: var(--sage-dark); }
+.cabin-act:active { transform: translateY(1px); }
+
+/* 隐私模式：摄像头关闭按钮（灰化，仍可点出 toast 说明） */
+.cabin-act.camera.privacy-off {
+  background: var(--offline-bg, #eceeed);
+  color: var(--muted);
+  border-color: var(--line);
+  opacity: .92;
+  cursor: not-allowed;
+}
+.cabin-act.camera.privacy-off:active { transform: none; }
+
+/* 隐私模式芯片（固定区显式标注） */
+.cabin-privacy-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  align-self: flex-start;
+  padding: 4px 8px;
+  border-radius: var(--r-pill, 999px);
+  background: #e2edf5;
+  color: var(--info, #2f6f8f);
+  font-size: var(--fs-cap);
+  font-weight: 700;
+  border: 1px solid rgba(47, 111, 143, .22);
+  line-height: 1.2;
+}
+.cabin-privacy-chip .ic { width: 16px; height: 16px; flex: none; }
+
+/* ==================================================================
+ * 竖屏隐私底舱 600×288
+ * ┌──────────────────────────────┬────────┐
+ * │ 状态信息卡（略松排布）         │  语音  │  ← 大按钮上下
+ * │ 动态上下文（横屏同款组件）     │  摄像  │    占满舱高
+ * └──────────────────────────────┴────────┘
+ * ================================================================== */
+
+#stage.mode-portrait #cabin {
+  width: 600px;
+  height: 288px;
+  flex: none;
+  border-left: none;
+  border-top: 1px solid var(--line);
+  flex-direction: row;
+  align-items: stretch;
+  padding: 10px;
+  gap: 10px;
+  overflow: hidden;
+  background: var(--cream);
+  border-radius: 16px 16px 0 0;
+}
+
+/* 左列：状态卡 + CTX（横向尽量拉满） */
+#stage.mode-portrait .cabin-p-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* ---- 状态信息卡：左右拉满、内边距收一点；日期与隐私底部对齐 ---- */
+#stage.mode-portrait .cabin-p-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  /* 左右拉满：少内边距、贴满主列宽 */
+  padding: 10px 12px;
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  min-width: 0;
+}
+
+#stage.mode-portrait .cabin-p-left {
+  flex: 1;
+  min-width: 0;
+  width: 100%;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 12px;
+}
+
+#stage.mode-portrait .cabin-p-time {
+  flex: none;
+  font-size: 40px;
+  font-weight: 700;
+  font-family: var(--font-mono);
+  letter-spacing: -0.04em;
+  line-height: 1;
+  color: var(--ink);
+  align-self: center;
+  display: flex;
+  align-items: flex-end;
+  min-height: 52px;
+  padding-bottom: 1px;
+}
+
+#stage.mode-portrait .cabin-p-side {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 8px;
+  align-items: stretch; /* 让日期行吃满横向 */
+}
+
+/* 日期与隐私胶囊：同一行底部对齐 */
+#stage.mode-portrait .cabin-p-time-row {
+  display: flex;
+  align-items: flex-end; /* 底部对齐 */
+  gap: 10px;
+  min-width: 0;
+  width: 100%;
+}
+
+#stage.mode-portrait .cabin-p-date {
+  font-size: 15px;
+  color: var(--muted);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  flex: none;
+  line-height: 1.15;
+  padding-bottom: 2px; /* 与胶囊文字视觉底对齐 */
+}
+
+#stage.mode-portrait .cabin-p-time-row .cabin-privacy-chip {
+  flex: none;
+  padding: 3px 10px;
+  font-size: 14px;
+  border-radius: 999px;
+  gap: 3px;
+  line-height: 1.15;
+  align-self: flex-end;
+}
+
+#stage.mode-portrait .cabin-p-time-row .cabin-privacy-chip .ic {
+  width: 14px;
+  height: 14px;
+}
+
+#stage.mode-portrait .cabin-p-meta-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+  flex-wrap: nowrap;
+  min-width: 0;
+  width: 100%;
+}
+
+#stage.mode-portrait .cabin-p-meta-row .cabin-env {
+  flex: none;
+  gap: 6px;
+  font-size: 15px;
+}
+
+#stage.mode-portrait .cabin-p-meta-row .cabin-env .ic {
+  width: 16px;
+  height: 16px;
+}
+
+#stage.mode-portrait .cabin-p-meta-row .cabin-health {
+  display: flex;
+  gap: 6px;
+  flex-wrap: nowrap;
+  min-width: 0;
+}
+
+#stage.mode-portrait .cabin-p-meta-row .health-icon {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+}
+
+#stage.mode-portrait .cabin-p-meta-row .health-icon .ic {
+  width: 15px;
+  height: 15px;
+}
+
+/* ---- 右列：语音 / 摄像大按钮，上下均分占满舱高 ---- */
+#stage.mode-portrait .cabin-p-acts {
+  flex: none;
+  width: 96px;
+  align-self: stretch;
+  display: flex;
+  min-height: 0;
+  padding: 0;
+  background: transparent;
+  border: none;
+  box-sizing: border-box;
+}
+
+#stage.mode-portrait .cabin-p-acts .cabin-actions {
+  width: 100%;
+  height: 100%;
+  flex: 1;
+  display: grid;
+  grid-template-columns: 1fr;
+  grid-template-rows: 1fr 1fr;
+  gap: 10px;
+}
+
+#stage.mode-portrait .cabin-p-acts .cabin-act {
+  height: 100%;
+  min-height: 0;
+  gap: 4px;
+  font-size: var(--fs-cap);
+  font-weight: 700;
+  border-radius: 16px;
+  padding: 8px 4px;
+  box-shadow: 0 1px 0 rgba(36, 52, 45, .04);
+}
+
+#stage.mode-portrait .cabin-p-acts .cabin-act .ic {
+  width: 28px;
+  height: 28px;
+}
+
+/* ---- CTX：模块横排 + 模块内纵排 + 整体左右滑 ----
+ * 不用「卡中卡」：模块之间只靠竖线分隔，组件直接铺在表面上
+ * ================================================================== */
+#stage.mode-portrait .cabin-p-main > .cabin-ctx {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  border-radius: 16px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  position: relative;
+}
+
+#stage.mode-portrait .cabin-ctx .ctx-id {
+  top: 6px;
+  right: 8px;
+  opacity: .5;
+  z-index: 2;
+  pointer-events: none;
+}
+
+/* 横向滑轨：底栏滚动条贴内容区底边（靠近模块竖线底部） */
+#stage.mode-portrait .cabin-ctx .ctx-panel.ctx-hscroll {
+  display: block;
+  height: 100%;
+  min-height: 0;
+  padding: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+  -webkit-overflow-scrolling: touch;
+}
+
+#stage.mode-portrait .cabin-ctx .ctx-panel.ctx-hscroll::-webkit-scrollbar {
+  height: 5px;
+}
+#stage.mode-portrait .cabin-ctx .ctx-panel.ctx-hscroll::-webkit-scrollbar-thumb {
+  background: var(--line-strong);
+  border-radius: 3px;
+}
+#stage.mode-portrait .cabin-ctx .ctx-panel.ctx-hscroll::-webkit-scrollbar-track {
+  background: transparent;
+  margin: 0 8px;
+}
+
+#stage.mode-portrait .cabin-ctx .ctx-panel.ctx-hscroll.warn {
+  background: var(--warn-bg);
+}
+
+#stage.mode-portrait .cabin-ctx .ctx-htrack {
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  gap: 0;
+  height: calc(100% - 2px);
+  min-height: 0;
+  padding: 6px 2px 4px;
+  box-sizing: border-box;
+  width: max-content;
+  min-width: 100%;
+}
+
+/* 模块：无小卡片；内部纵向；右侧竖线；滚动条贴竖线内侧 */
+#stage.mode-portrait .cabin-ctx .ctx-mod {
+  flex: 0 0 auto;
+  width: 160px;
+  min-width: 140px;
+  max-width: 190px;
+  min-height: 0;
+  height: 100%;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 4px 8px 4px 10px;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  border-right: 1px solid var(--line);
+  overflow: hidden;
+}
+
+#stage.mode-portrait .cabin-ctx .ctx-mod:last-child {
+  border-right: none;
+}
+
+/* 今日摘要 / 范围统计：更宽 */
+#stage.mode-portrait .cabin-ctx .ctx-mod.summary {
+  width: 210px;
+  min-width: 190px;
+  max-width: 240px;
+}
+
+#stage.mode-portrait .cabin-ctx .ctx-mod.wide {
+  width: 200px;
+  max-width: 240px;
+}
+
+/* 当前位置：收窄，层级分行 */
+#stage.mode-portrait .cabin-ctx .ctx-mod.narrow {
+  width: 112px;
+  min-width: 100px;
+  max-width: 128px;
+  padding-left: 8px;
+  padding-right: 6px;
+}
+
+/* 右侧淡出提示可左右滑 */
+#stage.mode-portrait .cabin-ctx::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 6px; /* 给底栏横向滚动条留空 */
+  width: 18px;
+  pointer-events: none;
+  background: linear-gradient(90deg, transparent, rgba(255, 253, 248, .88));
+  border-radius: 0 16px 0 0;
+  z-index: 1;
+}
+
+/* 模块内：纵向；过高时竖滚，滚动条贴在右侧竖线旁 */
+#stage.mode-portrait .cabin-ctx .ctx-mod-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+  scrollbar-gutter: stable;
+  padding-right: 2px; /* 滚动条贴竖线 */
+}
+
+#stage.mode-portrait .cabin-ctx .ctx-mod-body::-webkit-scrollbar {
+  width: 4px;
+}
+#stage.mode-portrait .cabin-ctx .ctx-mod-body::-webkit-scrollbar-thumb {
+  background: var(--line-strong);
+  border-radius: 2px;
+}
+#stage.mode-portrait .cabin-ctx .ctx-mod-body::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* 标题：略放大（介于正文与原先横屏标题之间），仍比主区标题小以省高 */
+#stage.mode-portrait .cabin-ctx .ctx-mod .ctx-title {
+  flex: none;
+  margin-top: 0;
+  padding-bottom: 3px;
+  margin-bottom: 0;
+  border-bottom-color: var(--line);
+  font-size: 17px;
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: 0.01em;
+}
+
+#stage.mode-portrait .cabin-ctx .ctx-mod .kv-row {
+  min-height: 0;
+  gap: 6px;
+  align-items: flex-start;
+  font-size: 15px;
+}
+
+#stage.mode-portrait .cabin-ctx .ctx-mod .kv-label {
+  flex: none;
+  white-space: nowrap;
+  max-width: 42%;
+  padding-top: 0;
+  font-size: 15px;
+}
+
+/* 内容不隐藏：不够一行则换到第二行（取消 nowrap/ellipsis） */
+#stage.mode-portrait .cabin-ctx .ctx-mod .kv-value {
+  min-width: 0;
+  text-align: right;
+  overflow: visible;
+  text-overflow: unset;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.3;
+  font-size: 15px;
+}
+
+#stage.mode-portrait .cabin-ctx .ctx-mod .ctx-sub {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.35;
+  font-size: 15px;
+}
+
+/* 库存路径层级：每层一行 */
+#stage.mode-portrait .cabin-ctx .ctx-path-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+#stage.mode-portrait .cabin-ctx .ctx-path-level {
+  display: flex;
+  align-items: flex-start;
+  gap: 2px;
+  font-size: 15px;
+  line-height: 1.3;
+  color: var(--muted);
+  font-weight: 500;
+  min-width: 0;
+}
+
+#stage.mode-portrait .cabin-ctx .ctx-path-level.cur {
+  color: var(--ink);
+  font-weight: 700;
+}
+
+#stage.mode-portrait .cabin-ctx .ctx-path-dot {
+  flex: none;
+  color: var(--line-strong);
+  font-weight: 700;
+  margin-right: 1px;
+}
+
+#stage.mode-portrait .cabin-ctx .ctx-path-seg {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* 模块内卡片：去厚底，轻量分隔即可（省空间） */
+#stage.mode-portrait .cabin-ctx .ctx-mod .ctx-card {
+  padding: 4px 0;
+  background: transparent;
+  border-radius: 0;
+  gap: 6px;
+}
+
+#stage.mode-portrait .cabin-ctx .ctx-mod .ctx-card.danger-card {
+  background: transparent;
+  color: var(--danger);
+}
+
+#stage.mode-portrait .cabin-ctx .ctx-mod .ctx-hint {
+  padding: 4px 0;
+  background: transparent;
+  border-radius: 0;
+}
+
+/* 操作按钮：紧凑内容宽；居上（不沉底） */
+#stage.mode-portrait .cabin-ctx .ctx-mod .ctx-act {
+  display: inline-flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  width: auto;
+  max-width: 100%;
+  min-height: 32px;
+  height: 32px;
+  margin-top: 2px;
+  margin-bottom: 0;
+  padding: 0 12px;
+  border-radius: 8px;
+  flex: none;
+  align-self: flex-start;
+  font-size: 15px;
+  font-weight: 600;
+  white-space: nowrap;
+  box-sizing: border-box;
+  border: 1px solid rgba(47, 96, 71, .22);
+  background: var(--mint);
+  color: var(--sage-dark);
+  box-shadow: none;
+}
+
+#stage.mode-portrait .cabin-ctx .ctx-mod .ctx-act:hover {
+  background: var(--ok-bg, #dcefdc);
+}
+
+#stage.mode-portrait .cabin-ctx .ctx-mod .ctx-act.danger {
+  background: var(--danger-bg);
+  border-color: rgba(217, 87, 69, .28);
+  color: var(--danger);
+}
+
+#stage.mode-portrait .cabin-ctx .ctx-mod .ctx-act .ic {
+  width: 16px;
+  height: 16px;
+  flex: none;
+}
+
+/* 双按钮行：各自内容宽，并排不撑满，居上 */
+#stage.mode-portrait .cabin-ctx .ctx-mod .ctx-btn-row {
+  margin-top: 2px;
+  flex-wrap: wrap;
+  gap: 6px;
+  width: auto;
+  max-width: 100%;
+  justify-content: flex-start;
+  align-self: flex-start;
+}
+
+#stage.mode-portrait .cabin-ctx .ctx-mod .ctx-btn-row .btn {
+  flex: none;
+  width: auto;
+  min-height: 32px;
+  height: 32px;
+  padding: 0 12px;
+  border-radius: 8px;
+  font-size: 15px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+#stage.mode-portrait .cabin-ctx .ctx-mod .ctx-timer-face {
+  font-size: 32px;
+}
+
+#stage.mode-portrait .cabin-ctx .ctx-mod .progress {
+  height: 8px;
+  flex: none;
+}
+
+#stage.mode-portrait .cabin-ctx .ctx-mod .ctx-path {
+  word-break: break-all;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+/* 对话/Agent：长文换行，避免被吞 */
+#stage.mode-portrait .cabin-ctx .ctx-mod .ctx-card {
+  min-width: 0;
+  max-width: 100%;
+}
+
+#stage.mode-portrait .cabin-ctx .ctx-mod .ctx-card-text,
+#stage.mode-portrait .cabin-ctx .ctx-mod .ctx-card > div:not(.ctx-sub) {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: 1.35;
+  min-width: 0;
+}
+
+#stage.mode-portrait .cabin-ctx .ctx-mod .ctx-steps {
+  min-width: 0;
+  gap: 6px;
+}
+
+#stage.mode-portrait .cabin-ctx .ctx-mod .ctx-step {
+  flex-wrap: wrap;
+  align-items: flex-start;
+  white-space: normal;
+  line-height: 1.35;
+  min-width: 0;
+}
+
+#stage.mode-portrait .cabin-ctx .ctx-mod .ctx-step > span:last-child,
+#stage.mode-portrait .cabin-ctx .ctx-mod .ctx-step {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+#stage.mode-portrait .cabin-ctx .ctx-mod .ctx-voice-state {
+  flex-wrap: wrap;
+  white-space: normal;
+  font-size: var(--fs-body);
+  line-height: 1.3;
+}
+
+/* 确认模块：kv 在上、按钮紧跟（不要把按钮顶到底） */
+#stage.mode-portrait .cabin-ctx .ctx-mod-body {
+  justify-content: flex-start;
+}
+
+/* 系统页竖屏：无右侧大按钮，左列撑满 */
+#stage.mode-portrait #cabin.cabin-system {
+  flex-direction: row;
+}
+
+#stage.mode-portrait #cabin.cabin-system .cabin-p-main {
+  flex: 1;
+}
+
+#stage.mode-portrait #cabin.cabin-system > .cabin-p-bar {
+  /* standby 仅状态卡 */
+  flex: 1;
+  align-self: stretch;
+}

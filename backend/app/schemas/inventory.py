@@ -13,7 +13,7 @@ from app.schemas.common import CamelModel, JsonDict
 
 
 class InventoryItemSchema(CamelModel):
-    """库存条目：zone/slot 是 ui-reference 引入的结构化位置；location 仍保留为可读文本。"""
+    """库存条目：zone_id/layer_id/cell 是 P4 三级位置，zone/slot 保留兼容旧客户端。"""
 
     id: UUID
     name: str
@@ -22,6 +22,9 @@ class InventoryItemSchema(CamelModel):
     unit: str
     zone: str | None = None
     slot: str | None = None
+    zone_id: str | None = None
+    layer_id: str | None = None
+    cell: int | None = Field(default=None, ge=0, le=8)
     location: str | None = None
     expire_date: date | None = None
     status: str
@@ -63,6 +66,9 @@ class InventoryUpdateRequest(CamelModel):
     unit: str = Field(default="份", min_length=1, max_length=24)
     zone: str | None = Field(default=None, max_length=32)
     slot: str | None = Field(default=None, max_length=8)
+    zone_id: str | None = Field(default=None, max_length=32)
+    layer_id: str | None = Field(default=None, max_length=32)
+    cell: int | None = Field(default=None, ge=0, le=8)
     location: str | None = Field(default=None, max_length=80)
     expire_date: date | None = None
     status: str = Field(default="active", max_length=32)
@@ -80,6 +86,9 @@ class InventoryPatchRequest(CamelModel):
     unit: str | None = Field(default=None, min_length=1, max_length=24)
     zone: str | None = Field(default=None, max_length=32)
     slot: str | None = Field(default=None, max_length=8)
+    zone_id: str | None = Field(default=None, max_length=32)
+    layer_id: str | None = Field(default=None, max_length=32)
+    cell: int | None = Field(default=None, ge=0, le=8)
     location: str | None = Field(default=None, max_length=80)
     expire_date: date | None = None
     status: str | None = Field(default=None, max_length=32)

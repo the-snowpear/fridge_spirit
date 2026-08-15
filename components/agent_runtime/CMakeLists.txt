@@ -1,0 +1,21 @@
+idf_component_register(
+    SRCS
+        "src/agent_runtime.c"
+        "src/agent_tts.c"
+    INCLUDE_DIRS "include"
+    REQUIRES
+        tool_system
+        trace_service
+        agent_storage
+        skill_manager
+        ai_client
+        codec_es8311
+        network
+        esp_http_client
+        mbedtls
+        nvs_flash
+        esp_timer
+        cjson
+        freertos
+        heap
+)

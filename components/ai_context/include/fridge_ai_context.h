@@ -19,7 +19,6 @@ typedef struct {
     char task_type[FRIDGE_AI_CONTEXT_MAX_TASK_LEN + 1];
     char user_text[FRIDGE_AI_CONTEXT_MAX_TEXT_LEN + 1];
     bool include_inventory;
-    bool include_memory;
     bool include_reminders;
     bool include_preferences;
 } fridge_ai_task_request_t;

@@ -204,6 +204,26 @@
   margin-top: var(--space-2);
 }
 
+/* 第二级层选择保持轻量列表，层级确认后才进入固定九宫格。 */
+.place-layer-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+}
+
+.place-layer {
+  padding: var(--space-4);
+  border: 2rpx solid var(--color-line);
+  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.66);
+}
+
+.place-layer.is-selected {
+  border-color: var(--color-sage-dark);
+  background: rgba(234, 245, 223, 0.72);
+}
+
 .place-action {
   flex: 1;
   min-width: 0;

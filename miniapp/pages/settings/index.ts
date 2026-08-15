@@ -1,9 +1,9 @@
 /**
  * 设置页：4 个分组
  *   1) API 地址：baseUrl / mock 兜底开关 → 本地 storage；
- *   2) 隐私偏好：3 个开关 → PUT /settings（privacy 字段）；
- *   3) AI 配置：apiBaseUrl / model / systemPrompt / timeoutMs / apiKey → POST /ai/config（经后端映射到设备 NVS）；
- *   4) 设备操作：刷新冰箱（POST /inventory/refresh）+ 解绑（本期占位，未真正实现）。
+ *   2) 隐私偏好：3 个开关 → v2 device_settings 实体；
+ *   3) AI 配置：通过 PUT /agent-config 在线更新，Key 不进入本地缓存；
+ *   4) 设备操作：刷新冰箱（POST /inventory/refresh）。
  */
 
 import type { MiniAppInstance } from "../../app";
@@ -17,7 +17,6 @@ import {
   updateSettings,
 } from "../../services/api";
 import {
-  enqueueSyncOp,
   getLocalSyncState,
   getSyncQueue,
   refreshSyncStatus,
@@ -146,6 +145,16 @@ Page({
     syncDirtyText: "无",
     syncLastText: "尚未同步",
     syncErrorText: "",
+
+    /** 设备上报的同步设置，只读展示；修改仍应由设备端权限链执行。 */
+    deviceSettingsAvailable: false,
+    deviceSettingsSn: "",
+    deviceSettingsTimezone: "未同步",
+    deviceSettingsLocale: "未同步",
+    deviceSettingsVolume: "—",
+    deviceSettingsBrightness: "—",
+    deviceSettingsReminder: "未同步",
+    deviceSettingsVoice: "未同步",
   },
 
   async onShow() {
@@ -197,11 +206,6 @@ Page({
     };
     const app = getApp<MiniAppInstance["globalData"]>() as unknown as MiniAppInstance;
     app.setApiConfig(config);
-    enqueueSyncOp("settings", "api_config_update", {
-      baseUrl: config.baseUrl,
-      timeoutMs: config.timeoutMs,
-      mockEnabled: config.mockEnabled,
-    });
     this.refreshLocalSyncView();
     wx.showToast({ title: "API 已更新", icon: "success" });
   },
@@ -220,6 +224,29 @@ Page({
         privacy: next,
         reminderLeadDays: String(prefs.reminderLeadDays ?? "3"),
         lowStockThreshold: String(prefs.lowStockThreshold ?? "1"),
+        deviceSettingsAvailable:
+          data.volumePercent != null ||
+          data.brightnessPercent != null ||
+          !!data.deviceSn,
+        deviceSettingsSn: data.deviceSn || "",
+        deviceSettingsTimezone: data.timezone || "未同步",
+        deviceSettingsLocale: data.locale || "未同步",
+        deviceSettingsVolume:
+          data.volumePercent == null ? "—" : `${data.volumePercent}%`,
+        deviceSettingsBrightness:
+          data.brightnessPercent == null ? "—" : `${data.brightnessPercent}%`,
+        deviceSettingsReminder:
+          data.reminderEnabled == null
+            ? "未同步"
+            : data.reminderEnabled
+              ? "已开启"
+              : "已关闭",
+        deviceSettingsVoice:
+          data.agentVoiceEnabled == null
+            ? "未同步"
+            : data.agentVoiceEnabled
+              ? "已开启"
+              : "已关闭",
       });
       setStorage("privacySettings", next);
     } catch {
@@ -248,7 +275,7 @@ Page({
       void this.trySyncQuietly();
       wx.showToast({ title: "隐私已同步", icon: "success" });
     } catch {
-      enqueueSyncOp("settings", "privacy_update_pending", { privacy: this.data.privacy });
+      // updateSettings 在发请求前已把同一个稳定 eventId 写入 v2 outbox。
       this.refreshLocalSyncView();
       wx.showToast({ title: "已保存到本地", icon: "none" });
     } finally {
@@ -277,12 +304,7 @@ Page({
       void this.trySyncQuietly();
       wx.showToast({ title: "提醒偏好已保存", icon: "success" });
     } catch {
-      enqueueSyncOp("settings", "preferences_update_pending", {
-        preferences: {
-          reminderLeadDays: parseInt(this.data.reminderLeadDays, 10) || 3,
-          lowStockThreshold: parseInt(this.data.lowStockThreshold, 10) || 1,
-        },
-      });
+      // updateSettings 已持久化待发送事件，避免再生成第二个 eventId。
       this.refreshLocalSyncView();
       wx.showToast({ title: "保存失败", icon: "none" });
     } finally {
@@ -309,11 +331,6 @@ Page({
           allowReminderPush: this.data.privacy.allowReminderPush,
           source: "miniapp-settings",
         },
-      });
-      enqueueSyncOp("settings", "notification_subscribe", {
-        channel: "wechat",
-        target,
-        allowReminderPush: this.data.privacy.allowReminderPush,
       });
       this.refreshLocalSyncView();
       void this.trySyncQuietly();
@@ -458,7 +475,7 @@ Page({
       void this.trySyncQuietly();
       wx.showToast({ title: "AI 配置已同步", icon: "success" });
     } catch (err) {
-      enqueueSyncOp("ai_config", "update_pending", this.buildAiSyncPayload(payload));
+      // AI/ASR/TTS Key 只允许在线 PUT；失败时绝不写 storage 或 outbox。
       this.refreshLocalSyncView();
       const message =
         err instanceof RequestError ? err.message : "保存失败";
@@ -556,7 +573,7 @@ Page({
       void this.trySyncQuietly();
       wx.showToast({ title: successTitle, icon: "success" });
     } catch {
-      enqueueSyncOp("fridge_zones", "replace_pending", { zones });
+      // saveFridgeZonesToCloud 内部的 updateSettings 已保留 v2 outbox。
       this.refreshLocalSyncView();
       wx.showToast({ title: "已保存本地，云端待同步", icon: "none" });
     } finally {
@@ -636,18 +653,6 @@ Page({
     } finally {
       this.refreshLocalSyncView();
     }
-  },
-
-  /**
-   * 构造进入同步队列的 AI 配置 payload。
-   *
-   * 比赛 demo 链路下允许把明文 apiKey/asrApiKey/ttsApiKey 放进同步队列，
-   * 这样离线保存/清除 Key 在恢复网络后也能真正写到后端（否则只发标记位、后端无从落地）。
-   * 安全权衡：Key 会进小程序本地 syncQueue 与后端 sync_events.payload；仅适用于受控比赛环境，
-   * 公开部署需改为加密通道。附带 configUpdatedAt 供后端做 last-write-wins。
-   */
-  buildAiSyncPayload(payload: AiConfigUpdateRequest): Record<string, unknown> {
-    return { ...payload, configUpdatedAt: Date.now() };
   },
 
   async onAddZone() {

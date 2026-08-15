@@ -8,6 +8,7 @@ import type {
 
 export type MessageHandler = (message: DeviceMessage) => void;
 export type LogHandler = (level: LogLevel, message: string, source?: string) => void;
+export type ConnectionLostHandler = (reason: Error) => void;
 
 export interface DeviceTransport {
   connect(): Promise<void>;
@@ -18,12 +19,14 @@ export interface DeviceTransport {
   ): Promise<DeviceResponse<TPayload>>;
   onMessage(callback: MessageHandler): () => void;
   onLog(callback: LogHandler): () => void;
+  onConnectionLost(callback: ConnectionLostHandler): () => void;
 }
 
 // 轻量事件基类：两种传输层都需要消息和日志订阅。
 export abstract class BaseTransport implements DeviceTransport {
   protected messageHandlers = new Set<MessageHandler>();
   protected logHandlers = new Set<LogHandler>();
+  protected connectionLostHandlers = new Set<ConnectionLostHandler>();
 
   abstract connect(): Promise<void>;
   abstract disconnect(): Promise<void>;
@@ -40,6 +43,11 @@ export abstract class BaseTransport implements DeviceTransport {
   onLog(callback: LogHandler) {
     this.logHandlers.add(callback);
     return () => this.logHandlers.delete(callback);
+  }
+
+  onConnectionLost(callback: ConnectionLostHandler) {
+    this.connectionLostHandlers.add(callback);
+    return () => this.connectionLostHandlers.delete(callback);
   }
 
   protected emitMessage(message: DeviceMessage) {
@@ -62,5 +70,9 @@ export abstract class BaseTransport implements DeviceTransport {
 
   protected emitLog(level: LogLevel, message: string, source = "transport") {
     this.logHandlers.forEach((handler) => handler(level, message, source));
+  }
+
+  protected emitConnectionLost(reason: Error) {
+    this.connectionLostHandlers.forEach((handler) => handler(reason));
   }
 }

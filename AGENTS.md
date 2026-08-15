@@ -113,7 +113,7 @@
 
 ### 传感和交互外设
 
-- 光照传感器：BH1750 或光敏电阻模块，用于辅助判断开门光照突变。**P4 的 ADC 通道与 S3 不同，光敏模块的 ADC 引脚必须查 P4 数据手册重新指定，不得沿用 S3 的 GPIO1。**
+- 光照传感器：BH1750 或光敏电阻模块，用于辅助判断开门光照突变。**P4 的 ADC 通道与 S3 不同，光敏模块的 ADC 引脚必须查 P4 数据手册重新指定，不得沿用 S3 的 GPIO1。** 当前接入的三针光敏模块使用 GPIO19（ADC1_CH3），VCC=3.3V、GND 共地、AO 接 GPIO19；实机确认 `lightValue10bit`/兼容字段 `lux` 为 0–1023 的相对读数，**数值越小越亮、越大越暗**，不是物理 lux。当前安装位置可用 `lightValue10bit >= 600` 判定关灯；该阈值只适用于当前模块/安装位置，调整位置或供电后必须重新实测。
 - IMU：MPU6050 或 ICM-42688，用于检测门体姿态变化和震动；I2C 引脚在 P4 板上重新排（注意避开 GPIO28/29 共享总线的摄像头/编解码器冲突，必要时用 GPIO 矩阵另开一路 I2C）。
 - 人体存在毫米波雷达：HLK 24GHz UART 模块，UART 引脚在 P4 板引出 IO 中重新排。
 - 音频输入/输出（2026-07-02 用户决定）：**优先使用板载方案**——驻极体 MIC + ES8311（采集）和 ES8311 + NS4150B 功放 + Speaker 端子（播放）；ES8311 的 I2S 在 GPIO2-6，功放使能 `PA_CTRL`=GPIO11。同时**保留外接 INMP441 / MAX98357A 的能力**（走引出 IO），作为板载方案异常时的回退。
@@ -250,6 +250,13 @@ static void fridge_state_update(const sensor_event_t *event)
 - Wi-Fi 峰值和背光开启时电源稳定。
 - Flash/LittleFS 写入后断电重启数据不损坏。
 
+### LVGL 滚动区点击保护
+
+- 主滚动区内的按钮、卡片和工具入口不得直接把 `LV_EVENT_CLICKED` 视为有效操作。
+- 必须在控件 `PRESSED/PRESSING` 阶段记录触摸起点，任一方向位移达到 8px 即永久标记为拖动；后续出现 `PRESS_LOST`、`SCROLL_BEGIN` 或 `SCROLL` 时也必须取消本次点击候选，滚动结束不得补发业务动作。
+- GT911 的 `0x814E` 数据就绪位未置位只表示本轮没有新数据，驱动必须保持上一次按压状态；只有“数据就绪且触点数为 0”才上报真实释放，禁止在 UI 层用 220～300ms 固定延迟掩盖假释放。
+- 未发生有效位移且释放点仍满足 LVGL 点击条件时，应在真实抬手后立即转发页面跳转或业务回调；固定顶栏、导航和不在滚动容器内的状态舱按钮保持即时点击。所有新增滚动容器都必须接入同一套手势保护。
+
 建议记录关键测试结果到后续测试文档，尤其是接线版本、GPIO 表、供电方式和异常日志。
 
 ## 本项目 ESP-IDF 构建、烧录与串口调试经验
@@ -265,13 +272,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\idf.ps1 build
 推荐烧录命令：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File tools\idf.ps1 -p COM15 flash
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\idf.ps1 -p COM17 flash
 ```
 
 目标芯片与串口：
 
 - 目标芯片为 `esp32p4`；首次移植时需 `tools\\idf.ps1 set-target esp32p4` 并按新 `sdkconfig.defaults` 重建配置，不要沿用 S3 生成的 `sdkconfig`。
-- **P4 板串口已确认是 `COM15`**（USB VID `1A86:55D3` 的 CH343P）；旧的 `COM16` 只属于 S3。COM15 用于烧录、monitor 和 JSON Lines 调试，另一个 USB-C 口是 JTAG。烧录默认配置已固定 `ESPTOOLPY_NO_STUB=y`，不要改回 RAM stub。
+- **当前截屏实机使用 `COM17`**（P4 USB-Serial/JTAG，2026-07-23 已验证）；`COM15` 是较早 CH343P 记录，不能覆盖当前端口判断。端口号变化时先按 Windows 实际枚举替换，不要盲试多个 COM 口。烧录默认配置已固定 `ESPTOOLPY_NO_STUB=y`，不要改回 RAM stub。
 - 打开串口或烧录后开发板可能复位一次，这是正常现象；调试脚本应等待 Wi-Fi/SNTP 稳定后再发网络或 AI 请求。
 - 串口可能被浏览器 Web Serial、ESP-IDF monitor、VS Code Serial Monitor 或其他串口助手占用；如果打开失败，先关闭占用端口的程序，不要反复重试烧录。杀残留进程时只杀命令行明确包含目标 COM 口且为 `idf_monitor` / `idf.py monitor` 的进程。
 
@@ -283,6 +290,61 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\idf.ps1 -p COM15 flash
 - AI 请求可能耗时 10 秒以上，`ai_assistant_chat`、`test_ai_chat`、`scan_wifi`、`set_network` 等命令需要较长超时，建议至少 `90-130` 秒。
 - API Key 不得写入日志、串口响应或调试输出；调试 AI 只记录 HTTP 状态、响应长度、耗时、任务类型和 history 条数。
 - 真实 API 二轮对话回归至少验证：第一轮无 history 返回 `HTTP 200`，第二轮带最近 user/assistant history 仍返回 `HTTP 200`，并确认模型没有看到被截断或乱码的问题。
+
+P4 页面切换调试：
+
+- Codex 可以通过 USB `tool_call` 直接调用已注册的 `ui.switch_page` Tool 切换页面；请求格式为 `{"command":"tool_call","request_id":"<唯一ID>","tool":"ui.switch_page","arguments":{"page":"<页面键>"}}`，页面键以固件 `ui_p4` 当前注册表为准，常用值包括 `home`、`more`、`timer`、`alarm`、`stopwatch`、`camera`、`plan`、`chat`。发送前确保 COM17 没有被 Web Serial、monitor 或其他串口工具占用，并使用 `DTR=false、RTS=true`；响应中 `ok=true`、`payload.status="ok"` 且 `payload.data.queued=true` 只表示页面切换请求已入队，不能当作画面已经稳定。
+
+## Codex/AI 实屏截屏标准流程
+
+当任务需要查看当前 P4 屏幕、核对 LVGL 页面或调整 UI 时，**必须优先使用项目根目录固定入口**，不要重新设计串口协议、只发送截屏而不读回，也不要绕到桌面截图：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\capture_screenshot.ps1
+```
+
+这条命令必须从项目根目录执行，默认使用 `COM17`、115200 baud 和项目 IDF Python 环境，自动完成：
+
+```text
+screenshot_capture
+  -> tf_transfer_begin(direction=read)
+  -> 循环 tf_transfer_chunk（CRC32）
+  -> tf_transfer_end
+  -> 保存本地 JPEG/BMP
+```
+
+该入口内部调用 `tmp\tools\test_screenshot.py`，但协作者不应绕过根入口自行拼接协议。
+
+### 截图硬性前置条件（不可绕过）
+
+- 截屏脚本会等待本次串口会话收到 JSON `{"event":"ready"}`；超时必须硬失败，不能继续切页、查询 UI 或截屏。设备刚复位、烧录或 USB 重连后，`ready` 只是启动协议就绪，不代表 TF 字体、图标和页面已经稳定。
+- 只要串口仍处于 `booting`、TF 卡初始化/挂载、屏幕初始化、FreeType/字体加载、网络初始化或其他启动日志阶段，**禁止执行 `screenshot_capture`、`tf_transfer_begin` 或任何截图操作**。固定等待 8 秒也不再视为有效同步方法。
+- 如需特定页面图片，脚本必须按顺序完成：`ready` → 顶层 `tool_call` 调用 `ui.switch_page` → 确认 `ok=true`、`payload.status="ok"`、`payload.data.queued=true` → 轮询 `ui_status` → 只发送一次 `screenshot_capture` → TF 分块读回。
+- `ui_status` 的四个稳定条件必须同时为 true：`ready`、`resourceReady`、`framebuffersSynced`、`pageFrameReady`；指定页面时还必须满足 `page` 等于目标键，并连续两次查询满足条件。`ready` 不等于 `resourceReady`，不能只看到 ready 就截屏。
+- 任意一次重置、掉线、串口重开或发现启动日志重新出现，均须重新等待本次会话的 `ready`，不能沿用上一次的就绪状态。
+
+1. 先让 WebUI、ESP-IDF monitor、串口助手等释放 `COM17`；同一时刻只能有一个串口读者。
+2. 执行上面的 PowerShell 命令。需要指定页面、端口或输出基名时，例如：
+
+   ```powershell
+   powershell -NoProfile -ExecutionPolicy Bypass -File tools\capture_screenshot.ps1 -Port COM17 -Page more -Output tmp\cache\screenshot_test\codex_latest
+   ```
+
+3. 只接受命令最后一行机器 JSON：`ok` 必须为 `true`，`local_path` 是最终本地图像路径，`format` 为 `jpeg` 或 `bmp`，`bytes` 必须大于 0。脚本失败时不得把中间日志或旧图片当作成功结果。
+4. 直接使用本地图片读取能力（`view_image`）打开 `local_path`，再基于真实画面讨论或修改 UI。默认输出为 `tmp\cache\screenshot_test\codex_latest.jpg`；摄像头占用 JPEG 编码器或内部 DMA 连续空间不足时会安全降级为 `.bmp`，这是预期降级，不是失败。
+
+串口控制线是 P4 的已验证约束：脚本打开 USB-Serial/JTAG 时使用 `DTR=false、RTS=true`。不要为了“避免复位”把 RTS 改成 false；实测 RTS 为 false 时端口能打开但固件收不到命令。脚本已自动选择 IDF Python 环境，不要优先改用系统 Python 安装依赖。
+
+只有固定入口失败时才按以下顺序排查：
+
+- `ok:false` 或端口打开失败：确认 WebUI/monitor 已断开、实际端口仍为 COM17；不要反复重试或杀不明确的进程。
+- 无响应或未看到 `ready`：确认 `DTR=false、RTS=true`，并确认没有第二个串口读者；不要直接继续 `screenshot_capture`，先重新打开串口等待本次 `ready`。
+- UI 稳定超时：检查 `ui_status` 是否一直卡在 `resourceReady=false`、`framebuffersSynced=false` 或 `pageFrameReady=false`；不要把固定延时改成更短的“经验值”，也不要发送第二次截图碰运气。
+- `ESP_ERR_INVALID_STATE`：检查 UI 四项稳定状态、屏幕初始化、TF 卡挂载和 `.fridge_spirit/exports/` 目录。
+- `ESP_ERR_NO_MEM`：停止摄像头预览或释放大块 PSRAM。
+- `screenshot_capture` 不支持：才检查固件是否为包含 `components/screenshot` 的当前 P4 镜像，必要时再按固定 IDF 5.5.1 流程构建/烧录；正常 UI 调整不需要每次重刷固件。
+
+手动协议仅用于定位脚本故障，顺序必须是 `ready` → 可选 `tool_call(ui.switch_page)` → `ui_status` 稳定门 → `screenshot_capture` → `tf_transfer_begin` → 多次 `tf_transfer_chunk` → `tf_transfer_end`；任何异常发送 `tf_transfer_abort`。完整说明以 `doc/screenshot.md`、`doc/screenshot_quickstart.md` 和 `doc/screenshot_implementation.md` 为准。
 
 ## 给后续 AI/协作者的提醒
 

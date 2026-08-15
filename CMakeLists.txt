@@ -13,6 +13,12 @@ set(COMPONENTS main)
 option(FRIDGE_RECOVERY_BUILD "Build the small ota_1 local recovery firmware profile" OFF)
 option(FRIDGE_MIPI_TEST_BUILD "Build the isolated WKS70WSV114-WCT MIPI-DSI test profile" OFF)
 
+# recovery 在组件发现阶段就排除 UI/字体/输入法，避免组件管理器解析并下载
+# LVGL/FreeType，也保证 ota_1 的构建图不会意外带入大 UI 链路。
+if(FRIDGE_RECOVERY_BUILD)
+    set(EXCLUDE_COMPONENTS ui ui_p4 font_manager ime display_mipi touch)
+endif()
+
 # MIPI 独立点屏不使用任何 managed component。必须在加载 project.cmake 前关闭管理器，
 # 否则现有 dependencies.lock 会把 esp_hosted/ESP-SR whole-archive 链入测试镜像并在 app_main 前启动。
 if(FRIDGE_MIPI_TEST_BUILD)

@@ -9,8 +9,14 @@
  * 历史保存：后端按 sessionId 持久化；设备端短期历史后续通过 MQTT TODO 合并。
  */
 
-import { clearAiChatHistory, getAiChatHistory, sendAiChat } from "../../services/api";
-import type { AiChatMessage } from "../../types/models";
+import {
+  clearAiChatHistory,
+  getAgentSessions,
+  getAiChatHistory,
+  getSyncedAgentSessionHistory,
+  sendAiChat,
+} from "../../services/api";
+import type { AgentSessionSummary, AiChatMessage } from "../../types/models";
 import { RequestError } from "../../utils/request";
 
 const DEFAULT_SESSION_ID = "miniapp-default";
@@ -29,13 +35,41 @@ Page({
     sending: false,
     loadingHistory: false,
     sessionId: DEFAULT_SESSION_ID,
+    sessions: [] as AgentSessionSummary[],
     messages: [] as AiChatMessage[],
     scrollIntoView: "" as string,
     placeholder: "今晚做什么菜？哪些临期？",
   },
 
   async onLoad() {
+    await this.loadSessions();
     await this.loadHistory();
+  },
+
+  async loadSessions() {
+    try {
+      const sessions = await getAgentSessions();
+      const selected =
+        sessions.find((item) => item.sessionId === this.data.sessionId) || sessions[0];
+      this.setData({
+        sessions,
+        sessionId: selected?.sessionId || this.data.sessionId,
+      });
+    } catch {
+      // 当前会话仍可通过专用历史接口加载。
+    }
+  },
+
+  async onTapSession(event: WechatMiniprogram.BaseEvent) {
+    const sessionId = String(event.currentTarget.dataset.session || "");
+    if (!sessionId || sessionId === this.data.sessionId || this.data.sending) return;
+    this.setData({ sessionId, messages: [] });
+    await this.loadHistory();
+  },
+
+  onCloudSyncApplied() {
+    if (this.data.sending || this.data.loadingHistory) return;
+    void this.loadSessions().then(() => this.loadHistory());
   },
 
   makeIntro(): AiChatMessage {
@@ -55,7 +89,11 @@ Page({
     this.setData({ loadingHistory: true });
     try {
       const history = await getAiChatHistory(this.data.sessionId);
-      const messages = (history.messages || [])
+      const effectiveHistory =
+        history.messages?.length
+          ? history
+          : await getSyncedAgentSessionHistory(this.data.sessionId);
+      const messages = (effectiveHistory.messages || [])
         .filter((message) => message.role === "user" || message.role === "assistant")
         .map((message) => ({
           id: `hist_${message.id.replace(/[^A-Za-z0-9_-]/g, "_")}`,
@@ -72,7 +110,7 @@ Page({
         }));
       const next = messages.length ? messages : [this.makeIntro()];
       this.setData({
-        sessionId: history.sessionId || this.data.sessionId,
+        sessionId: effectiveHistory.sessionId || this.data.sessionId,
         messages: next,
         scrollIntoView: next[next.length - 1]?.id || "",
       });

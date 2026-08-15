@@ -1,0 +1,181 @@
+/* ==================================================================
+ * 冰箱小精灵 ver2 —— 首页模块独有布局（HOME-01 / HOME-02）
+ * 注意：主区 704×600，内容易超高/超宽；统一 scroll + min-width:0 防挤出。
+ * ================================================================== */
+
+/* HOME-01 滚动体：统计 + 双栏 + 建议 + 摘要 全部在一个滚动区 */
+.home-scroll {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  padding-bottom: var(--sp-2);
+}
+
+/* HOME-01：统计卡行（4 列均分；略压缩高度让首屏多露内容） */
+.home-stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--sp-2);
+  flex: none;
+}
+
+/* 竖屏主区宽 600：统计改 2×2，避免四列过窄 */
+#stage.mode-portrait .home-stats {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.home-stats .stat-card {
+  min-height: 84px;
+  padding: var(--sp-2) var(--sp-3);
+  min-width: 0;
+}
+.home-stats .sc-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+/* HOME-01：双栏（临期优先 | 今日推荐）；minmax(0,1fr) 防止子项 min-content 撑破 */
+.home-cols {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+  gap: var(--sp-3);
+  align-items: start;
+  min-width: 0;
+}
+
+/* 竖屏：双栏改单列堆叠，保证可读与触控 */
+#stage.mode-portrait .home-cols {
+  grid-template-columns: minmax(0, 1fr);
+}
+.home-cols > .card {
+  min-width: 0;
+  overflow: hidden;
+  padding: var(--sp-3);
+}
+.home-cols .card-head {
+  gap: var(--sp-2);
+  min-width: 0;
+}
+.home-cols .card-title { flex: none; }
+.home-cols .card-side {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  justify-content: flex-end;
+}
+.home-exp .card-body { gap: var(--sp-2); min-width: 0; }
+.home-exp .list-row,
+.home-exp .food-row { min-width: 0; }
+.home-exp .lr-main { min-width: 0; }
+.home-exp .lr-sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 今日推荐：菜谱卡缩略图略小，适配窄列 */
+.home-rec .recipe-card { min-width: 0; }
+.home-rec .recipe-card .img-ph { width: 72px; height: 72px; flex: none; }
+.home-rec .rcp-main { min-width: 0; }
+.home-rec .rcp-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 副文允许两行，避免「15分钟·简单·库存覆盖90%」被裁成无意义省略 */
+.home-rec .rcp-sub {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  white-space: normal;
+  line-height: 1.35;
+}
+
+.home-why {
+  display: flex; gap: 8px; align-items: flex-start;
+  background: var(--cream); border-radius: var(--r-m);
+  padding: var(--sp-2) var(--sp-3);
+  font-size: var(--fs-cap); color: var(--muted); line-height: 1.45;
+}
+.home-why .ic { flex: none; color: var(--sage-dark); margin-top: 2px; }
+/* 窄列并排：禁止中文拆字；sm 高度 + nowrap，两钮并排可塞进右栏 */
+.home-rec-btns {
+  display: flex;
+  flex-direction: row;
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
+  min-width: 0;
+}
+.home-rec-btns .btn {
+  flex: 1 1 0;
+  min-width: 0;
+  white-space: nowrap;
+  padding-left: var(--sp-2);
+  padding-right: var(--sp-2);
+}
+
+/* Agent 建议卡 */
+.home-tips .card-body { gap: var(--sp-2); }
+.home-tips { min-width: 0; }
+.tip-card {
+  display: flex; align-items: center; gap: var(--sp-3);
+  background: var(--cream); border-radius: var(--r-m);
+  padding: var(--sp-3);
+  min-width: 0;
+}
+.tip-icon {
+  width: 36px; height: 36px; flex: none;
+  border-radius: 50%; background: var(--mint); color: var(--sage-dark);
+  display: flex; align-items: center; justify-content: center;
+}
+.tip-text {
+  flex: 1; min-width: 0;
+  font-size: var(--fs-cap); line-height: 1.45;
+}
+
+/* 菜单/购物摘要小卡 */
+.home-mini {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: var(--sp-3);
+  min-width: 0;
+}
+.mini-card {
+  display: flex; align-items: center; gap: var(--sp-3);
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-m);
+  padding: var(--sp-3);
+  cursor: pointer;
+  min-height: 64px;
+  min-width: 0;
+  overflow: hidden;
+}
+.mini-card:hover { background: var(--cream); }
+.mini-card > .ic { color: var(--sage-dark); flex: none; }
+.mini-card .lr-arrow { margin-left: auto; flex: none; }
+.mini-card > div:not(.ic) { min-width: 0; flex: 1; }
+.mini-title { font-size: var(--fs-body); font-weight: 600; }
+.mini-sub {
+  font-size: var(--fs-cap); color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* 最近同步行 */
+.sync-line {
+  display: flex; align-items: center; gap: 4px; padding: 0 4px;
+  min-width: 0;
+}
+.sync-line .sd-label {
+  font-size: var(--fs-cap); color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  min-width: 0;
+}
+
+/* HOME-02：分组食材列表 */
+.food-group { display: flex; flex-direction: column; gap: var(--sp-2); }
+
+/* HOME-02：批量加购按钮行 */
+.home-add-all { margin-top: var(--sp-2); }

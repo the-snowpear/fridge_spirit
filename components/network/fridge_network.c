@@ -810,6 +810,47 @@ esp_err_t fridge_network_connect(const fridge_wifi_config_t *config, bool save)
     return ESP_ERR_TIMEOUT;
 }
 
+esp_err_t fridge_network_save_config(const fridge_wifi_config_t *config)
+{
+    ESP_RETURN_ON_FALSE(config, ESP_ERR_INVALID_ARG, TAG, "config is NULL");
+    ESP_RETURN_ON_FALSE(config->ssid[0] != '\0', ESP_ERR_INVALID_ARG, TAG, "SSID is empty");
+    ESP_RETURN_ON_ERROR(fridge_network_init(), TAG, "network init failed before verified save");
+    ESP_RETURN_ON_FALSE(!s_c6_ota_guard, ESP_ERR_INVALID_STATE, TAG, "C6 OTA maintenance is active");
+    ESP_RETURN_ON_FALSE(s_connect_mutex, ESP_ERR_INVALID_STATE, TAG, "connect mutex is NULL");
+
+    // 与连接流程使用同一把锁，防止在校验/写 NVS 的短窗口被自动重连切换到另一个热点。
+    if (xSemaphoreTake(s_connect_mutex, pdMS_TO_TICKS(WIFI_CONNECT_TIMEOUT_MS)) != pdTRUE) {
+        set_last_error("Wi-Fi 正在连接，暂不能保存凭据");
+        return ESP_ERR_TIMEOUT;
+    }
+
+    esp_err_t err = ESP_ERR_INVALID_STATE;
+    wifi_ap_record_t ap_info = {0};
+    wifi_config_t active_config = {0};
+    if (!s_connected || !s_internet_ready ||
+        esp_wifi_sta_get_ap_info(&ap_info) != ESP_OK ||
+        esp_wifi_get_config(WIFI_IF_STA, &active_config) != ESP_OK ||
+        strncmp((const char *)ap_info.ssid, config->ssid, sizeof(ap_info.ssid)) != 0 ||
+        strncmp((const char *)active_config.sta.ssid, config->ssid, sizeof(active_config.sta.ssid)) != 0 ||
+        strncmp((const char *)active_config.sta.password,
+                config->password,
+                sizeof(active_config.sta.password)) != 0) {
+        set_last_error("Wi-Fi 尚未完成当前凭据的联网验证，未保存配置");
+        goto done;
+    }
+
+    err = save_config(config);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "verified Wi-Fi credential saved for SSID: %s", config->ssid);
+    } else {
+        ESP_LOGE(TAG, "save verified Wi-Fi credential failed: %s", esp_err_to_name(err));
+    }
+
+done:
+    xSemaphoreGive(s_connect_mutex);
+    return err;
+}
+
 esp_err_t fridge_network_connect_saved(void)
 {
     fridge_wifi_config_t config = {0};
@@ -818,6 +859,21 @@ esp_err_t fridge_network_connect_saved(void)
         return ESP_ERR_NOT_FOUND;
     }
     return fridge_network_connect(&config, false);
+}
+
+esp_err_t fridge_network_get_saved_ssid(char *ssid, size_t ssid_size)
+{
+    ESP_RETURN_ON_FALSE(ssid && ssid_size > 0, ESP_ERR_INVALID_ARG, TAG,
+                        "saved SSID output is invalid");
+    ssid[0] = '\0';
+    fridge_wifi_config_t config = {0};
+    esp_err_t err = read_saved_config(&config);
+    if (err == ESP_OK) {
+        strlcpy(ssid, config.ssid, ssid_size);
+    }
+    // 此接口仅向调用方暴露 SSID；读取完成后立即擦除短暂存在的密码副本。
+    memset(&config, 0, sizeof(config));
+    return err;
 }
 
 esp_err_t fridge_network_connect_saved_async(void)

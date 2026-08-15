@@ -1,0 +1,19 @@
+{
+  "description": "查询 TF 权威库存并用简洁中文回答。",
+  "execution_mode": "agent_guided",
+  "max_steps": 3,
+  "name": "库存查询",
+  "optional_tools": [],
+  "required_tools": [
+    "inventory.list"
+  ],
+  "skill_id": "kitchen.inventory_query",
+  "triggers": {
+    "keywords": [
+      "库存",
+      "还有几个",
+      "冰箱里有什么"
+    ]
+  },
+  "version": "1.0.0"
+}

@@ -47,10 +47,30 @@ esp_err_t fridge_codec_es8311_start_input(TickType_t gate_timeout_ticks);
 esp_err_t fridge_codec_es8311_stop_input(void);
 
 // 直接读取 ES8311 输出的 int16 PCM；不执行旧 INMP441 的 32-bit >> 14 转换。
+// RX 与 TX 可并行，stop 会等待正在进行的读写退出后再关闭 codec，禁止上层绕过本接口操作 I2S0。
 esp_err_t fridge_codec_es8311_read(int16_t *samples,
                                    size_t max_samples,
                                    size_t *sample_count,
                                    TickType_t timeout_ticks);
+
+// ---- Realtime 双工扩展（ADC 16k 上行 + DAC 16k 下行）----
+// 成功后持有共享 I2C gate（AUDIO owner）；PA_CTRL 仅在实际写 PCM 时拉高，
+// 停止/失败路径必须强制拉低，防止 NS4150B 爆音或持续导通。
+esp_err_t fridge_codec_es8311_start_duplex(TickType_t gate_timeout_ticks);
+esp_err_t fridge_codec_es8311_stop_duplex(void);
+// timeout_ticks 同时约束 TX 锁等待与 I2S 写入；失败路径会立即关闭 PA。
+esp_err_t fridge_codec_es8311_write(const int16_t *samples,
+                                    size_t sample_count,
+                                    TickType_t timeout_ticks);
+// 立即关闭功放并使能电平回到低；不停止 ADC。
+esp_err_t fridge_codec_es8311_pa_off(void);
+bool fridge_codec_es8311_duplex_active(void);
+
+// 云端 TTS 的单向 DAC 输出。该会话仍独占 GPIO28/29 的 AUDIO gate；摄像头 SCCB
+// 正在访问共享 I2C 时必须等待或失败，禁止抢占。PCM 固定为 16kHz/16-bit/mono。
+esp_err_t fridge_codec_es8311_start_output(TickType_t gate_timeout_ticks);
+esp_err_t fridge_codec_es8311_stop_output(void);
+bool fridge_codec_es8311_output_active(void);
 
 #ifdef __cplusplus
 }

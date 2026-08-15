@@ -1,0 +1,48 @@
+/* ==================================================================
+ * 冰箱小精灵 ver2 —— 页面总览（缩略图墙，设备框之外的预览工具）
+ * 缩略图 = 与设备视图同一渲染函数产出的 1024×600 舞台，scale(0.3125)。
+ * ================================================================== */
+
+#gallery-root { width: 100%; max-width: 1440px; padding: 0 8px 48px; }
+
+.gal-h2 {
+  font-size: 22px; color: var(--sage-dark);
+  margin: 28px 0 12px; padding-bottom: 6px;
+  border-bottom: 2px solid var(--line-strong);
+}
+.gal-h3 { font-size: 17px; color: var(--ink); margin: 18px 0 10px; }
+
+.gal-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
+  gap: 16px;
+}
+
+.gal-thumb { cursor: pointer; }
+.gal-stage {
+  width: 320px; height: 188px;
+  overflow: hidden; position: relative;
+  border: 1px solid var(--line-strong); border-radius: 8px;
+  background: var(--paper);
+  box-shadow: 0 6px 20px rgba(36, 52, 45, .12);
+  transition: transform .16s ease, box-shadow .16s ease;
+}
+.gal-thumb:hover .gal-stage { transform: translateY(-2px); box-shadow: 0 10px 28px rgba(36, 52, 45, .2); }
+.gal-stage-inner {
+  width: 1024px; height: 600px;
+  transform: scale(0.3125); transform-origin: top left;
+  pointer-events: none;
+}
+.gal-stage-inner #shell { display: flex; width: 1024px; height: 600px; }
+.gal-stage-inner #main-area { width: 704px; height: 600px; position: relative; overflow: hidden; background: var(--paper); flex: none; }
+.gal-stage-inner #main-area.sys { width: 776px; }
+.gal-stage-inner #sidenav { width: 72px; height: 600px; flex: none; background: var(--sage-dark); display: flex; flex-direction: column; align-items: center; padding: 12px 0; gap: 8px; }
+.gal-stage-inner #cabin { width: 248px; height: 600px; flex: none; }
+.gal-stage-inner .ovl-root-gal { position: absolute; inset: 0; }
+.gal-stage-inner .ovl-root-gal .ovl-slot { position: absolute; }
+
+.gal-label {
+  margin-top: 6px; font-size: 14px; color: var(--ink); font-weight: 600;
+  display: flex; align-items: baseline; gap: 8px;
+}
+.gal-label span { font-size: 12px; color: var(--muted); font-weight: 400; }

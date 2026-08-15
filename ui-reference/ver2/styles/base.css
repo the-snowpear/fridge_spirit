@@ -1,0 +1,347 @@
+/* ==================================================================
+ * 冰箱小精灵 ver2 —— 基础布局：reset / 预览页骨架 / 设备舞台 / 三栏外壳
+ * 关键规则：设备舞台固定 1024×600，JS 用 transform: scale() 适配窗口；
+ *           舞台内部只用 px，禁止 vw/vh；预览工具栏在设备框之外。
+ * ================================================================== */
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body { height: 100%; }
+
+body {
+  font-family: var(--font);
+  color: var(--ink);
+  /* 设备框外的预览页背景允许用渐变（设备内一律纯色平铺） */
+  background: linear-gradient(135deg, #f4ecdf 0%, #e3ecdf 55%, #dce8e2 100%);
+  overflow: hidden;
+  user-select: none;
+  /* 工具栏高度自适应，视口吃掉剩余高度 */
+  display: flex;
+  flex-direction: column;
+}
+
+button { font-family: inherit; border: none; background: none; cursor: pointer; }
+
+/* ================= 预览工具栏（设备框之外，不属于设备 UI） =================
+ * 三行固定结构，避免 01轻提示 等按钮 wrap 错位：
+ *   行1 导航控制 | 行2 浮层触发（编号网格） | 行3 流程演示
+ * ================================================================== */
+
+#toolbar {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 14px 10px;
+  background: rgba(255, 253, 248, .92);
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+}
+.tb-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+}
+.tb-row.tb-row-wrap { flex-wrap: wrap; }
+.tb-group { display: flex; align-items: center; gap: 4px; flex: none; }
+.tb-label {
+  color: var(--muted);
+  margin-right: 2px;
+  white-space: nowrap;
+  flex: none;
+  font-size: 12px;
+  letter-spacing: 0.02em;
+}
+.tb-sep { width: 1px; height: 20px; background: var(--line-strong); margin: 0 4px; flex: none; }
+
+.tb-btn {
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--ink);
+  font-size: 13px;
+  white-space: nowrap;
+  flex: none;
+}
+.tb-btn:hover { background: var(--cream); }
+.tb-btn.on { background: var(--sage); border-color: var(--sage); color: #fff; }
+.tb-btn.warn-on { background: var(--tomato); border-color: var(--tomato); color: #fff; }
+.tb-btn:disabled { opacity: .4; cursor: default; }
+
+/* 浮层触发按钮：统一编号胶囊，等宽感、对齐整齐 */
+.tb-ovl-grid {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+}
+.tb-btn.tb-ovl {
+  height: 26px;
+  padding: 0 8px;
+  font-size: 12px;
+  font-family: var(--font-mono);
+  letter-spacing: 0;
+}
+.tb-btn.tb-ovl .tb-ovl-num {
+  display: inline-block;
+  min-width: 1.4em;
+  font-weight: 700;
+  color: var(--sage-dark);
+}
+.tb-btn.tb-ovl:hover .tb-ovl-num,
+.tb-btn.tb-ovl.on .tb-ovl-num { color: inherit; }
+.tb-btn.tb-ovl.tb-blocking {
+  border-color: rgba(217, 87, 69, .35);
+  background: #fffaf8;
+}
+
+.tb-flow-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+}
+
+.tb-select {
+  height: 28px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--ink);
+  font-size: 13px;
+  font-family: inherit;
+  padding: 0 6px;
+  max-width: 260px;
+}
+
+.tb-note { color: var(--muted); margin-left: auto; white-space: nowrap; flex: none; }
+
+/* ================= 视口与设备舞台 ================= */
+
+#viewport {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 24px;
+}
+
+/* 舞台包装：JS 按缩放值设置宽高，保证文档流占位正确 */
+#stage-wrap { position: relative; flex: none; }
+
+/* 设备舞台：横屏默认 1024×600；竖屏隐私由 .mode-portrait 覆盖为 600×1024 */
+#stage {
+  width: 1024px;
+  height: 600px;
+  position: relative;
+  overflow: hidden;
+  background: var(--paper);
+  border-radius: 12px;
+  box-shadow: 0 24px 80px rgba(36, 52, 45, .28), 0 0 0 1px rgba(36, 52, 45, .18);
+  transform-origin: top left;
+  font-size: var(--fs-body);
+  line-height: 1.45;
+}
+
+/* ================= 三栏外壳（横屏）：704 主区 + 72 导航 + 248 状态侧舱 ================= */
+
+#shell { display: flex; width: 1024px; height: 600px; }
+
+#main-area {
+  width: 704px;
+  height: 600px;
+  position: relative;
+  overflow: hidden;
+  background: var(--paper);
+  flex: none;
+}
+
+#sidenav {
+  width: 72px;
+  height: 600px;
+  flex: none;
+  background: var(--sage-dark);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 12px 0;
+  gap: 8px;
+}
+
+.nav-item {
+  width: 60px;
+  height: 64px;
+  border-radius: var(--r-m);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  color: rgba(255, 255, 255, .72);
+  font-size: 18px;
+  position: relative;
+  transition: background .16s ease, color .16s ease;
+}
+.nav-item .ic { width: 24px; height: 24px; }
+.nav-item.on { background: rgba(255, 255, 255, .16); color: #fff; }
+.nav-item .nav-badge {
+  position: absolute;
+  top: 6px; right: 8px;
+  min-width: 18px; height: 18px;
+  border-radius: var(--r-pill);
+  background: var(--tomato);
+  color: #fff;
+  font-size: 12px;
+  display: flex; align-items: center; justify-content: center;
+  padding: 0 4px;
+}
+
+/* 系统页模式（SYS-01/02/03）：隐藏 72px 导航，主区扩展到 776px */
+#stage.mode-system #sidenav { display: none; }
+#stage.mode-system #main-area { width: 776px; }
+
+/* ================= 竖屏隐私外壳：上主区 672 + 中导航 64 + 下状态舱 288 = 1024 =================
+ * DOM 顺序仍为 main → nav → cabin；靠 column 实现「功能区上 / 导航中 / 状态舱下」。
+ * 状态舱略增高，避免 CTX 与操作按钮互相挤扁（见 cabin.css 竖屏底舱重设计）。
+ * ================================================================== */
+
+#stage.mode-portrait {
+  width: 600px;
+  height: 1024px;
+}
+
+#stage.mode-portrait #shell {
+  width: 600px;
+  height: 1024px;
+  flex-direction: column;
+}
+
+#stage.mode-portrait #main-area {
+  width: 600px;
+  height: 672px;
+}
+
+/* 中间水平导航条（略压高度，把像素让给主区与状态舱） */
+#stage.mode-portrait #sidenav {
+  width: 600px;
+  height: 64px;
+  flex-direction: row;
+  justify-content: space-around;
+  align-items: center;
+  padding: 0 6px;
+  gap: 2px;
+}
+
+#stage.mode-portrait .nav-item {
+  width: auto;
+  flex: 1;
+  max-width: 112px;
+  height: 56px;
+  gap: 1px;
+  font-size: 15px;
+}
+
+#stage.mode-portrait .nav-item .ic { width: 22px; height: 22px; }
+
+#stage.mode-portrait .nav-item .nav-badge {
+  top: 2px;
+  right: 8px;
+}
+
+/* 系统页：竖屏隐藏导航，主区吃掉 64px → 736 */
+#stage.mode-portrait.mode-system #sidenav { display: none; }
+#stage.mode-portrait.mode-system #main-area {
+  width: 600px;
+  height: 736px;
+}
+
+/* 竖屏：主区内容默认可滚，避免计划等长页被导航/状态舱「切腰」 */
+#stage.mode-portrait .pg-body {
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+
+/* 工具栏：隐私布局按钮/禁用流程按钮弱化 */
+.tb-btn.tb-disabled,
+.tb-btn:disabled {
+  opacity: .45;
+  cursor: not-allowed;
+}
+
+/* OV-10 关键安全告警时：浮层全屏接管（见 overlays.css） */
+
+/* ================= 页面公共骨架 ================= */
+
+/* 高度跟随主区（横 600 / 竖 704），避免竖屏写死 600 留白或裁切 */
+.pg { width: 100%; height: 100%; display: flex; flex-direction: column; }
+
+.pg-head {
+  flex: none;
+  min-height: 64px;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: 10px var(--sp-4) 10px var(--sp-5);
+  border-bottom: 1px solid var(--line);
+  background: var(--paper);
+}
+.pg-title { font-size: var(--fs-sub); font-weight: 600; color: var(--ink); }
+.pg-sub { font-size: var(--fs-cap); color: var(--muted); }
+.pg-head-side { margin-left: auto; display: flex; align-items: center; gap: var(--sp-2); }
+
+/* 页面 ID 角标（预览工具，默认开；工具栏可关） */
+.pg-id {
+  font-size: 13px;
+  font-family: var(--font-mono);
+  color: var(--sage-dark);
+  background: var(--mint);
+  border: 1px solid var(--line);
+  border-radius: var(--r-s);
+  padding: 2px 6px;
+}
+#stage.hide-pgid .pg-id { display: none; }
+
+.pg-body {
+  flex: 1;
+  min-height: 0;
+  padding: var(--sp-4) var(--sp-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  overflow: hidden; /* 子级 .scroll-area 负责滚动，防止内容挤出主区 */
+}
+/* 首页：略减内边距，首屏多露出一块内容 */
+.pg-body.home-body {
+  padding: var(--sp-3) var(--sp-4);
+  gap: 0;
+}
+
+/* 统一滚动区（= LVGL 可滚动容器；禁止嵌套滚动） */
+.scroll-area { flex: 1; min-height: 0; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent; }
+.scroll-area::-webkit-scrollbar { width: 6px; }
+.scroll-area::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 3px; }
+
+/* 页面底部固定操作条（任务页用） */
+.pg-foot {
+  flex: none;
+  display: flex;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-5);
+  border-top: 1px solid var(--line);
+  background: var(--paper);
+}
+.pg-foot .spacer { flex: 1; }
+
+/* 通用 SVG 图标尺寸 */
+.ic { width: 22px; height: 22px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.ic.lg { width: 28px; height: 28px; }
+.ic.xl { width: 36px; height: 36px; }

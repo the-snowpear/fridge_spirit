@@ -18,6 +18,27 @@
   padding: var(--space-3) 0 var(--space-5);
 }
 
+.session-strip {
+  width: 100%;
+  white-space: nowrap;
+  padding-bottom: var(--space-2);
+}
+
+.session-chip {
+  display: inline-block;
+  margin-right: var(--space-3);
+  padding: 10rpx 20rpx;
+  border-bottom: 3rpx solid transparent;
+  color: var(--color-text-muted);
+  font-size: var(--text-xs);
+}
+
+.session-chip.active {
+  border-bottom-color: var(--color-sage-dark);
+  color: var(--color-sage-dark);
+  font-weight: 800;
+}
+
 .msg-row {
   display: flex;
   margin-bottom: var(--space-3);

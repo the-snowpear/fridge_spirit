@@ -15,10 +15,10 @@ import { getStorage } from "./storage";
 
 export type HttpMethod = "GET" | "POST" | "PUT" | "DELETE" | "PATCH";
 
-/** 请求选项：path 不需要带 /api/v1 前缀，request 内部自动拼。 */
+/** 请求选项：path 不需要带 /api/v2 前缀，request 内部自动拼。 */
 export interface RequestOptions<TBody = unknown> {
   method?: HttpMethod;
-  /** 例如 "/home/overview"；不需要带 "/api/v1"。 */
+  /** 例如 "/sync/snapshot"；不需要带 "/api/v2"。 */
   path: string;
   data?: TBody;
   /** 默认带 Bearer token；登录/无身份接口显式传 false。 */
@@ -113,6 +113,25 @@ function unwrap<T>(body: ApiResponse<T> | T | undefined, statusCode: number): T 
   return body as T;
 }
 
+function httpErrorMessage(body: unknown, statusCode: number): string {
+  if (body && typeof body === "object") {
+    const value = body as { message?: unknown; detail?: unknown };
+    if (typeof value.message === "string" && value.message) return value.message;
+    if (typeof value.detail === "string" && value.detail) return value.detail;
+    if (Array.isArray(value.detail) && value.detail.length) {
+      return value.detail
+        .map((item) => {
+          if (!item || typeof item !== "object") return String(item);
+          const detail = item as { loc?: unknown[]; msg?: unknown };
+          const location = Array.isArray(detail.loc) ? detail.loc.join(".") : "request";
+          return `${location}: ${String(detail.msg || "参数错误")}`;
+        })
+        .join("; ");
+    }
+  }
+  return `HTTP ${statusCode}`;
+}
+
 export async function request<TResponse, TBody = unknown>(
   options: RequestOptions<TBody>,
 ): Promise<TResponse> {
@@ -136,6 +155,7 @@ export async function request<TResponse, TBody = unknown>(
 
   let attempt = 0;
   const maxAttempts = shouldRetry ? 2 : 1;
+  let reauthenticated = false;
   let lastError: unknown;
 
   while (attempt < maxAttempts) {
@@ -150,9 +170,21 @@ export async function request<TResponse, TBody = unknown>(
       });
 
       if (statusCode < 200 || statusCode >= 300) {
+        if (statusCode === 401 && options.auth !== false && !reauthenticated) {
+          reauthenticated = true;
+          const app = getApp<{
+            ensureSession?: (force?: boolean) => Promise<AuthSession | null>;
+          }>();
+          const renewed = await app?.ensureSession?.(true);
+          if (renewed?.token) {
+            header.Authorization = `Bearer ${renewed.token}`;
+            attempt -= 1;
+            continue;
+          }
+        }
         // 4xx 不重试（参数错误重试无意义）；5xx 留给下一次重试。
         const isServerErr = statusCode >= 500;
-        const err = new RequestError("http", `HTTP ${statusCode}`, {
+        const err = new RequestError("http", httpErrorMessage(body, statusCode), {
           statusCode,
           raw: body,
         });

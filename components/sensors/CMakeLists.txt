@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "fridge_sensors.c"
+    SRCS "fridge_mpu6050_p4.c"
     INCLUDE_DIRS "include"
-    REQUIRES esp_adc esp_timer freertos log driver radar
+    REQUIRES board esp_adc esp_driver_i2c esp_timer freertos log nvs_flash
 )

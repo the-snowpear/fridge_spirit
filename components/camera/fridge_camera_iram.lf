@@ -1,0 +1,9 @@
+# CSI 完成中断会在 Flash cache 暂停窗口内重装下一帧 DMA 描述。
+# IDF 5.5.1 已开启对应 Kconfig，但这两个 GDMA 控制函数未随配置进入 IRAM；
+# 在项目侧显式放入 noflash，避免实时预览长期运行触发 Cache access error。
+[mapping:fridge_camera_csi_gdma_iram]
+archive: libesp_hw_support.a
+entries:
+    if CAM_CTLR_MIPI_CSI_ISR_CACHE_SAFE = y:
+        dw_gdma: dw_gdma_channel_config_transfer (noflash)
+        dw_gdma: dw_gdma_channel_enable_ctrl (noflash)

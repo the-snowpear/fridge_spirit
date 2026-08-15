@@ -88,3 +88,22 @@ Desktop.ini
 *.workspace # General workspace files, can be from various tools
 *.suo       # Visual Studio Solution User Options
 *.sln.docstates # Visual Studio
+
+# 本地密钥与环境（已跟踪的 backend/.env 仍需用 git update-index --skip-worktree 或提交时手动排除）
+backend/.env
+
+# 调试探针、修复报告、本地工具缓存
+__LOG_PATH__
+_probe_target.txt
+_probe_target.txt.orig
+_rebuild_reports/
+output/
+.playwright-cli/
+.claude/
+*.orig
+
+# Office 临时锁文件
+~$*
+
+# 大体积传感器厂商压缩包（保留本地，不进仓库）
+doc/**/*.rar

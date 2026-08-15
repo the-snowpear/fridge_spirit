@@ -12,6 +12,7 @@ import {
   LayoutDashboard,
   LockKeyhole,
   Mic,
+  MonitorSmartphone,
   Play,
   Plus,
   Power,
@@ -33,11 +34,14 @@ import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "re
 import { MockTransport } from "./transports/MockTransport";
 import { WebSerialTransport } from "./transports/WebSerialTransport";
 import { TfCardPage } from "./TfCardPage";
+import { GlmRealtimePage } from "./GlmRealtimePage";
+import { UiPreviewPage } from "./UiPreviewPage";
 import type {
-  AIAssistantChatResponse,
+  AgentRunStatus,
+  AgentSession,
+  AgentSubmitResponse,
   AIChatMessage,
   AIConfig,
-  AIContextPreview,
   AIProfilesResponse,
   AsrTranscribeResponse,
   ASRConfig,
@@ -47,30 +51,31 @@ import type {
   CameraRgb565DiagResponse,
   CameraStatus,
   ConnectionState,
-  DeviceChatHistory,
   DeviceCommand,
   DeviceLog,
   DeviceMessage,
   DeviceStatus,
   DiagnosticSnapshot,
-  KitchenAIPage,
-  KitchenAIStatus,
   LogLevel,
-  MemorySummary,
+  MicRecordWavChunkResponse,
+  MicRecordWavInfoResponse,
+  MicSource,
+  Mq5Command,
   MQTTConfig,
   NetworkConfig,
   PinInfo,
-  ProjectAITaskRequest,
-  ProjectAITaskResponse,
-  ProjectAITaskType,
   RadarSnapshot,
+  RealtimeEventPayload,
+  ScreenshotResponse,
   SectionDefinition,
   SensorSnapshot,
   StateMachineConfig,
   StateMachineStatus,
+  TfTransferSession,
   TransportMode,
   TTSConfig,
   TTSStatus,
+  UiStatus,
   WakeStatus,
   WakeAsrStateEventPayload,
   WakeWordDetectedEventPayload,
@@ -83,6 +88,7 @@ const sections: SectionDefinition[] = [
   { id: "usb", label: "USB 连接", icon: Cable },
   { id: "network", label: "网络配置", icon: Wifi },
   { id: "ai", label: "AI 助手", icon: Sparkles },
+  { id: "realtime", label: "Realtime", icon: Bot },
   { id: "camera", label: "摄像头测试", icon: Camera },
   { id: "mic", label: "麦克风测试", icon: Mic },
   { id: "speaker", label: "扬声器测试", icon: Volume2 },
@@ -92,6 +98,7 @@ const sections: SectionDefinition[] = [
   { id: "logs", label: "日志", icon: Terminal },
   { id: "diagnostics", label: "诊断", icon: ShieldAlert },
   { id: "tfcard", label: "TF 卡", icon: HardDrive },
+  { id: "ui_preview", label: "UI 预览", icon: MonitorSmartphone },
   { id: "settings", label: "设置", icon: Settings },
 ];
 
@@ -144,6 +151,7 @@ type WakeEventRecord = WakeWordDetectedEventPayload & {
 
 type MicPlayback = {
   url: string;
+  source: MicSource;
   durationMs: number;
   pcmBytes: number;
   wavBytes: number;
@@ -152,6 +160,70 @@ type MicPlayback = {
   bitsPerSample: number;
   createdAt: string;
 };
+
+type UiToolResponse = {
+  status: string;
+  summary?: string;
+  data?: {
+    queued?: boolean;
+  };
+};
+
+// 固件竖屏白名单与 HOME/PLAN-01/CHAT-01～04/MORE-01/02/04/05/06/07/08 保持一致；
+// 编辑页及其它未移植页面继续停留在横屏。
+const portraitUiPages = new Set([
+  "home",
+  "home_detail",
+  "plan",
+  "chat",
+  "chat_history",
+  "chat_tool_detail",
+  "chat_pending_actions",
+  "more",
+  "timer",
+  "alarm",
+  "stopwatch",
+  "safety",
+  "settings",
+  "maintenance",
+]);
+
+function supportsPortraitUiPage(page: string) {
+  return portraitUiPages.has(page);
+}
+
+const micSourceLabels: Record<MicSource, string> = {
+  es8311: "板载 ES8311",
+  fy_sp703: "外接 FY-SP703",
+};
+
+function decodeBase64Bytes(base64: string) {
+  const binary = window.atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes;
+}
+
+// 校验 TF 分块传输，避免串口噪声或丢块后把损坏的截图交给浏览器预览。
+function crc32Bytes(bytes: Uint8Array) {
+  let crc = 0xffffffff;
+  for (const byte of bytes) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) {
+      crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
+    }
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function formatBytes(value: number) {
+  if (!Number.isFinite(value) || value <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  const index = Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1);
+  return `${(value / 1024 ** index).toFixed(index > 1 ? 1 : 0)} ${units[index]}`;
+}
 
 const AI_SYSTEM_PROMPT_MAX_BYTES = 8192;
 const utf8Encoder = new TextEncoder();
@@ -170,33 +242,6 @@ function normalizeTtsVoiceForRequest(model: string, voice: string) {
   }
   return trimmedVoice || defaultTtsConfig.voice;
 }
-
-const projectAiTaskLabels: Record<ProjectAITaskType, string> = {
-  chat_assist: "厨房助手问答",
-  recognize_ingredients: "拍照识别候选",
-  inventory_parse: "库存变更解析",
-  recipe_generate: "菜谱推荐",
-  shopping_list_generate: "购物清单",
-  reminder_explain: "临期提醒解释",
-  voice_intent_parse: "语音意图解析",
-  kitchen_tool_control: "厨房工具控制",
-};
-
-const kitchenAiPageLabels: Record<KitchenAIPage, string> = {
-  recipe: "菜谱 JSON",
-  nutrition: "营养 JSON",
-  shopping: "购物清单 JSON",
-  all: "全部 JSON",
-};
-
-const defaultProjectAiRequest: ProjectAITaskRequest = {
-  taskType: "recipe_generate",
-  userText: "今晚想用快过期的食材做一道 30 分钟以内的家常菜。",
-  includeInventory: true,
-  includeMemory: true,
-  includeReminders: true,
-  includePreferences: true,
-};
 
 const nowTime = () =>
   new Intl.DateTimeFormat("zh-CN", {
@@ -240,22 +285,25 @@ const formatDayKey = (dayKey: number) => {
 const normalizeChatContent = (content: string) =>
   content.replace(/\\n/g, "\n").replace(/\\r/g, "\r").replace(/\\t/g, "\t");
 
-interface AIReplyDebug {
+interface AgentRunDebug {
   at: string;
-  immediateReply: string;
-  historyReply: string;
-  historySource: "device_history" | "missing";
-  same: boolean;
+  runId: string;
+  status: string;
+  latencyMs: number;
+  httpStatus: number;
 }
 
-const deviceHistoryToChatMessages = (history: DeviceChatHistory): AIChatMessage[] =>
-  history.messages.map((message, index) => ({
-    id: message.id || `device-history-${message.createdAt}-${index}`,
-    role: message.role === "assistant" ? "assistant" : "user",
-    content: normalizeChatContent(message.content),
-    at: formatHistoryTime(message.createdAt),
-    status: "ok",
-  }));
+const agentSessionToChatMessages = (session: AgentSession): AIChatMessage[] =>
+  session.foreground.messages
+    .filter((message) => message.kind === "user" || message.kind === "assistant")
+    .slice(-24)
+    .map((message, index) => ({
+      id: `${message.run_id || "session"}-${message.kind}-${index}`,
+      role: message.kind === "assistant" ? "assistant" : "user",
+      content: normalizeChatContent(message.text),
+      at: message.time || "--:--",
+      status: "ok",
+    }));
 
 const toErrorMessage = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
@@ -322,11 +370,13 @@ function App() {
   const [cameraLiveError, setCameraLiveError] = useState("");
   const [voiceStatus, setVoiceStatus] = useState<VoiceChatStatus | null>(null);
   const [voiceBusy, setVoiceBusy] = useState(false);
+  const [micPlaybackBusy, setMicPlaybackBusy] = useState(false);
   const [micTestMode, setMicTestMode] = useState<"idle" | "hardware" | "asr">("idle");
   const [micSamples, setMicSamples] = useState<VoiceChatStatus[]>([]);
   const [micTranscript, setMicTranscript] = useState("");
   const [micAsrResult, setMicAsrResult] = useState<AsrTranscribeResponse | null>(null);
   const [micPlayback, setMicPlayback] = useState<MicPlayback | null>(null);
+  const [micSource, setMicSource] = useState<MicSource>("fy_sp703");
   const [wakeStatus, setWakeStatus] = useState<WakeStatus | null>(null);
   const [wakeBusy, setWakeBusy] = useState(false);
   const [wakeEvents, setWakeEvents] = useState<WakeEventRecord[]>([]);
@@ -337,24 +387,12 @@ function App() {
   const [radarBusy, setRadarBusy] = useState(false);
   const [aiChatDraft, setAiChatDraft] = useState("");
   const [aiMessages, setAiMessages] = useState<AIChatMessage[]>([]);
-  const [aiReplyDebug, setAiReplyDebug] = useState<AIReplyDebug | null>(null);
+  const [aiReplyDebug, setAiReplyDebug] = useState<AgentRunDebug | null>(null);
   const [aiBusy, setAiBusy] = useState(false);
-  const [projectAiRequest, setProjectAiRequest] = useState<ProjectAITaskRequest>(defaultProjectAiRequest);
-  const [aiContextPreview, setAiContextPreview] = useState<AIContextPreview | null>(null);
-  const [deviceChatHistory, setDeviceChatHistory] = useState<DeviceChatHistory | null>(null);
-  const [memorySummary, setMemorySummary] = useState<MemorySummary | null>(null);
-  const [memoryDraft, setMemoryDraft] = useState(JSON.stringify({
-    schema_version: 1,
-    memory_policy: "硬件测试记忆：只保存结构化摘要，不保存完整聊天记录",
-    family_size: 2,
-    taste: ["清淡", "少油"],
-    avoid: ["香菜"],
-    allergies: [],
-    recent_summary: ["用户希望优先处理临期食材"],
-  }, null, 2));
-  const [projectAiBusy, setProjectAiBusy] = useState(false);
-  const [kitchenAiStatus, setKitchenAiStatus] = useState<KitchenAIStatus | null>(null);
-  const [kitchenAiBusyPage, setKitchenAiBusyPage] = useState<KitchenAIPage | null>(null);
+  const [deviceChatHistory, setDeviceChatHistory] = useState<AgentSession | null>(null);
+  const [agentRunStatus, setAgentRunStatus] = useState<AgentRunStatus | null>(null);
+  const aiPendingMessageIdRef = useRef("");
+  const aiPollGenerationRef = useRef(0);
   const [wifiNetworks, setWifiNetworks] = useState<WifiNetwork[]>([]);
   const [wifiScanState, setWifiScanState] = useState<"idle" | "scanning" | "done" | "error">("idle");
   const [networkBusy, setNetworkBusy] = useState(false);
@@ -366,6 +404,11 @@ function App() {
   const [logs, setLogs] = useState<DeviceLog[]>([]);
   const [logFilter, setLogFilter] = useState<LogLevel | "all">("all");
   const [searchTerm, setSearchTerm] = useState("");
+  const [screenshotBusy, setScreenshotBusy] = useState(false);
+  const [screenshotResult, setScreenshotResult] = useState<ScreenshotResponse | null>(null);
+  const [screenshotPreviewUrl, setScreenshotPreviewUrl] = useState("");
+  const [uiStatus, setUiStatus] = useState<UiStatus | null>(null);
+  const [orientationBusy, setOrientationBusy] = useState(false);
   const [busy, setBusy] = useState(false);
   const transportRef = useRef<MockTransport | WebSerialTransport | null>(null);
   const refreshInFlightRef = useRef(false);
@@ -380,6 +423,7 @@ function App() {
   const ttsConfigDirtyRef = useRef(false);
   const stateMachineConfigDirtyRef = useRef(false);
   const micPlaybackUrlRef = useRef<string | null>(null);
+  const screenshotPreviewUrlRef = useRef<string | null>(null);
 
   const sendTfCommand = useCallback(<TPayload,>(command: DeviceCommand, payload?: unknown) => {
     if (!transportRef.current) {
@@ -387,6 +431,17 @@ function App() {
     }
     return transportRef.current.sendCommand<TPayload>(command, payload);
   }, []);
+
+  // Realtime 页会随高频 delta 触发父组件重渲染；保持函数身份稳定，避免子页 effect
+  // 被反复重建并额外发送 config/status 请求。
+  const sendRealtimeCommand = useCallback(async <TPayload,>(command: DeviceCommand, payload?: unknown) => {
+    const transport = transportRef.current;
+    if (!transport || connection !== "connected") {
+      throw new Error("请先连接设备");
+    }
+    const response = await transport.sendCommand<TPayload>(command, payload);
+    return { ok: response.ok, payload: response.payload, error: response.error };
+  }, [connection]);
 
   const appendLog = useCallback((level: LogLevel, message: string, source = "web") => {
     setLogs((current) => [
@@ -417,12 +472,39 @@ function App() {
     setMicPlayback(null);
   }, []);
 
+  const clearScreenshotPreview = useCallback(() => {
+    if (screenshotPreviewUrlRef.current) {
+      URL.revokeObjectURL(screenshotPreviewUrlRef.current);
+      screenshotPreviewUrlRef.current = null;
+    }
+    setScreenshotPreviewUrl("");
+    setScreenshotResult(null);
+  }, []);
+
   const pushRadarSample = useCallback((sample: RadarSnapshot) => {
     setRadarSamples((current) => [...current.slice(-59), sample]);
   }, []);
 
   const handleDeviceMessage = useCallback((message: DeviceMessage) => {
     if (message.type !== "event") {
+      return;
+    }
+    if (typeof message.event === "string" && message.event.startsWith("realtime_")) {
+      const payload = {
+        ...(message.payload as RealtimeEventPayload),
+        event: message.event,
+      };
+      window.dispatchEvent(new CustomEvent("fridge-realtime-event", { detail: payload }));
+      appendLog(
+        message.event.includes("error") ? "error" : "info",
+        `Realtime ${message.event}: ${
+          (payload as RealtimeEventPayload).summary ||
+          (payload as RealtimeEventPayload).text ||
+          (payload as RealtimeEventPayload).state ||
+          ""
+        }`,
+        "realtime",
+      );
       return;
     }
     if (message.event === "wake_asr_state") {
@@ -465,6 +547,10 @@ function App() {
         URL.revokeObjectURL(micPlaybackUrlRef.current);
         micPlaybackUrlRef.current = null;
       }
+      if (screenshotPreviewUrlRef.current) {
+        URL.revokeObjectURL(screenshotPreviewUrlRef.current);
+        screenshotPreviewUrlRef.current = null;
+      }
     };
   }, []);
 
@@ -472,8 +558,35 @@ function App() {
     return transportMode === "mock" ? new MockTransport() : new WebSerialTransport(timeoutMs);
   }, [timeoutMs, transportMode]);
 
+  // 串口被拔出或设备复位时立即解除所有页面的忙碌态，避免请求继续串行等待超时，
+  // 造成刷新图标永久旋转、麦克风等操作按钮长时间不可点击。
+  const clearTransportActivity = useCallback(() => {
+    commandInFlightRef.current = false;
+    refreshInFlightRef.current = false;
+    sensorRefreshInFlightRef.current = false;
+    radarRefreshInFlightRef.current = false;
+    wakeStatusInFlightRef.current = false;
+    setBusy(false);
+    setNetworkBusy(false);
+    setAiBusy(false);
+    setTtsBusy(false);
+    setCameraBusy(false);
+    setCameraLive(false);
+    setVoiceBusy(false);
+    setMicPlaybackBusy(false);
+    setMicTestMode("idle");
+    setVoiceStatus(null);
+    setWakeBusy(false);
+    setWakeStatus(null);
+    setRadarBusy(false);
+    setRadarRunning(false);
+    setScreenshotBusy(false);
+    setOrientationBusy(false);
+  }, []);
+
   const clearFrontendData = useCallback(() => {
     setStatus(null);
+    setUiStatus(null);
     setConnectionNotice("");
     setNetwork(null);
     setAiConfig(null);
@@ -498,7 +611,10 @@ function App() {
     setCameraLiveError("");
     setVoiceStatus(null);
     setVoiceBusy(false);
+    setMicPlaybackBusy(false);
+    setMicSource("fy_sp703");
     clearMicPlayback();
+    clearScreenshotPreview();
     setWakeStatus(null);
     setWakeBusy(false);
     setWakeEvents([]);
@@ -509,23 +625,8 @@ function App() {
     setAiChatDraft("");
     setAiMessages([]);
     setAiBusy(false);
-    setProjectAiRequest(defaultProjectAiRequest);
-    setAiContextPreview(null);
     setDeviceChatHistory(null);
     setAiReplyDebug(null);
-    setMemorySummary(null);
-    setMemoryDraft(JSON.stringify({
-      schema_version: 1,
-      memory_policy: "硬件测试记忆：只保存结构化摘要，不保存完整聊天记录",
-      family_size: 2,
-      taste: ["清淡", "少油"],
-      avoid: ["香菜"],
-      allergies: [],
-      recent_summary: ["用户希望优先处理临期食材"],
-    }, null, 2));
-    setProjectAiBusy(false);
-    setKitchenAiStatus(null);
-    setKitchenAiBusyPage(null);
     setWifiNetworks([]);
     setWifiScanState("idle");
     setNetworkBusy(false);
@@ -547,7 +648,7 @@ function App() {
     stateMachineConfigDirtyRef.current = false;
     setSearchTerm("");
     setLogFilter("all");
-  }, [clearMicPlayback]);
+  }, [clearMicPlayback, clearScreenshotPreview]);
 
   const setNetworkDraft = useCallback((next: NetworkConfig) => {
     networkDirtyRef.current = true;
@@ -639,8 +740,8 @@ function App() {
       await optionalRead<TTSConfig>("get_tts_config", "TTS API config", (payload) => {
         setTtsConfig((current) => (ttsConfigDirtyRef.current && current ? { ...payload, ...current } : payload));
       });
-      await optionalRead<KitchenAIStatus>("get_kitchen_ai_status", "厨房 AI 状态", setKitchenAiStatus);
       await optionalRead<WakeStatus>("wake_status", "唤醒词状态", setWakeStatus);
+      await optionalRead<UiStatus>("ui_status", "UI 状态", setUiStatus);
 
       if (shouldReadStatic) {
         await optionalRead<PinInfo[]>("get_pins", "GPIO 信息", setPins);
@@ -678,6 +779,51 @@ function App() {
       appendLog("warn", `传感器快照读取失败：${toErrorMessage(error)}`, "sensors");
     } finally {
       sensorRefreshInFlightRef.current = false;
+    }
+  }, [appendLog, connection]);
+
+  // MQ-5 校准命令：confirm 为固定口令参数，随命令发给固件做二次校验；
+  // 成功后用设备返回的新快照局部合并刷新，避免整页轮询打断正在进行的操作。
+  const sendMq5Command = useCallback(async (command: Mq5Command) => {
+    const transport = transportRef.current;
+    if (!transport || connection !== "connected") {
+      appendLog("warn", "请先连接 Mock 或 USB 设备，再执行 MQ-5 校准操作。", "sensors");
+      return false;
+    }
+    if (commandInFlightRef.current) {
+      appendLog("warn", "有其他命令正在执行，请稍后再试。", "sensors");
+      return false;
+    }
+    const confirmToken: Record<Mq5Command, string> = {
+      mq5_confirm_burn_in: "MQ5_BURN_IN_COMPLETE",
+      mq5_capture_baseline: "CAPTURE_MQ5_CLEAN_AIR",
+      mq5_reset_calibration: "RESET_MQ5_CALIBRATION",
+    };
+    const actionLabel: Record<Mq5Command, string> = {
+      mq5_confirm_burn_in: "首次老化确认",
+      mq5_capture_baseline: "洁净空气基线标定",
+      mq5_reset_calibration: "校准重置",
+    };
+    commandInFlightRef.current = true;
+    try {
+      const response = await transport.sendCommand<SensorSnapshot>(command, {
+        confirm: confirmToken[command],
+      });
+      if (response.ok && response.payload) {
+        setSensors((current) => ({
+          ...(current ?? ({} as SensorSnapshot)),
+          ...response.payload,
+        }));
+        appendLog("info", `MQ-5 ${actionLabel[command]}已提交设备并刷新快照。`, "sensors");
+        return true;
+      }
+      appendLog("error", `MQ-5 ${actionLabel[command]}失败：${response.error ?? "未知错误"}`, "sensors");
+      return false;
+    } catch (error) {
+      appendLog("error", `MQ-5 ${actionLabel[command]}失败：${toErrorMessage(error)}`, "sensors");
+      return false;
+    } finally {
+      commandInFlightRef.current = false;
     }
   }, [appendLog, connection]);
 
@@ -835,6 +981,16 @@ function App() {
     const transport = createTransport();
     transport.onLog(appendLog);
     transport.onMessage(handleDeviceMessage);
+    transport.onConnectionLost((reason) => {
+      if (transportRef.current !== transport) {
+        return;
+      }
+      transportRef.current = null;
+      clearTransportActivity();
+      setConnection("disconnected");
+      setConnectionNotice(`${reason.message}。请等待设备重新枚举后点击“连接设备”。`);
+      appendLog("error", reason.message, "web");
+    });
     transportRef.current = transport;
 
     try {
@@ -859,6 +1015,7 @@ function App() {
   const disconnect = async () => {
     await transportRef.current?.disconnect();
     transportRef.current = null;
+    clearTransportActivity();
     setConnection("disconnected");
     setConnectionNotice("");
   };
@@ -1150,6 +1307,206 @@ function App() {
     }
   };
 
+  const readScreenshotFromTf = async (transport: MockTransport | WebSerialTransport, path: string) => {
+    const begin = await transport.sendCommand<TfTransferSession>("tf_transfer_begin", {
+      direction: "read",
+      path,
+      totalSize: 0,
+    });
+    const session = begin.payload;
+    const totalSize = Number(session.totalSize);
+    if (!Number.isSafeInteger(totalSize) || totalSize < 0) {
+      throw new Error("截屏文件大小无效");
+    }
+
+    const parts: Uint8Array[] = [];
+    let offset = Number(session.offset) || 0;
+    let completed = false;
+    try {
+      while (offset < totalSize) {
+        const response = await transport.sendCommand<{
+          offset: number;
+          length: number;
+          crc32?: number;
+          eof?: boolean;
+          data_b64: string;
+        }>("tf_transfer_chunk", { session: session.session, offset });
+        const payload = response.payload;
+        const chunk = decodeBase64Bytes(payload.data_b64 || "");
+        if (Number(payload.offset) !== offset || Number(payload.length) !== chunk.length) {
+          throw new Error(`截屏分块位置或长度错误：期望 ${offset}，收到 ${payload.offset}/${payload.length}`);
+        }
+        if (payload.crc32 !== undefined && crc32Bytes(chunk) !== Number(payload.crc32)) {
+          throw new Error(`截屏分块 CRC32 校验失败：offset=${offset}`);
+        }
+        if (chunk.length === 0) {
+          throw new Error("截屏分块为空，传输未前进");
+        }
+        parts.push(chunk);
+        offset += chunk.length;
+      }
+      if (offset !== totalSize) {
+        throw new Error(`截屏读回长度不一致：${offset}/${totalSize}`);
+      }
+      await transport.sendCommand("tf_transfer_end", { session: session.session });
+      completed = true;
+
+      const bytes = new Uint8Array(totalSize);
+      let cursor = 0;
+      for (const part of parts) {
+        bytes.set(part, cursor);
+        cursor += part.length;
+      }
+      return bytes;
+    } finally {
+      if (!completed) {
+        await transport.sendCommand("tf_transfer_abort", { session: session.session }).catch(() => undefined);
+      }
+    }
+  };
+
+  const waitForScreenshotUiStable = async (transport: MockTransport | WebSerialTransport) => {
+    const deadline = Date.now() + 45_000;
+    let consecutive = 0;
+    let lastSummary = "";
+    appendLog("info", "等待设备 ready、TF 资源和页面首帧稳定...", "screenshot");
+    while (Date.now() < deadline) {
+      const response = await transport.sendCommand<UiStatus>("ui_status");
+      if (!response.ok) {
+        throw new Error(response.error || "读取 UI 稳定状态失败");
+      }
+      const status = response.payload;
+      const summary = `ready=${status.ready} resource=${status.resourceReady} fb=${status.framebuffersSynced} pageFrame=${status.pageFrameReady} page=${status.page}`;
+      if (summary !== lastSummary) {
+        appendLog("info", `UI 状态：${summary}`, "screenshot");
+        lastSummary = summary;
+      }
+      const stable = status.ready && status.resourceReady && status.framebuffersSynced && status.pageFrameReady;
+      consecutive = stable ? consecutive + 1 : 0;
+      if (consecutive >= 2) {
+        appendLog("info", "UI 资源、可见双缓冲和页面首帧已稳定。", "screenshot");
+        return;
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 500));
+    }
+    throw new Error("UI 稳定超时，未发送截屏；请确认设备已完成启动和 TF 资源加载");
+  };
+
+  // 横竖屏切换复用 USB Tool，并以连续两次 ui_status 稳定为完成条件。
+  const waitForUiTargetStable = async (
+    transport: MockTransport | WebSerialTransport,
+    expectedPage: string | undefined,
+    expectedOrientation: UiStatus["orientation"],
+  ) => {
+    const deadline = Date.now() + 45_000;
+    let consecutive = 0;
+    while (Date.now() < deadline) {
+      const response = await transport.sendCommand<UiStatus>("ui_status");
+      const next = response.payload;
+      setUiStatus(next);
+      const stable =
+        next.ready &&
+        next.resourceReady &&
+        next.framebuffersSynced &&
+        next.pageFrameReady &&
+        next.orientation === expectedOrientation &&
+        (!expectedPage || next.page === expectedPage);
+      consecutive = stable ? consecutive + 1 : 0;
+      if (consecutive >= 2) return next;
+      await sleep(500);
+    }
+    throw new Error(`UI 方向切换稳定超时：${expectedOrientation}`);
+  };
+
+  const callUiTool = async (
+    transport: MockTransport | WebSerialTransport,
+    tool: "ui.switch_page" | "ui.set_orientation",
+    argumentsValue: Record<string, unknown>,
+  ) => {
+    const response = await transport.sendCommand<UiToolResponse>("tool_call", {
+      tool,
+      arguments: argumentsValue,
+    });
+    if (response.payload.status !== "ok" || response.payload.data?.queued !== true) {
+      throw new Error(response.payload.summary || `${tool} 未确认 queued=true`);
+    }
+  };
+
+  const toggleUiOrientation = async () => {
+    const transport = transportRef.current;
+    if (!transport || connection !== "connected" || orientationBusy || commandInFlightRef.current) return;
+    const target: UiStatus["orientation"] =
+      uiStatus?.orientation === "portrait_privacy" ? "landscape" : "portrait_privacy";
+    try {
+      commandInFlightRef.current = true;
+      setOrientationBusy(true);
+      const current = (await transport.sendCommand<UiStatus>("ui_status")).payload;
+      setUiStatus(current);
+
+      // HOME/PLAN/CHAT-01～04/MORE-01/02/04/05/06/07/08 进入竖屏时保持当前页面；其它页面尚未移植竖屏，
+      // 不自动跳转到临期详情，避免用户看到与当前上下文无关的页面。
+      if (
+        target === "portrait_privacy" &&
+        !supportsPortraitUiPage(current.page)
+      ) {
+        appendLog("info", "该页面尚未移植竖屏，请先切换到首页、计划、对话、更多或设置类页面。", "ui");
+        return;
+      }
+
+      if (current.orientation !== target || target === "portrait_privacy") {
+        await callUiTool(transport, "ui.set_orientation", { orientation: target });
+      }
+      const settled = await waitForUiTargetStable(
+        transport,
+        target === "portrait_privacy" ? current.page : undefined,
+        target,
+      );
+      appendLog(
+        "info",
+        `屏幕已切换为${settled.orientation === "portrait_privacy" ? "竖屏隐私模式" : "横屏模式"}。`,
+        "ui",
+      );
+    } catch (error) {
+      appendLog("error", `横竖屏切换失败：${toErrorMessage(error)}`, "ui");
+    } finally {
+      commandInFlightRef.current = false;
+      setOrientationBusy(false);
+    }
+  };
+
+  const captureScreenshot = async () => {
+    const transport = transportRef.current;
+    if (!transport || connection !== "connected") {
+      appendLog("warn", "请先连接设备，再截取屏幕。", "screenshot");
+      return;
+    }
+    if (commandInFlightRef.current || screenshotBusy) {
+      appendLog("warn", "设备正在处理上一条命令，请稍后再试。", "screenshot");
+      return;
+    }
+    try {
+      commandInFlightRef.current = true;
+      setScreenshotBusy(true);
+      clearScreenshotPreview();
+      await waitForScreenshotUiStable(transport);
+      appendLog("info", "稳定门通过，只发送一次 screenshot_capture...", "screenshot");
+      const response = await transport.sendCommand<ScreenshotResponse>("screenshot_capture");
+      appendLog("info", `截屏已写入 TF 卡，正在读回 ${response.payload.path}...`, "screenshot");
+      const bytes = await readScreenshotFromTf(transport, response.payload.path);
+      const mime = response.payload.format === "jpeg" ? "image/jpeg" : "image/bmp";
+      const url = URL.createObjectURL(new Blob([bytes], { type: mime }));
+      screenshotPreviewUrlRef.current = url;
+      setScreenshotPreviewUrl(url);
+      setScreenshotResult({ ...response.payload, bytes: bytes.byteLength });
+      appendLog("info", `截屏已读回：${response.payload.path} (${response.payload.format.toUpperCase()}，${formatBytes(bytes.byteLength)})`, "screenshot");
+    } catch (error) {
+      appendLog("error", `截屏失败：${toErrorMessage(error)}`, "screenshot");
+    } finally {
+      commandInFlightRef.current = false;
+      setScreenshotBusy(false);
+    }
+  };
+
   const refreshAiProfiles = useCallback(async () => {
     const transport = transportRef.current;
     if (!transport || connection !== "connected") {
@@ -1208,6 +1565,9 @@ function App() {
       appendLog("warn", "请先连接 Mock 或 USB 设备，再删除 AI API 配置。", "ai");
       return;
     }
+    if (!window.confirm("确定删除这个备用 AI 配置吗？设备会切换回默认配置；该操作不可恢复。")) {
+      return;
+    }
     try {
       commandInFlightRef.current = true;
       const response = await transport.sendCommand<AIConfig>("delete_ai_profile", { profileId });
@@ -1221,6 +1581,84 @@ function App() {
     } finally {
       commandInFlightRef.current = false;
     }
+  };
+
+  const updatePendingAgentMessage = (pendingId: string, status: AgentRunStatus, latencyMs?: number) => {
+    const completed = status.state === "COMPLETED";
+    const cancelled = status.state === "CANCELLED";
+    const waitingConfirmation = status.state === "WAITING_CONFIRMATION" && status.confirmation;
+    const content = completed
+      ? normalizeChatContent(status.reply || "小精灵已完成，但没有返回文字。")
+      : waitingConfirmation
+        ? `等待确认工具：${status.confirmation?.toolName ?? "unknown"}`
+        : cancelled
+          ? "当前小精灵任务已停止。"
+          : status.reply || status.error || `小精灵状态：${status.state}`;
+    setAiMessages((current) =>
+      current.map((item) =>
+        item.id === pendingId
+          ? {
+              ...item,
+              content,
+              status: completed ? "ok" : waitingConfirmation ? "pending" : "error",
+              latencyMs,
+            }
+          : item,
+      ),
+    );
+  };
+
+  const pollAgentRun = async (
+    runId: string,
+    pendingId: string,
+    generation: number,
+    startedAt: number,
+    resolvedCallId?: string,
+  ) => {
+    const transport = transportRef.current;
+    if (!transport) {
+      throw new Error("串口连接已断开");
+    }
+    for (let index = 0; index < 300; index += 1) {
+      if (generation !== aiPollGenerationRef.current) {
+        return null;
+      }
+      const response = await transport.sendCommand<AgentRunStatus>("agent_run_status");
+      const status = response.payload;
+      setAgentRunStatus(status);
+      if (status.runId !== runId) {
+        await sleep(400);
+        continue;
+      }
+      if (status.state === "WAITING_CONFIRMATION") {
+        // 兼容旧固件或串口排队延迟：确认命令已发送时，不能把同一张旧确认卡误判为新状态。
+        if (resolvedCallId && status.confirmation?.callId === resolvedCallId) {
+          await sleep(400);
+          continue;
+        }
+        updatePendingAgentMessage(pendingId, status, Date.now() - startedAt);
+        return status;
+      }
+      if (["COMPLETED", "FAILED", "CANCELLED"].includes(status.state)) {
+        const latencyMs = Date.now() - startedAt;
+        updatePendingAgentMessage(pendingId, status, latencyMs);
+        setAiReplyDebug({
+          at: nowTime(),
+          runId: status.runId,
+          status: status.state,
+          latencyMs,
+          httpStatus: status.httpStatus,
+        });
+        appendLog(
+          status.state === "COMPLETED" ? "info" : "warn",
+          `P4 小精灵任务 ${status.runId || "--"} 已结束，状态 ${status.state}，耗时 ${latencyMs} ms。`,
+          "ai",
+        );
+        return status;
+      }
+      await sleep(400);
+    }
+    throw new Error("等待小精灵任务超时");
   };
 
   const sendAiChat = async (event?: FormEvent<HTMLFormElement>) => {
@@ -1246,62 +1684,23 @@ function App() {
     const pendingMessage: AIChatMessage = {
       id: pendingId,
       role: "assistant",
-      content: "正在整理上下文并请求 AI API...",
+      content: "P4 小精灵正在准备上下文并请求 AI API...",
       at: nowTime(),
       status: "pending",
     };
 
-    setAiMessages((current) => [...current, userMessage, pendingMessage].slice(-18));
+    setAiMessages((current) => [...current, userMessage, pendingMessage].slice(-24));
+    aiPendingMessageIdRef.current = pendingId;
     setAiChatDraft("");
     setAiBusy(true);
+    const startedAt = Date.now();
+    const generation = ++aiPollGenerationRef.current;
     try {
       commandInFlightRef.current = true;
-      const request = {
-        ...projectAiRequest,
-        taskType: "chat_assist" as const,
-        message,
-        userText: message,
-      };
-      const preview = await transport.sendCommand<AIContextPreview>("get_ai_context_preview", request);
-      setAiContextPreview(preview.payload);
-      const response = await transport.sendCommand<AIAssistantChatResponse>("ai_assistant_chat", request);
-      const immediateReply = normalizeChatContent(response.payload.reply);
-      const historyResponse = await transport.sendCommand<DeviceChatHistory>("get_chat_history").catch(() => null);
-      if (historyResponse) {
-        setDeviceChatHistory(historyResponse.payload);
-        setAiMessages(deviceHistoryToChatMessages(historyResponse.payload));
-      }
-      if (!historyResponse) {
-        setAiMessages((current) =>
-          current.map((item) =>
-            item.id === pendingId
-              ? {
-                  ...item,
-                  content: immediateReply,
-                  status: "ok",
-                  latencyMs: response.payload.latencyMs,
-                }
-              : item,
-          ),
-        );
-      }
-      const historyAssistant = historyResponse?.payload.messages
-        .slice()
-        .reverse()
-        .find((item) => item.role === "assistant");
-      const historyReply = historyAssistant ? normalizeChatContent(historyAssistant.content) : "";
-      setAiReplyDebug({
-        at: nowTime(),
-        immediateReply,
-        historyReply,
-        historySource: historyAssistant ? "device_history" : "missing",
-        same: historyAssistant ? immediateReply === historyReply : false,
-      });
-      appendLog(
-        "info",
-        `AI 助手已完成 ${projectAiTaskLabels[response.payload.taskType]}，模型 ${response.payload.model}，耗时 ${response.payload.latencyMs} ms，注入历史 ${response.payload.historyCount} 条。`,
-        "ai",
-      );
+      const response = await transport.sendCommand<AgentSubmitResponse>("agent_submit", { message });
+      commandInFlightRef.current = false;
+      const status = await pollAgentRun(response.payload.runId, pendingId, generation, startedAt);
+      setAiBusy(status?.state === "WAITING_CONFIRMATION");
     } catch (error) {
       setAiMessages((current) =>
         current.map((item) =>
@@ -1315,11 +1714,71 @@ function App() {
         ),
       );
       appendLog("error", String(error), "ai");
+      setAiBusy(false);
+    } finally {
+      commandInFlightRef.current = false;
+    }
+  };
+
+  const resolveAgentConfirmation = async (confirmed: boolean) => {
+    const transport = transportRef.current;
+    const confirmation = agentRunStatus?.confirmation;
+    if (!transport || !confirmation || !agentRunStatus?.runId) {
+      appendLog("warn", "当前没有待确认的小精灵工具。", "ai");
+      return;
+    }
+    const pendingId = aiPendingMessageIdRef.current || crypto.randomUUID();
+    if (!aiPendingMessageIdRef.current) {
+      aiPendingMessageIdRef.current = pendingId;
+      const confirmationMessage: AIChatMessage = {
+        id: pendingId,
+        role: "assistant",
+        content: `等待确认工具：${confirmation.toolName}`,
+        at: nowTime(),
+        status: "pending",
+      };
+      setAiMessages((current) => [...current, confirmationMessage].slice(-24));
+    }
+    const generation = ++aiPollGenerationRef.current;
+    const startedAt = Date.now();
+    try {
+      commandInFlightRef.current = true;
+      await transport.sendCommand(confirmed ? "agent_confirm" : "agent_reject", {
+        runId: agentRunStatus.runId,
+        callId: confirmation.callId,
+      });
+      commandInFlightRef.current = false;
+      setAgentRunStatus((current) => current ? { ...current, confirmation: null, state: "WAITING_TOOL" } : current);
+      setAiBusy(true);
+      const status = await pollAgentRun(agentRunStatus.runId, pendingId, generation, startedAt, confirmation.callId);
+      setAiBusy(status?.state === "WAITING_CONFIRMATION");
+    } catch (error) {
+      appendLog("error", `处理工具确认失败：${toErrorMessage(error)}`, "ai");
+      setAiBusy(false);
+    } finally {
+      commandInFlightRef.current = false;
+    }
+  };
+
+  const cancelAgentRun = async () => {
+    const transport = transportRef.current;
+    if (!transport) return;
+    ++aiPollGenerationRef.current;
+    try {
+      commandInFlightRef.current = true;
+      const response = await transport.sendCommand<AgentRunStatus>("agent_cancel");
+      setAgentRunStatus(response.payload);
+      const pendingId = aiPendingMessageIdRef.current;
+      if (pendingId) updatePendingAgentMessage(pendingId, response.payload);
+      appendLog("warn", "已请求停止当前 P4 小精灵任务。", "ai");
+    } catch (error) {
+      appendLog("error", `停止小精灵失败：${toErrorMessage(error)}`, "ai");
     } finally {
       commandInFlightRef.current = false;
       setAiBusy(false);
     }
   };
+
   const refreshDeviceChatHistory = useCallback(async () => {
     const transport = transportRef.current;
     if (!transport || connection !== "connected") {
@@ -1328,10 +1787,10 @@ function App() {
     }
     try {
       commandInFlightRef.current = true;
-      const response = await transport.sendCommand<DeviceChatHistory>("get_chat_history");
+      const response = await transport.sendCommand<AgentSession>("agent_session_read");
       setDeviceChatHistory(response.payload);
-      setAiMessages(deviceHistoryToChatMessages(response.payload));
-      appendLog("info", `已读取设备会话历史：${response.payload.count} 条。`, "ai_context");
+      setAiMessages(agentSessionToChatMessages(response.payload));
+      appendLog("info", `已读取 foreground 会话：${response.payload.foreground.messages.length} 条记录。`, "ai_context");
     } catch (error) {
       appendLog("error", String(error), "ai_context");
     } finally {
@@ -1345,11 +1804,16 @@ function App() {
       appendLog("warn", "请先连接 Mock 或 USB 设备，再清空设备会话历史。", "ai_context");
       return;
     }
+    if (!window.confirm("确定清空设备 TF 卡中的唯一小精灵会话吗？此操作会永久删除历史，无法恢复。")) {
+      return;
+    }
     try {
       commandInFlightRef.current = true;
-      const response = await transport.sendCommand<DeviceChatHistory>("clear_chat_history");
+      const response = await transport.sendCommand<AgentSession>("agent_session_clear");
       setDeviceChatHistory(response.payload);
       setAiMessages([]);
+      setAgentRunStatus(null);
+      aiPendingMessageIdRef.current = "";
       appendLog("warn", "设备会话历史已清空，对话窗口也已同步清空。", "ai_context");
     } catch (error) {
       appendLog("error", String(error), "ai_context");
@@ -1357,6 +1821,18 @@ function App() {
       commandInFlightRef.current = false;
     }
   };
+
+  const refreshAgentRuntimeStatus = useCallback(async () => {
+    const transport = transportRef.current;
+    if (!transport || connection !== "connected") return;
+    try {
+      const response = await transport.sendCommand<AgentRunStatus>("agent_run_status");
+      setAgentRunStatus(response.payload);
+      setAiBusy(response.payload.active);
+    } catch (error) {
+      appendLog("error", `小精灵状态读取失败：${toErrorMessage(error)}`, "ai");
+    }
+  }, [appendLog, connection]);
 
   const toggleVoiceChat = async () => {
     const transport = transportRef.current;
@@ -1385,7 +1861,7 @@ function App() {
         setMicTestMode("asr");
         setMicTranscript("");
         setMicAsrResult(null);
-        const response = await transport.sendCommand<VoiceChatStatus>("mic_record_start", { forAsr: true });
+        const response = await transport.sendCommand<VoiceChatStatus>("mic_record_start", { source: micSource, forAsr: true });
         setVoiceStatus(response.payload);
         pushMicSample(response.payload);
         appendLog("info", "ASR 测试录音已开始。", "asr");
@@ -1396,18 +1872,10 @@ function App() {
       setVoiceStatus(stopped.payload);
       const response = await transport.sendCommand<AsrTranscribeResponse>("asr_transcribe");
       setVoiceStatus({
+        ...stopped.payload,
         state: "ready",
-        durationMs: 0,
         pcmBytes: response.payload.audioBytes,
-        rms: 0,
         sampleCount: Math.max(0, Math.floor((response.payload.audioBytes - 44) / 2)),
-        peakAbs: 0,
-        minSample: 0,
-        maxSample: 0,
-        meanSample: 0,
-        clipCount: 0,
-        timeoutCount: 0,
-        qualityHint: "ok",
         error: "",
       });
       setMicTestMode("idle");
@@ -1445,10 +1913,10 @@ function App() {
       setMicTranscript("");
       setMicAsrResult(null);
       clearMicPlayback();
-      const response = await transport.sendCommand<VoiceChatStatus>("mic_record_start");
+      const response = await transport.sendCommand<VoiceChatStatus>("mic_record_start", { source: micSource });
       setVoiceStatus(response.payload);
       pushMicSample(response.payload);
-      appendLog("info", "麦克风硬件录音测试已开始。", "asr");
+      appendLog("info", `${micSourceLabels[micSource]}硬件录音测试已开始。`, "asr");
     } catch (error) {
       setMicTestMode("idle");
       appendLog("error", String(error), "asr");
@@ -1496,7 +1964,77 @@ function App() {
       pushMicSample(response.payload);
       setMicTestMode("idle");
       clearMicPlayback();
-      appendLog("info", "麦克风硬件录音测试已停止，已保留诊断指标，未触发 ASR/AI。", "asr");
+      // 停止命令已经完成后立即解除录音忙碌态；回放读取单独标记，避免三个按钮
+      // 在大段 base64 传输期间一起变灰。传输层自身会串行化后续请求。
+      commandInFlightRef.current = false;
+      setVoiceBusy(false);
+      setMicPlaybackBusy(true);
+      let wavSession: number | null = null;
+      try {
+        // 回放数据按约 1KB 的请求/响应分块读取；USB Serial/JTAG 默认输出层会在
+        // 超长单行阻塞时静默丢字节，因此每块都校验 offset、长度与 CRC32。
+        const infoResponse = await transport.sendCommand<MicRecordWavInfoResponse>("mic_record_wav_info");
+        const wavInfo = infoResponse.payload;
+        if (!Number.isSafeInteger(wavInfo.wavBytes) || !Number.isSafeInteger(wavInfo.pcmBytes) ||
+            !Number.isSafeInteger(wavInfo.chunkBytes) || !Number.isSafeInteger(wavInfo.session) ||
+            !Number.isSafeInteger(wavInfo.fullCrc32) || wavInfo.fullCrc32 < 0 || wavInfo.fullCrc32 > 0xffffffff ||
+            wavInfo.wavBytes !== wavInfo.pcmBytes + 44 || wavInfo.wavBytes <= 44 || wavInfo.wavBytes > 64044 ||
+            wavInfo.chunkBytes <= 0 || wavInfo.chunkBytes > 4096 || wavInfo.session <= 0 ||
+            wavInfo.sampleRate !== 16000 || wavInfo.channels !== 1 || wavInfo.bitsPerSample !== 16) {
+          throw new Error("设备返回的 WAV 元数据无效");
+        }
+        wavSession = wavInfo.session;
+        const wavBytes = new Uint8Array(wavInfo.wavBytes);
+        let offset = 0;
+        while (offset < wavBytes.length) {
+          const chunkPayload: MicRecordWavChunkResponse = (await transport.sendCommand<MicRecordWavChunkResponse>("mic_record_wav_chunk", {
+            session: wavSession,
+            offset,
+          })).payload;
+          const chunk = decodeBase64Bytes(chunkPayload.data_b64 || "");
+          if (chunkPayload.session !== wavSession || chunkPayload.offset !== offset || chunkPayload.length !== chunk.length) {
+            throw new Error(`音频分块位置或长度错误：期望 ${offset}，收到 ${chunkPayload.offset}/${chunkPayload.length}`);
+          }
+          if (chunk.length === 0 || chunk.length > wavInfo.chunkBytes || offset + chunk.length > wavBytes.length) {
+            throw new Error(`音频分块无效：offset=${offset}, length=${chunk.length}`);
+          }
+          if (crc32Bytes(chunk) !== chunkPayload.crc32) {
+            throw new Error(`音频分块 CRC32 校验失败：offset=${offset}`);
+          }
+          wavBytes.set(chunk, offset);
+          offset += chunk.length;
+          if (chunkPayload.eof !== (offset === wavBytes.length)) {
+            throw new Error(`音频分块结束标志错误：offset=${offset}/${wavBytes.length}`);
+          }
+        }
+        if (crc32Bytes(wavBytes) !== wavInfo.fullCrc32) {
+          throw new Error("完整 WAV CRC32 校验失败");
+        }
+        const url = URL.createObjectURL(new Blob([wavBytes], { type: "audio/wav" }));
+        micPlaybackUrlRef.current = url;
+        setMicPlayback({
+          url,
+          source: wavInfo.source ?? response.payload.source ?? micSource,
+          durationMs: wavInfo.durationMs,
+          pcmBytes: wavInfo.pcmBytes,
+          wavBytes: wavInfo.wavBytes,
+          sampleRate: wavInfo.sampleRate,
+          channels: wavInfo.channels,
+          bitsPerSample: wavInfo.bitsPerSample,
+          createdAt: nowTime(),
+        });
+        appendLog("info", `${micSourceLabels[wavInfo.source ?? response.payload.source ?? micSource]}录音已停止并生成浏览器回放。`, "asr");
+      } catch (wavError) {
+        appendLog("warn", `录音已停止，但回放数据读取失败：${toErrorMessage(wavError)}`, "asr");
+      } finally {
+        if (wavSession !== null) {
+          await transport.sendCommand("mic_record_wav_end", { session: wavSession }).catch((endError) => {
+            appendLog("warn", `回放快照释放失败：${toErrorMessage(endError)}`, "asr");
+          });
+        }
+        setMicPlaybackBusy(false);
+      }
+      appendLog("info", "已保留诊断指标，未触发 ASR/AI。", "asr");
     } catch (error) {
       appendLog("error", String(error), "asr");
     } finally {
@@ -1528,6 +2066,29 @@ function App() {
       appendLog("info", `设备 TTS 已启动：HTTP ${response.payload.httpStatus}，音频 ${response.payload.audioBytes} B。`, "tts");
     } catch (error) {
       appendLog("error", String(error), "tts");
+    } finally {
+      commandInFlightRef.current = false;
+      setTtsBusy(false);
+    }
+  };
+
+  const playSpeakerBeep = async () => {
+    const transport = transportRef.current;
+    if (!transport || connection !== "connected") {
+      appendLog("warn", "请先连接设备，再测试板载扬声器。", "tts");
+      return;
+    }
+    if (ttsBusy || commandInFlightRef.current) {
+      appendLog("warn", "设备正在处理上一条命令，请稍后再试。", "tts");
+      return;
+    }
+    try {
+      commandInFlightRef.current = true;
+      setTtsBusy(true);
+      const response = await transport.sendCommand<{ played: boolean; frequencyHz: number; durationMs: number }>("speaker_beep");
+      appendLog("info", `板载扬声器自检完成：${response.payload.frequencyHz} Hz / ${response.payload.durationMs} ms。`, "tts");
+    } catch (error) {
+      appendLog("error", `板载扬声器自检失败：${toErrorMessage(error)}`, "tts");
     } finally {
       commandInFlightRef.current = false;
       setTtsBusy(false);
@@ -1857,160 +2418,9 @@ function App() {
     }
   };
 
-  const previewProjectAiContext = async () => {
-    const transport = transportRef.current;
-    if (!transport || connection !== "connected") {
-      appendLog("warn", "请先连接 Mock 或 USB 设备，再预览项目 AI 上下文。", "ai_context");
-      return;
-    }
-    try {
-      commandInFlightRef.current = true;
-      setProjectAiBusy(true);
-      const response = await transport.sendCommand<AIContextPreview>("get_ai_context_preview", projectAiRequest);
-      setAiContextPreview(response.payload);
-      appendLog("info", `已生成 ${projectAiTaskLabels[response.payload.taskType]} 上下文预览。`, "ai_context");
-    } catch (error) {
-      appendLog("error", String(error), "ai_context");
-    } finally {
-      commandInFlightRef.current = false;
-      setProjectAiBusy(false);
-    }
-  };
-
-  const runProjectAiTask = async () => {
-    const transport = transportRef.current;
-    if (!transport || connection !== "connected") {
-      appendLog("warn", "请先连接 Mock 或 USB 设备，再测试项目 AI 任务。", "ai_context");
-      return;
-    }
-    try {
-      commandInFlightRef.current = true;
-      setProjectAiBusy(true);
-      const preview = await transport.sendCommand<AIContextPreview>("get_ai_context_preview", projectAiRequest);
-      const result = await transport.sendCommand<ProjectAITaskResponse>("test_ai_task", projectAiRequest);
-      setAiContextPreview(preview.payload);
-      appendLog("info", `项目 AI Mock 任务完成：${projectAiTaskLabels[result.payload.taskType]}。`, "ai_context");
-    } catch (error) {
-      appendLog("error", String(error), "ai_context");
-    } finally {
-      commandInFlightRef.current = false;
-      setProjectAiBusy(false);
-    }
-  };
-
-  const refreshKitchenAiStatus = useCallback(async () => {
-    const transport = transportRef.current;
-    if (!transport || connection !== "connected") {
-      appendLog("warn", "请先连接 Mock 或 USB 设备，再读取厨房 AI 状态。", "kitchen_ai");
-      return;
-    }
-    try {
-      commandInFlightRef.current = true;
-      const response = await transport.sendCommand<KitchenAIStatus>("get_kitchen_ai_status");
-      setKitchenAiStatus(response.payload);
-      appendLog("info", `厨房 AI 状态已刷新：${response.payload.state} / ${response.payload.lastPage}。`, "kitchen_ai");
-    } catch (error) {
-      appendLog("error", toErrorMessage(error), "kitchen_ai");
-    } finally {
-      commandInFlightRef.current = false;
-    }
-  }, [appendLog, connection]);
-
-  const generateKitchenAiPage = useCallback(async (page: KitchenAIPage) => {
-    const transport = transportRef.current;
-    if (!transport || connection !== "connected") {
-      appendLog("warn", "请先连接 Mock 或 USB 设备，再触发厨房 AI JSON 生成。", "kitchen_ai");
-      return;
-    }
-    try {
-      commandInFlightRef.current = true;
-      setKitchenAiBusyPage(page);
-      const response = await transport.sendCommand<KitchenAIStatus>("kitchen_ai_generate", { page });
-      setKitchenAiStatus(response.payload);
-      appendLog("info", `已投递厨房 AI ${kitchenAiPageLabels[page]} 生成请求，状态：${response.payload.state}。`, "kitchen_ai");
-      for (let index = 0; index < 6; index += 1) {
-        await sleep(1000);
-        const statusResponse = await transport.sendCommand<KitchenAIStatus>("get_kitchen_ai_status");
-        setKitchenAiStatus(statusResponse.payload);
-        if (!statusResponse.payload.running) {
-          break;
-        }
-      }
-    } catch (error) {
-      appendLog("error", toErrorMessage(error), "kitchen_ai");
-    } finally {
-      commandInFlightRef.current = false;
-      setKitchenAiBusyPage(null);
-    }
-  }, [appendLog, connection]);
-
-  const refreshMemorySummary = async () => {
-    const transport = transportRef.current;
-    if (!transport || connection !== "connected") {
-      appendLog("warn", "请先连接 Mock 或 USB 设备，再读取记忆摘要。", "ai_context");
-      return;
-    }
-    try {
-      commandInFlightRef.current = true;
-      const response = await transport.sendCommand<MemorySummary>("get_memory_summary");
-      setMemorySummary(response.payload);
-      setMemoryDraft(JSON.stringify(response.payload, null, 2));
-      appendLog("info", "已读取结构化记忆摘要。", "ai_context");
-    } catch (error) {
-      appendLog("error", String(error), "ai_context");
-    } finally {
-      commandInFlightRef.current = false;
-    }
-  };
-
-  const clearMemorySummary = async () => {
-    const transport = transportRef.current;
-    if (!transport || connection !== "connected") {
-      appendLog("warn", "请先连接 Mock 或 USB 设备，再清空记忆摘要。", "ai_context");
-      return;
-    }
-    try {
-      commandInFlightRef.current = true;
-      const response = await transport.sendCommand<MemorySummary>("clear_memory_summary");
-      setMemorySummary(response.payload);
-      setMemoryDraft(JSON.stringify(response.payload, null, 2));
-      appendLog("warn", "已清空结构化记忆摘要，库存和提醒不受影响。", "ai_context");
-    } catch (error) {
-      appendLog("error", String(error), "ai_context");
-    } finally {
-      commandInFlightRef.current = false;
-    }
-  };
-
-  const saveMemorySummary = async () => {
-    const transport = transportRef.current;
-    if (!transport || connection !== "connected") {
-      appendLog("warn", "请先连接 Mock 或 USB 设备，再写入硬件测试记忆。", "ai_context");
-      return;
-    }
-    let parsed: MemorySummary;
-    try {
-      parsed = JSON.parse(memoryDraft) as MemorySummary;
-    } catch (error) {
-      appendLog("error", `测试记忆不是合法 JSON：${toErrorMessage(error)}`, "ai_context");
-      return;
-    }
-    try {
-      commandInFlightRef.current = true;
-      const response = await transport.sendCommand<MemorySummary>("set_memory_summary", { memory: parsed });
-      setMemorySummary(response.payload);
-      setMemoryDraft(JSON.stringify(response.payload, null, 2));
-      appendLog("info", "硬件测试记忆已写入，后续 AI 助手可选择注入。", "ai_context");
-    } catch (error) {
-      appendLog("error", String(error), "ai_context");
-    } finally {
-      commandInFlightRef.current = false;
-    }
-  };
-
   const clearAiMessages = () => {
     setAiMessages([]);
-    appendLog("info", "AI 助手对话已在浏览器中清空；硬件测试记忆不受影响。", "ai");
+    appendLog("info", "AI 助手对话窗口已在浏览器中清空；TF foreground 会话不受影响。", "ai");
   };
 
   const exportLogs = () => {
@@ -2044,9 +2454,9 @@ function App() {
     if (connection === "connected" && activeSection === "ai") {
       refreshAiProfiles().catch((error) => appendLog("warn", `AI API 配置列表读取失败：${toErrorMessage(error)}`, "web"));
       refreshDeviceChatHistory().catch((error) => appendLog("warn", `设备会话历史读取失败：${toErrorMessage(error)}`, "web"));
-      refreshKitchenAiStatus().catch((error) => appendLog("warn", `厨房 AI 状态读取失败：${toErrorMessage(error)}`, "web"));
+      refreshAgentRuntimeStatus().catch((error) => appendLog("warn", `小精灵状态读取失败：${toErrorMessage(error)}`, "web"));
     }
-  }, [activeSection, appendLog, connection, refreshAiProfiles, refreshDeviceChatHistory, refreshKitchenAiStatus]);
+  }, [activeSection, appendLog, connection, refreshAgentRuntimeStatus, refreshAiProfiles, refreshDeviceChatHistory]);
 
   useEffect(() => {
     if (connection === "connected" && activeSection === "camera") {
@@ -2229,6 +2639,20 @@ function App() {
             <StatusPill state={connection === "connected" ? "ok" : connection === "connecting" ? "warn" : "offline"}>
               {connection === "connected" ? "已连接" : connection === "connecting" ? "连接中" : "未连接"}
             </StatusPill>
+            <button
+              className="action-button secondary orientation-toggle"
+              onClick={() => void toggleUiOrientation()}
+              disabled={connection !== "connected" || !uiStatus || orientationBusy || busy}
+              type="button"
+              title="通过 USB Tool 切换横屏与竖屏隐私模式"
+            >
+              <MonitorSmartphone size={17} />
+              {orientationBusy
+                ? "切换中..."
+                : uiStatus?.orientation === "portrait_privacy"
+                  ? "切换横屏"
+                  : "切换竖屏"}
+            </button>
             <button className="icon-button" onClick={() => void refreshAll({ full: true })} disabled={connection !== "connected" || busy} title="刷新">
               <RotateCw size={18} className={busy ? "spin" : ""} />
             </button>
@@ -2266,8 +2690,11 @@ function App() {
           </div>
         )}
 
-        <div className="content-grid">
-          <section className="primary-panel">{renderSection()}</section>
+        <div className={activeSection === "ui_preview" ? "content-grid content-grid-ui-preview" : activeSection === "pins" ? "content-grid" : "content-grid content-grid-full"}>
+          <section className={activeSection === "ui_preview" ? "primary-panel primary-panel-ui-preview" : "primary-panel"}>
+            {renderSection()}
+          </section>
+          {activeSection === "pins" && (
           <aside className="context-panel">
             <h2>硬件风险</h2>
             <p>{status?.powerNote ?? "连接设备后显示供电、GPIO、启动绑带脚与日志风险。"}</p>
@@ -2284,6 +2711,7 @@ function App() {
               ))}
             </div>
           </aside>
+          )}
         </div>
       </main>
     </div>
@@ -2292,7 +2720,19 @@ function App() {
   function renderSection() {
     switch (activeSection) {
       case "overview":
-        return <Overview status={status} sensors={sensors} diagnostics={diagnostics} logs={logs} />;
+        return (
+          <Overview
+            status={status}
+            sensors={sensors}
+            diagnostics={diagnostics}
+            logs={logs}
+            connection={connection}
+            screenshotBusy={screenshotBusy}
+            screenshotResult={screenshotResult}
+            screenshotPreviewUrl={screenshotPreviewUrl}
+            onCaptureScreenshot={captureScreenshot}
+          />
+        );
       case "usb":
         return (
           <UsbPanel
@@ -2323,6 +2763,13 @@ function App() {
             scanWifi={scanWifi}
           />
         );
+      case "realtime":
+        return (
+          <GlmRealtimePage
+            connection={connection}
+            sendCommand={sendRealtimeCommand}
+          />
+        );
       case "ai":
         return (
           <AiPanel
@@ -2344,16 +2791,10 @@ function App() {
             draft={aiChatDraft}
             setDraft={setAiChatDraft}
             busy={aiBusy}
-            projectRequest={projectAiRequest}
-            setProjectRequest={setProjectAiRequest}
-            contextPreview={aiContextPreview}
-            projectBusy={projectAiBusy}
-            kitchenAiStatus={kitchenAiStatus}
-            kitchenAiBusyPage={kitchenAiBusyPage}
+            agentRunStatus={agentRunStatus}
+            resolveAgentConfirmation={resolveAgentConfirmation}
+            cancelAgentRun={cancelAgentRun}
             deviceChatHistory={deviceChatHistory}
-            memorySummary={memorySummary}
-            memoryDraft={memoryDraft}
-            setMemoryDraft={setMemoryDraft}
             saveAiConfig={saveAiConfig}
             clearAiKey={clearAiKey}
             saveAsrConfig={saveAsrConfig}
@@ -2364,15 +2805,8 @@ function App() {
             sendAiChat={sendAiChat}
             toggleVoiceChat={toggleVoiceChat}
             clearMessages={clearAiMessages}
-            previewContext={previewProjectAiContext}
-            runMockTask={runProjectAiTask}
-            refreshKitchenAiStatus={refreshKitchenAiStatus}
-            generateKitchenAiPage={generateKitchenAiPage}
             refreshDeviceHistory={refreshDeviceChatHistory}
             clearDeviceHistory={clearDeviceChatHistory}
-            refreshMemory={refreshMemorySummary}
-            saveMemory={saveMemorySummary}
-            clearMemory={clearMemorySummary}
           />
         );
       case "mic":
@@ -2382,6 +2816,7 @@ function App() {
             asrConfig={asrConfig}
             voiceStatus={voiceStatus}
             voiceBusy={voiceBusy}
+            micPlaybackBusy={micPlaybackBusy}
             micTestMode={micTestMode}
             micSamples={micSamples}
             micTranscript={micTranscript}
@@ -2391,6 +2826,8 @@ function App() {
             wakeEvents={wakeEvents}
             wakeAsrState={wakeAsrState}
             micPlayback={micPlayback}
+            micSource={micSource}
+            setMicSource={setMicSource}
             startHardwareTest={startMicHardwareTest}
             stopHardwareTest={stopMicHardwareTest}
             refreshHardwareStatus={refreshMicHardwareStatus}
@@ -2417,6 +2854,7 @@ function App() {
             saveConfig={saveTtsConfig}
             clearKey={clearTtsKey}
             playDevice={playDeviceTts}
+            playBeep={playSpeakerBeep}
             stopDevice={stopDeviceTts}
             playBrowser={playBrowserTts}
             refreshStatus={refreshTtsStatus}
@@ -2464,7 +2902,7 @@ function App() {
       case "pins":
         return <PinsPanel pins={pins} />;
       case "sensors":
-        return <SensorsPanel sensors={sensors} />;
+        return <SensorsPanel sensors={sensors} onMq5Command={sendMq5Command} />;
       case "logs":
         return (
           <LogsPanel
@@ -2495,6 +2933,8 @@ function App() {
         );
       case "tfcard":
         return <TfCardPage connected={connection === "connected"} sendCommand={sendTfCommand} />;
+      case "ui_preview":
+        return <UiPreviewPage />;
     }
   }
 }
@@ -2504,11 +2944,21 @@ function Overview({
   sensors,
   diagnostics,
   logs,
+  connection,
+  screenshotBusy,
+  screenshotResult,
+  screenshotPreviewUrl,
+  onCaptureScreenshot,
 }: {
   status: DeviceStatus | null;
   sensors: SensorSnapshot | null;
   diagnostics: DiagnosticSnapshot | null;
   logs: DeviceLog[];
+  connection: ConnectionState;
+  screenshotBusy: boolean;
+  screenshotResult: ScreenshotResponse | null;
+  screenshotPreviewUrl: string;
+  onCaptureScreenshot: () => void;
 }) {
   const lightValue = sensors?.lightValue10bit ?? sensors?.lux;
   return (
@@ -2520,6 +2970,45 @@ function Overview({
         </div>
         <StatusPill state={status ? "ok" : "offline"}>{status ? status.page : "等待连接"}</StatusPill>
       </div>
+      <div className="button-row">
+        <button
+          className="action-button"
+          onClick={onCaptureScreenshot}
+          disabled={connection !== "connected" || screenshotBusy}
+          type="button"
+        >
+          <Camera size={17} />
+          {screenshotBusy ? "截屏中..." : "截取屏幕"}
+        </button>
+      </div>
+      {screenshotResult && (
+        <div className="screenshot-card">
+          <div className="screenshot-card-head">
+            <div>
+              <strong>最近截屏</strong>
+              <span>
+                {screenshotResult.path} · {screenshotResult.format.toUpperCase()}
+                {screenshotResult.bytes ? ` · ${formatBytes(screenshotResult.bytes)}` : ""}
+              </span>
+            </div>
+            {screenshotPreviewUrl && (
+              <a
+                className="action-button secondary screenshot-download"
+                href={screenshotPreviewUrl}
+                download={screenshotResult.path.split("/").at(-1) || "fridge-screenshot"}
+              >
+                <Download size={15} />
+                下载截图
+              </a>
+            )}
+          </div>
+          {screenshotPreviewUrl ? (
+            <img className="screenshot-preview" src={screenshotPreviewUrl} alt="设备当前屏幕截屏" />
+          ) : (
+            <div className="screenshot-empty"><Check size={16} /> 截屏已保存，等待读回。</div>
+          )}
+        </div>
+      )}
       <div className="metric-grid">
         <Metric label="Free Heap" value={status ? `${status.freeHeapKb} KB` : "--"} />
         <Metric label="Min Heap" value={status ? `${status.minHeapKb} KB` : "--"} />
@@ -2535,8 +3024,9 @@ function Overview({
       <div className="two-column">
         <KeyValue title="传感器摘要" rows={[
           ["门状态", sensors?.doorState ?? "--"],
-          ["亮度", sensors ? `${lightValue} / 1023` : "--"],
-          ["PIR", sensors?.pir ? "触发" : "未触发"],
+          ["亮度", lightValue !== undefined ? `${lightValue} / 1023` : "--"],
+          ["PIR", sensors?.pir === undefined ? "--" : sensors.pir ? "触发" : "未触发"],
+          ["MPU6050", sensors?.imuReady ? "已就绪" : sensors ? "未就绪" : "--"],
           ["更新时间", sensors?.updatedAt ?? "--"],
         ]} />
         <KeyValue title="诊断摘要" rows={[
@@ -2888,16 +3378,10 @@ function AiPanel({
   draft,
   setDraft,
   busy,
-  projectRequest,
-  setProjectRequest,
-  contextPreview,
-  projectBusy,
-  kitchenAiStatus,
-  kitchenAiBusyPage,
+  agentRunStatus,
+  resolveAgentConfirmation,
+  cancelAgentRun,
   deviceChatHistory,
-  memorySummary,
-  memoryDraft,
-  setMemoryDraft,
   saveAiConfig,
   clearAiKey,
   saveAsrConfig,
@@ -2908,15 +3392,8 @@ function AiPanel({
   sendAiChat,
   toggleVoiceChat,
   clearMessages,
-  previewContext,
-  runMockTask,
-  refreshKitchenAiStatus,
-  generateKitchenAiPage,
   refreshDeviceHistory,
   clearDeviceHistory,
-  refreshMemory,
-  saveMemory,
-  clearMemory,
 }: {
   connection: ConnectionState;
   aiConfig: AIConfig | null;
@@ -2932,20 +3409,14 @@ function AiPanel({
   voiceBusy: boolean;
   micTestMode: "idle" | "hardware" | "asr";
   messages: AIChatMessage[];
-  replyDebug: AIReplyDebug | null;
+  replyDebug: AgentRunDebug | null;
   draft: string;
   setDraft: (value: string) => void;
   busy: boolean;
-  projectRequest: ProjectAITaskRequest;
-  setProjectRequest: (request: ProjectAITaskRequest) => void;
-  contextPreview: AIContextPreview | null;
-  projectBusy: boolean;
-  kitchenAiStatus: KitchenAIStatus | null;
-  kitchenAiBusyPage: KitchenAIPage | null;
-  deviceChatHistory: DeviceChatHistory | null;
-  memorySummary: MemorySummary | null;
-  memoryDraft: string;
-  setMemoryDraft: (value: string) => void;
+  agentRunStatus: AgentRunStatus | null;
+  resolveAgentConfirmation: (confirmed: boolean) => Promise<void>;
+  cancelAgentRun: () => Promise<void>;
+  deviceChatHistory: AgentSession | null;
   saveAiConfig: (event: FormEvent<HTMLFormElement>) => void;
   clearAiKey: () => Promise<void>;
   saveAsrConfig: () => Promise<void>;
@@ -2956,15 +3427,8 @@ function AiPanel({
   sendAiChat: (event?: FormEvent<HTMLFormElement>) => Promise<void>;
   toggleVoiceChat: () => Promise<void>;
   clearMessages: () => void;
-  previewContext: () => Promise<void>;
-  runMockTask: () => Promise<void>;
-  refreshKitchenAiStatus: () => Promise<void>;
-  generateKitchenAiPage: (page: KitchenAIPage) => Promise<void>;
   refreshDeviceHistory: () => Promise<void>;
   clearDeviceHistory: () => Promise<void>;
-  refreshMemory: () => Promise<void>;
-  saveMemory: () => Promise<void>;
-  clearMemory: () => Promise<void>;
 }) {
   const current = aiConfig ?? defaultAiConfig;
   const currentAsr = asrConfig ?? defaultAsrConfig;
@@ -2974,28 +3438,12 @@ function AiPanel({
   const updateAsr = (patch: Partial<ASRConfig>) => {
     setAsrConfig({ ...currentAsr, ...patch });
   };
-  const updateProject = (patch: Partial<ProjectAITaskRequest>) => {
-    setProjectRequest({ ...projectRequest, ...patch });
-  };
   const connected = connection === "connected";
   const systemPromptBytes = utf8ByteLength(current.systemPrompt);
   const systemPromptTooLong = systemPromptBytes > AI_SYSTEM_PROMPT_MAX_BYTES;
-  const contextBytes = utf8ByteLength(JSON.stringify(contextPreview?.context ?? {}, null, 2));
   const historyBytes = utf8ByteLength(JSON.stringify(deviceChatHistory ?? {}, null, 2));
-  const memoryBytes = utf8ByteLength(memoryDraft);
   const voiceRecording = voiceStatus?.state === "recording";
   const voiceFromHardwareTest = voiceRecording && micTestMode === "hardware";
-  const debugPreview = (value: string) => value.length > 260 ? `${value.slice(0, 260)}...` : value;
-  const kitchenAiState: "ok" | "warn" | "danger" | "offline" =
-    kitchenAiStatus?.state === "error"
-      ? "danger"
-      : kitchenAiStatus?.running || kitchenAiStatus?.state === "running"
-        ? "warn"
-        : kitchenAiStatus?.lastOk
-          ? "ok"
-          : kitchenAiStatus
-            ? "offline"
-            : "offline";
 
   return (
     <div className="section-flow">
@@ -3005,13 +3453,13 @@ function AiPanel({
           <h2>AI 助手</h2>
         </div>
         <StatusPill state={current.ready ? "ok" : current.hasApiKey ? "warn" : "offline"}>
-          {busy ? "对话中" : current.ready ? "已就绪" : current.hasApiKey ? "待测试" : "缺少 Key"}
+          {busy ? "对话中" : current.ready ? "配置完成" : current.hasApiKey ? "待完善" : "缺少 Key"}
         </StatusPill>
       </div>
 
       <div className="warning-line">
         <Info size={16} />
-        这里是开发调试入口。真实上下文注入、短期会话历史和测试记忆都由开发板负责，Web 面板只做配置、预览和调试。
+        这里是 P4 小精灵开发调试入口。完整上下文、工具协议和唯一会话历史均由设备运行时管理，Web 只负责配置与发送测试消息。
       </div>
 
       <div className="ai-assistant-grid">
@@ -3019,21 +3467,15 @@ function AiPanel({
           <form className="ai-chat-panel assistant-chat" onSubmit={(event) => void sendAiChat(event)}>
             <div className="ai-chat-head">
               <div>
-                <h3>真实上下文对话</h3>
-                <p>发送后会调用 `ai_assistant_chat`，由开发板注入库存、提醒、偏好、记忆和 48 小时内最多 15 轮设备侧会话历史。</p>
+                <h3>P4 小精灵对话</h3>
+                <p>发送后通过 `agent_submit` 进入与 CHAT-01 相同的小精灵运行时；设备负责完整工具 Schema、Persona、Skill、最近 12 轮文本和当前任务工具结果。</p>
               </div>
               <div className="button-row compact">
-                <button className="action-button secondary" type="button" disabled={!connected || busy} onClick={() => void refreshDeviceHistory()}>
-                  加载设备历史
-                </button>
                 <button className="action-button secondary" type="button" disabled={messages.length === 0 || busy} onClick={clearMessages}>
                   清空窗口
                 </button>
-                <button className="action-button secondary danger-soft" type="button" disabled={!connected || busy} onClick={() => void clearDeviceHistory()}>
-                  清空设备历史
-                </button>
                 <StatusPill state={busy ? "warn" : current.ready ? "ok" : "offline"}>
-                  {busy ? "等待中" : current.ready ? "在线" : "未就绪"}
+                  {busy ? "等待中" : current.ready ? "配置完成" : "未就绪"}
                 </StatusPill>
               </div>
             </div>
@@ -3056,23 +3498,37 @@ function AiPanel({
             {replyDebug && (
               <div className="compact-card ai-reply-debug">
                 <div className="ai-chat-head compact-head">
-                  <h3>回复截断诊断</h3>
-                  <StatusPill state={replyDebug.same ? "ok" : "warn"}>
-                    {replyDebug.same ? "一致" : "不一致"}
+                  <h3>P4 小精灵任务诊断</h3>
+                  <StatusPill state={replyDebug.status === "COMPLETED" ? "ok" : "warn"}>
+                    {replyDebug.status || "unknown"}
                   </StatusPill>
                 </div>
                 <p className="muted-copy">
-                  {replyDebug.at} / 即时 {utf8ByteLength(replyDebug.immediateReply)} bytes / 历史 {replyDebug.historySource === "device_history" ? `${utf8ByteLength(replyDebug.historyReply)} bytes` : "未返回"}
+                  {replyDebug.at} / Run {replyDebug.runId || "--"} / {replyDebug.latencyMs} ms / HTTP {replyDebug.httpStatus || "--"}
                 </p>
-                <div className="debug-compare-grid">
+              </div>
+            )}
+            {agentRunStatus?.confirmation && (
+              <div className="compact-card ai-reply-debug">
+                <div className="ai-chat-head compact-head">
                   <div>
-                    <strong>即时回复</strong>
-                    <pre>{debugPreview(replyDebug.immediateReply) || "(空)"}</pre>
+                    <h3>工具调用需要确认</h3>
+                    <p className="muted-copy">{agentRunStatus.confirmation.toolName}</p>
                   </div>
-                  <div>
-                    <strong>设备历史末条</strong>
-                    <pre>{debugPreview(replyDebug.historyReply) || "(空)"}</pre>
-                  </div>
+                  <StatusPill state={agentRunStatus.confirmation.permission === "DANGEROUS" ? "danger" : "warn"}>
+                    {agentRunStatus.confirmation.permission || "WRITE"}
+                  </StatusPill>
+                </div>
+                <pre className="json-preview">{JSON.stringify(agentRunStatus.confirmation.arguments, null, 2)}</pre>
+                <div className="button-row">
+                  <button className="action-button" type="button" disabled={!connected} onClick={() => void resolveAgentConfirmation(true)}>
+                    <Check size={17} />
+                    确认执行
+                  </button>
+                  <button className="action-button secondary danger-soft" type="button" disabled={!connected} onClick={() => void resolveAgentConfirmation(false)}>
+                    <ShieldAlert size={17} />
+                    拒绝
+                  </button>
                 </div>
               </div>
             )}
@@ -3094,10 +3550,17 @@ function AiPanel({
                 <Mic size={17} />
                 {voiceFromHardwareTest ? "硬件测试中" : voiceRecording ? "停止并转写" : "语音转写"}
               </button>
-              <button className="action-button" type="submit" disabled={!connected || busy || draft.trim().length === 0}>
-                <Send size={17} />
-                发送
-              </button>
+              {busy ? (
+                <button className="action-button danger-soft" type="button" disabled={!connected} onClick={() => void cancelAgentRun()}>
+                  <Power size={17} />
+                  停止
+                </button>
+              ) : (
+                <button className="action-button" type="submit" disabled={!connected || draft.trim().length === 0}>
+                  <Send size={17} />
+                  发送
+                </button>
+              )}
             </div>
             <div className="form-hint">
               Voice: {voiceStatus?.state ?? "idle"} / {voiceStatus?.durationMs ?? 0} ms / rms {voiceStatus?.rms ?? 0}
@@ -3110,22 +3573,40 @@ function AiPanel({
 
           <div className="project-ai-card">
             <div className="ai-chat-head compact-head">
-              <h3>上下文预览</h3>
-              <StatusPill state={contextPreview?.needsConfirmation ? "warn" : contextPreview ? "ok" : "offline"}>
-                {contextPreview ? `${contextBytes} bytes` : "未生成"}
+              <h3>小精灵运行时诊断</h3>
+              <StatusPill state={agentRunStatus?.state === "FAILED" ? "danger" : agentRunStatus?.active ? "warn" : agentRunStatus ? "ok" : "offline"}>
+                {agentRunStatus?.state ?? "未读取"}
               </StatusPill>
             </div>
-            <pre className="json-preview tall">{JSON.stringify(contextPreview?.context ?? { note: "点击右侧“预览上下文”后，这里会显示开发板将注入给模型的数据。" }, null, 2)}</pre>
+            <div className="sensor-grid">
+              <GaugeBlock label="Run" value={agentRunStatus?.runId || "--"} state={agentRunStatus?.runId ? "ok" : "offline"} />
+              <GaugeBlock label="上下文" value={agentRunStatus ? `${agentRunStatus.contextBytes} B` : "--"} state={agentRunStatus?.contextBytes ? "ok" : "offline"} />
+              <GaugeBlock label="工具 Schema" value={agentRunStatus ? `${agentRunStatus.toolSchemaCount}` : "--"} state={agentRunStatus?.toolSchemaCount ? "ok" : "offline"} />
+              <GaugeBlock label="模型步骤" value={agentRunStatus ? `${agentRunStatus.modelSteps}/6` : "--"} state={(agentRunStatus?.modelSteps ?? 0) >= 6 ? "warn" : "ok"} />
+              <GaugeBlock label="可用 PSRAM" value={agentRunStatus ? `${Math.round(agentRunStatus.freePsramBytes / 1024)} KiB` : "--"} state={agentRunStatus?.freePsramBytes ? "ok" : "offline"} />
+              <GaugeBlock label="内部 DMA 最大块" value={agentRunStatus ? `${Math.round(agentRunStatus.internalDmaLargestBytes / 1024)} KiB` : "--"} state={agentRunStatus?.internalDmaLargestBytes ? "ok" : "offline"} />
+            </div>
+            <KeyValue title="云 Worker" rows={[
+              ["intent", agentRunStatus?.intent || "--"],
+              ["cloudPending", agentRunStatus ? String(agentRunStatus.cloudPending) : "--"],
+              ["stackHighWater", agentRunStatus ? `${agentRunStatus.cloudStackHighWater} bytes` : "--"],
+              ["HTTP", agentRunStatus?.httpStatus ? String(agentRunStatus.httpStatus) : "--"],
+              ["modelLatency", agentRunStatus?.modelLatencyMs ? `${agentRunStatus.modelLatencyMs} ms` : "--"],
+              ["error", agentRunStatus?.error || "--"],
+            ]} />
           </div>
 
           <div className="project-ai-card">
             <div className="ai-chat-head compact-head">
               <h3>设备会话历史</h3>
               <StatusPill state={deviceChatHistory ? "ok" : "offline"}>
-                {deviceChatHistory ? `${Math.floor(deviceChatHistory.count / 2)}/${Math.floor(deviceChatHistory.maxMessages / 2)} 轮` : "未读取"}
+                {deviceChatHistory ? `${deviceChatHistory.foreground.messages.length}/48 条` : "未读取"}
               </StatusPill>
             </div>
-            <pre className="json-preview tall">{JSON.stringify(deviceChatHistory ?? { note: "这里显示开发板本地保存的短期会话历史，超过 48 小时或超出 15 轮上限会自动裁剪。" }, null, 2)}</pre>
+            <p className="muted-copy">
+              TF 卡固定保存唯一 `foreground` 会话，最多保留 48 条记录；Web 对话窗口加载最近 24 条用户与小精灵消息。下一序号：{deviceChatHistory?.foreground.next_sequence ?? "--"}。
+            </p>
+            <pre className="json-preview tall">{JSON.stringify(deviceChatHistory ?? { note: "点击刷新后读取 TF 卡 agent/data/sessions.json 中的 foreground 会话。" }, null, 2)}</pre>
             <div className="button-row">
               <button className="action-button secondary" type="button" disabled={!connected} onClick={() => void refreshDeviceHistory()}>
                 刷新历史
@@ -3139,92 +3620,11 @@ function AiPanel({
         </div>
 
         <aside className="section-flow">
-          <form className="project-ai-card" onSubmit={(event) => { event.preventDefault(); void previewContext(); }}>
-            <div className="ai-chat-head compact-head">
-              <h3>任务与注入</h3>
-              <StatusPill state={projectBusy ? "warn" : connected ? "ok" : "offline"}>{projectBusy ? "处理中" : "可调试"}</StatusPill>
-            </div>
-            <label>
-              <span>任务类型</span>
-              <select value={projectRequest.taskType} onChange={(event) => updateProject({ taskType: event.target.value as ProjectAITaskType })}>
-                {Object.entries(projectAiTaskLabels).map(([value, label]) => (
-                  <option value={value} key={value}>{label}</option>
-                ))}
-              </select>
-            </label>
-            <div className="context-toggle-grid">
-              <label><input type="checkbox" checked={projectRequest.includeInventory} onChange={(event) => updateProject({ includeInventory: event.target.checked })} />库存</label>
-              <label><input type="checkbox" checked={projectRequest.includeReminders} onChange={(event) => updateProject({ includeReminders: event.target.checked })} />提醒</label>
-              <label><input type="checkbox" checked={projectRequest.includePreferences} onChange={(event) => updateProject({ includePreferences: event.target.checked })} />偏好</label>
-              <label><input type="checkbox" checked={projectRequest.includeMemory} onChange={(event) => updateProject({ includeMemory: event.target.checked })} />记忆</label>
-            </div>
-            <div className="button-row">
-              <button className="action-button secondary" type="submit" disabled={!connected || projectBusy}>
-                <Search size={17} />
-                预览上下文
-              </button>
-              <button className="action-button secondary" type="button" disabled={!connected || projectBusy} onClick={() => void runMockTask()}>
-                <Play size={17} />
-                Mock 任务
-              </button>
-            </div>
-          </form>
-
-          <div className="project-ai-card">
-            <div className="ai-chat-head compact-head">
-              <h3>厨房 AI JSON 测试</h3>
-              <StatusPill state={kitchenAiState}>
-                {kitchenAiBusyPage ? `生成 ${kitchenAiPageLabels[kitchenAiBusyPage]}` : kitchenAiStatus?.state ?? "未读取"}
-              </StatusPill>
-            </div>
-            <div className="button-row">
-              {(Object.keys(kitchenAiPageLabels) as KitchenAIPage[]).map((page) => (
-                <button
-                  className={page === "all" ? "action-button" : "action-button secondary"}
-                  type="button"
-                  disabled={!connected || Boolean(kitchenAiBusyPage) || kitchenAiStatus?.running}
-                  key={page}
-                  onClick={() => void generateKitchenAiPage(page)}
-                >
-                  <Play size={17} />
-                  {kitchenAiPageLabels[page]}
-                </button>
-              ))}
-              <button className="icon-button" type="button" disabled={!connected || Boolean(kitchenAiBusyPage)} onClick={() => void refreshKitchenAiStatus()} title="刷新厨房 AI 状态">
-                <RotateCw size={17} className={kitchenAiBusyPage || kitchenAiStatus?.running ? "spin" : ""} />
-              </button>
-            </div>
-            <div className="sensor-grid">
-              <GaugeBlock label="运行状态" value={kitchenAiStatus?.running ? "运行中" : kitchenAiStatus?.state ?? "--"} state={kitchenAiState} />
-              <GaugeBlock label="当前页面" value={kitchenAiStatus?.currentPage ?? "--"} state={kitchenAiStatus?.running ? "warn" : "offline"} />
-              <GaugeBlock label="最近页面" value={kitchenAiStatus?.lastPage ?? "--"} state={kitchenAiStatus?.lastOk ? "ok" : "offline"} />
-              <GaugeBlock label="触发来源" value={kitchenAiStatus?.lastTrigger ?? "--"} state="ok" />
-              <GaugeBlock label="HTTP" value={kitchenAiStatus ? `${kitchenAiStatus.httpStatus}` : "--"} state={kitchenAiStatus?.httpStatus === 200 ? "ok" : kitchenAiStatus?.httpStatus ? "danger" : "offline"} />
-              <GaugeBlock label="耗时" value={kitchenAiStatus ? `${kitchenAiStatus.latencyMs} ms` : "--"} state={kitchenAiStatus?.latencyMs ? "ok" : "offline"} />
-            </div>
-            <KeyValue title="厨房 AI 状态字段" rows={[
-              ["lastOk", kitchenAiStatus ? String(kitchenAiStatus.lastOk) : "--"],
-              ["lastGeneratedAt", kitchenAiStatus ? formatUnixTime(kitchenAiStatus.lastGeneratedAt) : "--"],
-              ["lastAutoDay", kitchenAiStatus ? formatDayKey(kitchenAiStatus.lastAutoDay) : "--"],
-              ["lastReplyLen", kitchenAiStatus?.lastReplyLen !== undefined ? `${kitchenAiStatus.lastReplyLen} bytes` : "--"],
-              ["lastError", kitchenAiStatus?.lastError || "--"],
-            ]} />
-            <div className="ai-chat-head compact-head">
-              <h3>AI 原始返回</h3>
-              <span className="form-hint">来自开发板最近一次模型回复预览，最多约 1KB。</span>
-            </div>
-            <pre className="json-preview tall">{kitchenAiStatus?.lastReplyPreview || "点击生成后，这里显示模型原始 JSON 文本；诊断状态在下方。"}</pre>
-            <div className="ai-chat-head compact-head">
-              <h3>诊断状态</h3>
-            </div>
-            <pre className="json-preview">{JSON.stringify(kitchenAiStatus ?? { note: "点击刷新或生成按钮后，这里会显示 get_kitchen_ai_status 返回字段。" }, null, 2)}</pre>
-          </div>
-
           <form className="ai-config-main" onSubmit={saveAiConfig}>
             <div className="ai-chat-head compact-head">
               <h3>AI 设置</h3>
               <StatusPill state={current.ready ? "ok" : current.hasApiKey ? "warn" : "offline"}>
-                {current.ready ? "可调用" : "待配置"}
+                {current.ready ? "配置完成" : "待配置"}
               </StatusPill>
             </div>
             <div className="ai-profile-bar compact-card">
@@ -3312,16 +3712,16 @@ function AiPanel({
               </label>
             </div>
             <label>
-              <span>系统提示词</span>
+                <span>旧系统提示词（兼容字段）</span>
               <textarea
                 value={current.systemPrompt}
                 rows={4}
                 aria-invalid={systemPromptTooLong}
-                placeholder="用于约束 AI 助手的基础人格、输出风格和项目规则"
+                placeholder="仅供旧 Assistant/厨房测试链路兼容使用"
                 onChange={(event) => update({ systemPrompt: event.target.value })}
               />
               <small className={systemPromptTooLong ? "form-hint danger" : "form-hint"}>
-                {systemPromptBytes}/{AI_SYSTEM_PROMPT_MAX_BYTES} UTF-8 字节
+                {systemPromptBytes}/{AI_SYSTEM_PROMPT_MAX_BYTES} UTF-8 字节；不会覆盖 P4 小精灵运行时的固定安全策略
               </small>
             </label>
             <div className="button-row">
@@ -3339,8 +3739,9 @@ function AiPanel({
             </div>
             <div className="warning-line">
               <ShieldAlert size={16} />
-              当前是开发模式，真实 AI API 的 Key 会保存在设备 NVS 中，但不会在日志或串口响应里明文回显。
+              当前是开发模式，真实 AI API 的 Key 会保存在设备 NVS 中，但不会在日志或串口响应里明文回显。配置完成只校验 URL、模型和已保存 Key；云端连通性以实际小精灵对话结果为准。
             </div>
+            {current.lastError && <p className="form-hint danger">最近云端错误：{current.lastError}</p>}
           </form>
 
           <form className="ai-config-main" onSubmit={(event) => { event.preventDefault(); void saveAsrConfig(); }}>
@@ -3386,30 +3787,6 @@ function AiPanel({
             </div>
           </form>
 
-          <div className="project-ai-card">
-            <div className="ai-chat-head compact-head">
-              <h3>硬件测试记忆</h3>
-              <StatusPill state={memorySummary ? "ok" : "offline"}>{memoryBytes} bytes</StatusPill>
-            </div>
-            <textarea
-              className="json-editor"
-              value={memoryDraft}
-              rows={9}
-              spellCheck={false}
-              onChange={(event) => setMemoryDraft(event.target.value)}
-            />
-            <div className="button-row">
-              <button className="action-button secondary" type="button" disabled={!connected} onClick={() => void refreshMemory()}>
-                读取
-              </button>
-              <button className="action-button" type="button" disabled={!connected} onClick={() => void saveMemory()}>
-                写入记忆
-              </button>
-              <button className="action-button secondary danger-soft" type="button" disabled={!connected} onClick={() => void clearMemory()}>
-                清空
-              </button>
-            </div>
-          </div>
         </aside>
       </div>
     </div>
@@ -3476,6 +3853,7 @@ function SpeakerTestPanel({
   saveConfig,
   clearKey,
   playDevice,
+  playBeep,
   stopDevice,
   playBrowser,
   refreshStatus,
@@ -3493,6 +3871,7 @@ function SpeakerTestPanel({
   saveConfig: () => Promise<void>;
   clearKey: () => Promise<void>;
   playDevice: () => Promise<void>;
+  playBeep: () => Promise<void>;
   stopDevice: () => Promise<void>;
   playBrowser: () => Promise<void>;
   refreshStatus: () => Promise<void>;
@@ -3508,7 +3887,7 @@ function SpeakerTestPanel({
     <div className="section-flow">
       <div className="section-heading">
         <div>
-          <p className="eyebrow">MAX98357 / I2S TX / 云端 TTS</p>
+          <p className="eyebrow">ES8311 / NS4150B / 云端 TTS</p>
           <h2>扬声器测试</h2>
         </div>
         <StatusPill state={statusState}>{status?.state ?? (current.ready ? "ready" : "need key")}</StatusPill>
@@ -3516,7 +3895,7 @@ function SpeakerTestPanel({
 
       <div className="warning-line">
         <ShieldAlert size={16} />
-        默认测试脚位：BCLK=GPIO40，LRC=GPIO41，DIN=GPIO39。BCLK/WS 与 INMP441 共用；MAX98357 可 5V 供电，但所有逻辑脚必须是 3.3V，首轮避免录音和播放同时进行。
+        P4 板载链路：ES8311 I2S 使用 GPIO2-6，NS4150B 功放使能 PA_CTRL=GPIO11。蜂鸣器测试不访问云端；测试期间会暂停 WakeNet，摄像头与 ES8311 共享的 GPIO28/29 I2C 仍需分时使用。
       </div>
 
       <div className="speaker-layout">
@@ -3575,6 +3954,10 @@ function SpeakerTestPanel({
             <textarea value={text} rows={5} maxLength={512} onChange={(event) => setText(event.target.value)} />
           </label>
           <div className="button-row">
+            <button className="action-button secondary" type="button" disabled={!connected || busy} onClick={() => void playBeep()}>
+              <Volume2 size={17} />
+              蜂鸣器测试
+            </button>
             <button className="action-button" type="button" disabled={!connected || busy || !text.trim()} onClick={() => void playDevice()}>
               <Play size={17} />
               设备播放
@@ -3805,6 +4188,7 @@ function MicrophoneTestPanel({
   asrConfig,
   voiceStatus,
   voiceBusy,
+  micPlaybackBusy,
   micTestMode,
   micSamples,
   micTranscript,
@@ -3814,6 +4198,8 @@ function MicrophoneTestPanel({
   wakeEvents,
   wakeAsrState,
   micPlayback,
+  micSource,
+  setMicSource,
   startHardwareTest,
   stopHardwareTest,
   refreshHardwareStatus,
@@ -3827,6 +4213,7 @@ function MicrophoneTestPanel({
   asrConfig: ASRConfig | null;
   voiceStatus: VoiceChatStatus | null;
   voiceBusy: boolean;
+  micPlaybackBusy: boolean;
   micTestMode: "idle" | "hardware" | "asr";
   micSamples: VoiceChatStatus[];
   micTranscript: string;
@@ -3836,6 +4223,8 @@ function MicrophoneTestPanel({
   wakeEvents: WakeEventRecord[];
   wakeAsrState: WakeAsrStateEventPayload | null;
   micPlayback: MicPlayback | null;
+  micSource: MicSource;
+  setMicSource: (source: MicSource) => void;
   startHardwareTest: () => Promise<void>;
   stopHardwareTest: () => Promise<void>;
   refreshHardwareStatus: () => Promise<void>;
@@ -3853,13 +4242,13 @@ function MicrophoneTestPanel({
   const hint = voiceStatus?.qualityHint ?? "too_short";
   const maxBar = Math.max(1, ...micSamples.map((item) => Math.max(item.rms ?? 0, item.peakAbs ?? 0)));
   const wakeState = !connected ? "offline" : wakeStatus?.error ? "danger" : wakeListening ? "warn" : "ok";
-  const wakeDisabled = !connected || wakeBusy || recording || voiceBusy;
+  const wakeDisabled = !connected || wakeBusy || recording || voiceBusy || micPlaybackBusy;
 
   return (
     <div className="section-flow">
       <div className="section-heading">
         <div>
-          <p className="eyebrow">ES8311 / I2S / ASR</p>
+          <p className="eyebrow">ES8311 / FY-SP703 / I2S / ASR</p>
           <h2>麦克风测试</h2>
         </div>
         <StatusPill state={hint === "ok" ? "ok" : hint === "i2s_timeout" || hint === "clipping" ? "danger" : "warn"}>
@@ -3869,7 +4258,9 @@ function MicrophoneTestPanel({
 
       <div className="warning-line">
         <Info size={16} />
-        当前使用 P4 板载驻极体麦克风与 ES8311，无需外接线。音频为 16 kHz / 16-bit / mono；硬件录音测试不会触发 ASR 或 AI。
+        {micSource === "fy_sp703"
+          ? "FY-SP703：3.3V 供电，GPIO7=LRCK、GPIO8=BCLK、GPIO9=DIN，当前模块固件输出 16 kHz / 32-bit / stereo Philips I2S 时钟与数据；Pin14 5V、AEC±、OUT± 保持悬空。"
+          : "当前使用 P4 板载驻极体麦克风与 ES8311，无需外接线。音频为 16 kHz / 16-bit / mono；WakeNet 默认走 FY-SP703。"}
       </div>
 
       <div className="project-ai-card wake-card">
@@ -3898,6 +4289,7 @@ function MicrophoneTestPanel({
           </button>
         </div>
         <div className="mic-metrics-grid wake-metrics-grid">
+          <GaugeBlock label="麦克风" value={micSourceLabels[wakeStatus?.audioSource ?? "fy_sp703"]} state={wakeStatus?.audioSource ? "ok" : "offline"} />
           <GaugeBlock label="触发次数" value={`${wakeStatus?.triggerCount ?? 0}`} state={wakeStatus?.triggerCount ? "warn" : "ok"} />
           <GaugeBlock label="最近触发" value={wakeStatus?.lastTriggerMs ? `${wakeStatus.lastTriggerMs} ms` : "--"} state={wakeStatus?.lastTriggerMs ? "warn" : "offline"} />
           <GaugeBlock label="VAD" value={`${wakeStatus?.vadState ?? -1}`} state={(wakeStatus?.vadState ?? -1) > 0 ? "warn" : "ok"} />
@@ -3935,10 +4327,21 @@ function MicrophoneTestPanel({
               {hardwareRecording ? "录音中" : connected ? "可测试" : "未连接"}
             </StatusPill>
           </div>
+          <label className="field">
+            <span>录音与 ASR 音源</span>
+            <select
+              value={micSource}
+              disabled={recording || voiceBusy || micPlaybackBusy || wakeListening}
+              onChange={(event) => setMicSource(event.target.value as MicSource)}
+            >
+              <option value="fy_sp703">外接 FY-SP703（I2S1 从机，默认）</option>
+              <option value="es8311">板载 ES8311（回退）</option>
+            </select>
+          </label>
           <div className="button-row">
-            <button className="action-button" type="button" disabled={!connected || voiceBusy || recording || wakeListening} onClick={() => void startHardwareTest()}>
+            <button className="action-button" type="button" disabled={!connected || voiceBusy || micPlaybackBusy || recording || wakeListening} onClick={() => void startHardwareTest()}>
               <Mic size={17} />
-              开始硬件录音
+              {micPlaybackBusy ? "正在读取回放" : "开始硬件录音"}
             </button>
             <button className="action-button secondary danger-soft" type="button" disabled={!connected || voiceBusy || !hardwareRecording} onClick={() => void stopHardwareTest()}>
               停止硬件录音
@@ -3957,7 +4360,7 @@ function MicrophoneTestPanel({
               </div>
               <audio controls src={micPlayback.url} />
               <p className="form-hint">
-                {micPlayback.sampleRate} Hz / {micPlayback.channels} ch / {micPlayback.bitsPerSample} bit / {micPlayback.durationMs} ms / PCM {micPlayback.pcmBytes} B / WAV {micPlayback.wavBytes} B
+                {micSourceLabels[micPlayback.source]} / {micPlayback.sampleRate} Hz / {micPlayback.channels} ch / {micPlayback.bitsPerSample} bit / {micPlayback.durationMs} ms / PCM {micPlayback.pcmBytes} B / WAV {micPlayback.wavBytes} B
               </p>
             </div>
           )}
@@ -3971,7 +4374,7 @@ function MicrophoneTestPanel({
             </StatusPill>
           </div>
           <div className="button-row">
-            <button className={asrRecording ? "action-button danger-soft" : "action-button secondary"} type="button" disabled={!connected || voiceBusy || (recording && !asrRecording) || (!asrRecording && wakeListening)} onClick={() => void toggleVoiceChat()}>
+            <button className={asrRecording ? "action-button danger-soft" : "action-button secondary"} type="button" disabled={!connected || voiceBusy || micPlaybackBusy || (recording && !asrRecording) || (!asrRecording && wakeListening)} onClick={() => void toggleVoiceChat()}>
               <Mic size={17} />
               {asrRecording ? "停止并识别" : "开始 ASR 测试"}
             </button>
@@ -3981,6 +4384,14 @@ function MicrophoneTestPanel({
       </div>
 
       <div className="mic-metrics-grid">
+        <GaugeBlock label="音源" value={micSourceLabels[voiceStatus?.source ?? micSource]} state="ok" />
+        <GaugeBlock
+          label="原生格式"
+          value={`${voiceStatus?.nativeSampleRate ?? 16000} Hz / ${voiceStatus?.nativeBitsPerSample ?? (micSource === "fy_sp703" ? 32 : 16)} bit / ${voiceStatus?.nativeChannels ?? (micSource === "fy_sp703" ? 2 : 1)} ch`}
+          state="ok"
+        />
+        <GaugeBlock label="有效通道" value={voiceStatus?.selectedChannel ?? (micSource === "fy_sp703" ? "检测中" : "mono")} state={voiceStatus?.selectedChannel ? "ok" : "offline"} />
+        <GaugeBlock label="L / R RMS" value={`${voiceStatus?.leftRms ?? 0} / ${voiceStatus?.rightRms ?? 0}`} state={micSource === "fy_sp703" ? "ok" : "offline"} />
         <GaugeBlock label="状态" value={voiceStatus?.state ?? "idle"} state={recording ? "warn" : hint === "ok" ? "ok" : "offline"} />
         <GaugeBlock label="时长" value={`${voiceStatus?.durationMs ?? 0} ms`} state="ok" />
         <GaugeBlock label="PCM" value={`${voiceStatus?.pcmBytes ?? 0} B`} state="ok" />
@@ -3989,6 +4400,7 @@ function MicrophoneTestPanel({
         <GaugeBlock label="Peak" value={`${voiceStatus?.peakAbs ?? 0}`} state="ok" />
         <GaugeBlock label="Min/Max" value={`${voiceStatus?.minSample ?? 0} / ${voiceStatus?.maxSample ?? 0}`} state="ok" />
         <GaugeBlock label="Timeout" value={`${voiceStatus?.timeoutCount ?? 0}`} state={(voiceStatus?.timeoutCount ?? 0) > 0 ? "danger" : "ok"} />
+        <GaugeBlock label="DMA Overflow" value={`${voiceStatus?.overflowCount ?? 0}`} state={(voiceStatus?.overflowCount ?? 0) > 0 ? "danger" : "ok"} />
       </div>
 
       <div className="mic-test-grid">
@@ -4426,11 +4838,22 @@ function RadarTestPanel({
   );
 }
 
-function SensorsPanel({ sensors }: { sensors: SensorSnapshot | null }) {
+function SensorsPanel({
+  sensors,
+  onMq5Command,
+}: {
+  sensors: SensorSnapshot | null;
+  onMq5Command: (command: Mq5Command) => Promise<boolean>;
+}) {
+  const [mq5Busy, setMq5Busy] = useState(false);
   const light10 = sensors?.lightValue10bit ?? sensors?.lux;
   const lightRaw = sensors?.lightRaw12bit;
   const lightPercent = sensors?.lightPercent;
-  const lightPolarityLabel = sensors?.lightPolarity === "raw_high_dark" ? "高=暗 / 低=亮" : "按设备上报";
+  const lightPolarityLabel = sensors?.lightPolarity === undefined
+    ? "--"
+    : sensors.lightPolarity === "raw_high_dark"
+      ? "高=暗 / 低=亮"
+      : "按设备上报";
   const radarLabel = !sensors?.radar
     ? "--"
     : sensors.radar.targetClass === "reliable_approaching"
@@ -4463,6 +4886,49 @@ function SensorsPanel({ sensors }: { sensors: SensorSnapshot | null }) {
     sensors?.gyroXDps !== undefined && sensors?.gyroYDps !== undefined && sensors?.gyroZDps !== undefined
       ? Math.sqrt((sensors.gyroXDps * sensors.gyroXDps) + (sensors.gyroYDps * sensors.gyroYDps) + (sensors.gyroZDps * sensors.gyroZDps)).toFixed(2)
       : "--";
+  const mq5StateLabel = !sensors?.mq5State
+    ? "--"
+    : sensors.mq5State === "monitoring"
+      ? "监测中"
+      : sensors.mq5State === "ready_to_calibrate"
+        ? "等待基线标定"
+        : sensors.mq5State === "needs_burn_in"
+          ? "等待首次老化确认"
+          : sensors.mq5State === "warming_up"
+            ? "预热中"
+            : sensors.mq5State === "error"
+              ? "异常"
+              : sensors.mq5State === "disabled"
+                ? "已关闭"
+                : "未知";
+  const mq5WarmupLabel = sensors?.mq5WarmupElapsedSec === undefined
+    ? "--"
+    : sensors.mq5DailyWarmupComplete
+      ? `已完成（${sensors.mq5WarmupElapsedSec}s）`
+      : `进行中 · ${sensors.mq5WarmupElapsedSec}s`;
+  // 三步 MQ-5 操作的严格前置条件（与固件 fridge_sensors_mq5_* 行为对齐）：
+  // - 确认老化：MQ 启用、已有有效样本、日常预热完成、尚未确认；
+  // - 采集基线：预热完成、老化已确认、有效窗口已满 64 样本；
+  // - 重置校准：已有老化确认或基线标定（不要求 MQ 当前启用，便于清除历史校准状态）。
+  const mq5Enabled = !!sensors?.mq5State && sensors.mq5State !== "disabled";
+  const mq5CanConfirmBurnIn = mq5Enabled && (sensors.mq5SampleCount ?? 0) > 0 && !!sensors.mq5DailyWarmupComplete && !sensors.mq5BurnInConfirmed;
+  const mq5CanCaptureBaseline = mq5Enabled && !!sensors.mq5DailyWarmupComplete && !!sensors.mq5BurnInConfirmed && (sensors.mq5SampleCount ?? 0) >= 64;
+  const mq5CanResetCalibration = !!sensors?.mq5BurnInConfirmed || !!sensors?.mq5BaselineReady;
+  const runMq5Command = async (command: Mq5Command) => {
+    if (mq5Busy) return;
+    const prompts: Record<Mq5Command, string> = {
+      mq5_confirm_burn_in: "确认已完成 MQ-5 首次通电老化？确认后设备会记录该状态，只有重置校准才能撤销。",
+      mq5_capture_baseline: "请先确认当前环境为洁净空气（无燃气、烟雾、酒精），再采集 MQ-5 基线。",
+      mq5_reset_calibration: "确定重置 MQ-5 老化确认与基线标定？该操作会清除设备上的校准状态，不可恢复。",
+    };
+    if (!window.confirm(prompts[command])) return;
+    setMq5Busy(true);
+    try {
+      await onMq5Command(command);
+    } finally {
+      setMq5Busy(false);
+    }
+  };
   return (
     <div className="section-flow">
       <div className="section-heading">
@@ -4470,22 +4936,23 @@ function SensorsPanel({ sensors }: { sensors: SensorSnapshot | null }) {
           <p className="eyebrow">本地状态机输入</p>
           <h2>传感器快照</h2>
         </div>
-        <StatusPill state={sensors ? "ok" : "offline"}>{sensors?.updatedAt ?? "无数据"}</StatusPill>
+        <StatusPill state={sensors?.imuReady ? "ok" : sensors ? "warn" : "offline"}>{sensors?.updatedAt ?? "无数据"}</StatusPill>
       </div>
       <div className="sensor-grid">
-        <GaugeBlock label="亮度 0-1023" value={sensors ? `${light10}` : "--"} state="ok" />
-        <GaugeBlock label="ADC 原始值" value={lightRaw !== undefined ? `${lightRaw}` : "--"} state="ok" />
-        <GaugeBlock label="亮度百分比" value={lightPercent !== undefined ? `${lightPercent}%` : "--"} state="ok" />
-        <GaugeBlock label="光敏极性" value={sensors ? lightPolarityLabel : "--"} state="ok" />
-        <GaugeBlock label="PIR" value={sensors?.pir ? "触发" : "未触发"} state={sensors?.pir ? "warn" : "ok"} />
-        <GaugeBlock label="亮度突变" value={sensors ? `${sensors.lightDelta}` : "--"} state="warn" />
-        <GaugeBlock label="姿态变化" value={sensors ? `${sensors.angleDelta}°` : "--"} state="ok" />
-        <GaugeBlock label="震动峰值" value={sensors ? `${sensors.vibrationPeak.toFixed(4)} g` : "--"} state="ok" />
+        <GaugeBlock label="亮度 0-1023" value={light10 !== undefined ? `${light10}` : "--"} state={light10 !== undefined ? "ok" : "offline"} />
+        <GaugeBlock label="ADC 原始值" value={lightRaw !== undefined ? `${lightRaw}` : "--"} state={lightRaw !== undefined ? "ok" : "offline"} />
+        <GaugeBlock label="亮度百分比" value={lightPercent !== undefined ? `${lightPercent}%` : "--"} state={lightPercent !== undefined ? "ok" : "offline"} />
+        <GaugeBlock label="光敏极性" value={lightPolarityLabel} state={sensors?.lightPolarity !== undefined ? "ok" : "offline"} />
+        <GaugeBlock label="PIR" value={sensors?.pir === undefined ? "--" : sensors.pir ? "触发" : "未触发"} state={sensors?.pir === undefined ? "offline" : sensors.pir ? "warn" : "ok"} />
+        <GaugeBlock label="亮度突变" value={sensors?.lightDelta !== undefined ? `${sensors.lightDelta}` : "--"} state={sensors?.lightDelta !== undefined ? "warn" : "offline"} />
+        <GaugeBlock label="姿态变化" value={sensors?.angleDelta !== undefined ? `${sensors.angleDelta.toFixed(2)}°` : "--"} state={sensors?.imuReady ? "ok" : "offline"} />
+        <GaugeBlock label="震动峰值" value={sensors?.vibrationPeak !== undefined ? `${sensors.vibrationPeak.toFixed(4)} g` : "--"} state={sensors?.imuReady ? "ok" : "offline"} />
         <GaugeBlock label="门状态" value={sensors?.doorState ?? "--"} state="ok" />
         <GaugeBlock label="雷达" value={radarLabel} state={radarState} />
       </div>
       <div className="sensor-grid">
-        <GaugeBlock label="IMU 就绪" value={sensors?.imuReady ? "是" : "否"} state={sensors?.imuReady ? "ok" : "offline"} />
+        <GaugeBlock label="IMU 就绪" value={sensors ? sensors.imuReady ? "是" : "否" : "--"} state={sensors?.imuReady ? "ok" : "offline"} />
+        <GaugeBlock label="安装基线" value={sensors ? sensors.baselineReady ? "已建立" : "等待样本" : "--"} state={sensors?.baselineReady ? "ok" : "offline"} />
         <GaugeBlock label="IMU 地址" value={imuAddress} state="ok" />
         <GaugeBlock label="WHO_AM_I" value={imuWhoAmI} state="ok" />
         <GaugeBlock label="温度" value={sensors?.imuTemperatureC !== undefined ? `${sensors.imuTemperatureC.toFixed(2)} °C` : "--"} state="ok" />
@@ -4493,17 +4960,39 @@ function SensorsPanel({ sensors }: { sensors: SensorSnapshot | null }) {
         <GaugeBlock label="Roll" value={sensors?.rollDeg !== undefined ? `${sensors.rollDeg.toFixed(2)}°` : "--"} state="ok" />
         <GaugeBlock label="加速度模长" value={accelMagnitude} state="ok" />
         <GaugeBlock label="陀螺仪模长" value={gyroMagnitude !== "--" ? `${gyroMagnitude} °/s` : "--"} state="ok" />
-        <GaugeBlock label="I2C 错误" value={sensors?.imuError !== undefined ? `${sensors.imuError}` : "--"} state={sensors?.imuError ? "danger" : "ok"} />
+        <GaugeBlock label="I2C 错误" value={sensors?.imuError !== undefined ? `${sensors.imuError} / ${sensors.imuErrorName ?? "--"}` : "--"} state={sensors?.imuError ? "danger" : "ok"} />
+        <GaugeBlock label="连续失败" value={sensors?.consecutiveFailures !== undefined ? `${sensors.consecutiveFailures}` : "--"} state={sensors?.consecutiveFailures ? "danger" : "ok"} />
+        <GaugeBlock label="样本计数" value={sensors?.sampleCount !== undefined ? `${sensors.sampleCount}` : "--"} state={sensors?.sampleCount ? "ok" : "offline"} />
       </div>
       <KeyValue title="MPU6050 原始读数" rows={[
         ["Accel X/Y/Z", sensors?.accelXG !== undefined ? `${sensors.accelXG.toFixed(4)} / ${sensors.accelYG?.toFixed(4)} / ${sensors.accelZG?.toFixed(4)} g` : "--"],
         ["Gyro X/Y/Z", sensors?.gyroXDps !== undefined ? `${sensors.gyroXDps.toFixed(3)} / ${sensors.gyroYDps?.toFixed(3)} / ${sensors.gyroZDps?.toFixed(3)} °/s` : "--"],
       ]} />
       <KeyValue title="外设状态" rows={[
-        ["触摸", sensors?.touch ?? "--"],
-        ["屏幕", sensors?.display ?? "--"],
-        ["蜂鸣器", sensors?.buzzer ?? "--"],
+        ["I2C 总线", sensors?.i2cBus !== undefined ? `I2C${sensors.i2cBus}` : "--"],
+        ["SCL / SDA", sensors?.sclGpio !== undefined && sensors?.sdaGpio !== undefined ? `GPIO${sensors.sclGpio} / GPIO${sensors.sdaGpio}` : "--"],
+        ["采样率", sensors?.sampleRateHz !== undefined ? `${sensors.sampleRateHz} Hz` : "--"],
       ]} />
+      <div className="sensor-grid">
+        <GaugeBlock label="MQ-5 状态" value={mq5StateLabel} state={!sensors?.mq5State ? "offline" : sensors.mq5State === "monitoring" ? "ok" : sensors.mq5State === "error" || sensors.mq5State === "disabled" ? "danger" : "warn"} />
+        <GaugeBlock label="ADC 原始值" value={sensors?.mq5Raw12bit !== undefined ? `${sensors.mq5Raw12bit}` : "--"} state={sensors?.mq5Ready ? "ok" : "offline"} />
+        <GaugeBlock label="相对读数 0-1023" value={sensors?.mq5Value10bit !== undefined ? `${sensors.mq5Value10bit}` : "--"} state={sensors?.mq5Ready ? "ok" : "offline"} />
+        <GaugeBlock label="ADC 百分比" value={sensors?.mq5AdcPercent !== undefined ? `${sensors.mq5AdcPercent}%` : "--"} state={sensors?.mq5Ready ? "ok" : "offline"} />
+        <GaugeBlock label="基线差值" value={sensors?.mq5DeltaFromBaseline !== undefined ? `${sensors.mq5DeltaFromBaseline}` : "--"} state={sensors?.mq5BaselineReady ? "ok" : "offline"} />
+        <GaugeBlock label="样本计数" value={sensors?.mq5SampleCount !== undefined ? `${sensors.mq5SampleCount}` : "--"} state={sensors?.mq5SampleCount ? "ok" : "offline"} />
+        <GaugeBlock label="预热" value={mq5WarmupLabel} state={sensors?.mq5DailyWarmupComplete ? "ok" : sensors?.mq5State ? "warn" : "offline"} />
+        <GaugeBlock label="首次老化" value={sensors?.mq5BurnInConfirmed === undefined ? "--" : sensors.mq5BurnInConfirmed ? "已确认" : "未确认"} state={sensors?.mq5BurnInConfirmed ? "ok" : sensors?.mq5State ? "warn" : "offline"} />
+        <GaugeBlock label="基线标定" value={sensors?.mq5BaselineReady === undefined ? "--" : sensors.mq5BaselineReady ? `已标定 ${sensors.mq5BaselineRaw12bit ?? "--"}` : "未标定"} state={sensors?.mq5BaselineReady ? "ok" : "warn"} />
+        <GaugeBlock label="最近更新" value={sensors?.mq5UpdatedAtMs !== undefined ? `${sensors.mq5UpdatedAtMs} ms` : "--"} state="ok" />
+      </div>
+      <div className="risk-row" style={{ marginBottom: 12 }}>
+        <span>MQ-5 显示的是相对 ADC 读数，不是 ppm 浓度；当前不触发正式燃气报警，不能替代经认证的燃气/烟雾报警器。</span>
+      </div>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <button className="action-button secondary" type="button" disabled={mq5Busy || !mq5CanConfirmBurnIn} onClick={() => void runMq5Command("mq5_confirm_burn_in")}>确认首次老化</button>
+        <button className="action-button secondary" type="button" disabled={mq5Busy || !mq5CanCaptureBaseline} onClick={() => void runMq5Command("mq5_capture_baseline")}>采集洁净空气基线</button>
+        <button className="action-button danger-soft" type="button" disabled={mq5Busy || !mq5CanResetCalibration} onClick={() => void runMq5Command("mq5_reset_calibration")}>重置校准</button>
+      </div>
     </div>
   );
 }

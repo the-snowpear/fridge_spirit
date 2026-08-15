@@ -1,0 +1,41 @@
+idf_component_register(
+    SRCS
+        "fridge_ui_p4.c"
+        "fridge_ui_tools.c"
+        "fridge_ui_assets.c"
+        "fridge_ui_model.c"
+        "fridge_ui_inventory_model.c"
+        "fridge_ui_shell.c"
+        "fridge_ui_scroll_ppa.c"
+        "fridge_ui_theme.c"
+    INCLUDE_DIRS "include"
+    REQUIRES
+        sht4x
+        sensors
+        display_mipi
+        touch
+        font_manager
+        camera
+        ai_client
+        audio
+        wake_word
+        voice_asr
+        kitchen_tools
+        ime
+        network
+        tfcard
+        storage
+        diagnostics
+        tool_system
+        lvgl
+        cjson
+        mbedtls
+        nvs_flash
+        esp_timer
+        esp_driver_ppa
+        esp_app_format
+        app_update
+        freertos
+        log
+        heap
+)

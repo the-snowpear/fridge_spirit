@@ -9,7 +9,7 @@
   否则把 bindCode 当 device_sn upsert。
 """
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -71,9 +71,6 @@ async def devices_primary(
 @router.post("/bind", response_model=ApiResponse[DeviceSummary])
 async def devices_bind(
     payload: BindRequest,
-    home: Home = Depends(get_active_home),
-    db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
 ) -> ApiResponse[DeviceSummary]:
     """绑定设备到当前活跃家庭。
 
@@ -82,6 +79,8 @@ async def devices_bind(
     - 否则把 bindCode 当 device_sn 处理：找不到设备时 upsert 一台 status=offline 的设备。
     - DeviceBinding 同 (device_id, home_id, status='active') 已存在则幂等跳过插入。
     """
+    raise HTTPException(status_code=410, detail="LEGACY_API_REMOVED: scan a P4 binding QR code")
+
     bind_code_upper = payload.bind_code.strip().upper()
 
     # 推导实际要绑的 device_sn / name / model：DEMO 模式下用固定演示设备信息。

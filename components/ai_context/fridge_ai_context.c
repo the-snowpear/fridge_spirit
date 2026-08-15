@@ -10,9 +10,11 @@
 #include <string.h>
 #include "esp_check.h"
 #include "cJSON.h"
+#include "fridge_agent_storage.h"
 #include "fridge_storage.h"
 
 static const char *TAG = "fridge_ai_context";
+#define AI_CONTEXT_MEMORY_BYTES 2048
 
 static const char *PERSONA_TEMPLATE =
     "你是冰箱小精灵的智能厨房助手。回答要实用、保守、可确认、少打扰；不要编造库存、日期、数量或识别结果。";
@@ -36,7 +38,7 @@ typedef struct {
     char inventory[FRIDGE_STORAGE_MAX_JSON_LEN];
     char reminders[FRIDGE_STORAGE_MAX_JSON_LEN];
     char preferences[FRIDGE_STORAGE_MAX_JSON_LEN];
-    char memory[FRIDGE_STORAGE_MAX_MEMORY_LEN];
+    char memory[AI_CONTEXT_MEMORY_BYTES];
     char offline[FRIDGE_STORAGE_MAX_JSON_LEN];
     char history_json[FRIDGE_STORAGE_MAX_JSON_LEN];
     char escaped_user[FRIDGE_AI_CONTEXT_MAX_TEXT_LEN * 2 + 1];
@@ -318,13 +320,15 @@ esp_err_t fridge_ai_context_build_preview(const fridge_ai_task_request_t *reques
             ESP_RETURN_ON_ERROR(err, TAG, "get preferences failed");
         }
     }
-    if (request->include_memory) {
-        err = fridge_storage_get_memory_summary(work->memory, sizeof(work->memory));
-        if (err != ESP_OK) {
-            free(chat_history);
-            free(work);
-            ESP_RETURN_ON_ERROR(err, TAG, "get memory failed");
-        }
+    // 用户长期事实统一读取 TF Agent 结构化记忆，并作为所有 AI 任务的默认上下文。
+    // MEMORY.md 是独立人工笔记，不在这里注入；完整结构化检索由 memory.search 承担。
+    size_t memory_size = 0;
+    err = fridge_agent_storage_build_memory_context(work->memory, sizeof(work->memory),
+                                                    &memory_size);
+    if (err != ESP_OK) {
+        strlcpy(work->memory,
+                "{\"schema_version\":1,\"kind\":\"user_memory\",\"items\":[],\"unavailable\":true}",
+                sizeof(work->memory));
     }
     err = fridge_storage_get_offline_queue_summary(work->offline, sizeof(work->offline));
     if (err != ESP_OK) {
@@ -383,14 +387,14 @@ esp_err_t fridge_ai_context_build_preview(const fridge_ai_task_request_t *reques
     ok = ok && append_text(out->preview_json, sizeof(out->preview_json), &used, request->include_reminders ? work->reminders : "null");
     ok = ok && append_text(out->preview_json, sizeof(out->preview_json), &used, ",\"preferences\":");
     ok = ok && append_text(out->preview_json, sizeof(out->preview_json), &used, request->include_preferences ? work->preferences : "null");
-    ok = ok && append_text(out->preview_json, sizeof(out->preview_json), &used, ",\"memory_summary\":");
-    ok = ok && append_text(out->preview_json, sizeof(out->preview_json), &used, request->include_memory ? work->memory : "null");
+    ok = ok && append_text(out->preview_json, sizeof(out->preview_json), &used, ",\"user_memory\":");
+    ok = ok && append_text(out->preview_json, sizeof(out->preview_json), &used, work->memory);
     ok = ok && append_text(out->preview_json, sizeof(out->preview_json), &used, ",\"offline_queue\":");
     ok = ok && append_text(out->preview_json, sizeof(out->preview_json), &used, work->offline);
     ok = ok && append_text(out->preview_json, sizeof(out->preview_json), &used, ",\"conversation_history\":");
     // 语音对话通常连续触发，完整历史会让部分 OpenAI-compatible 服务请求体过大或重复上下文而返回 400。
-    // 需要历史时仍通过 assistant_request->history 注入；上下文 JSON 里仅在 include_memory 打开时放预览。
-    ok = ok && append_text(out->preview_json, sizeof(out->preview_json), &used, request->include_memory ? work->history_json : "null");
+    // 完整历史仍通过 assistant_request->history 注入；这里保留预览用于串口诊断。
+    ok = ok && append_text(out->preview_json, sizeof(out->preview_json), &used, work->history_json);
     ok = ok && append_text(out->preview_json, sizeof(out->preview_json), &used, "},\"output_policy\":{\"ai_result_must_be_confirmed\":true,\"do_not_fabricate_inventory\":true,\"do_not_store_full_chat\":true}}");
     if (!ok) {
         free(work);

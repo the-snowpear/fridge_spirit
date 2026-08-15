@@ -4,8 +4,9 @@
  * 小程序优先使用本地缓存保证离线可用；联网时通过 /fridge/zones 与云端同步。
  */
 
-import type { FridgeZoneConfig, StandardSlot } from "../types/models";
+import type { FridgeLayerConfig, FridgeZoneConfig, StandardSlot } from "../types/models";
 import { STANDARD_SLOTS } from "../types/models";
+import { DEFAULT_INVENTORY_LAYERS, cellToSlot, layersForZone } from "./inventoryLocation";
 import { getFridgeZonesRemote, updateFridgeZonesRemote } from "../services/api";
 import { getStorage, setStorage } from "./storage";
 
@@ -14,6 +15,7 @@ export const STANDARD_ZONE_CONFIGS: FridgeZoneConfig[] = [
   { key: "left", label: "左侧冷藏", hint: "蔬菜 / 熟食", custom: false, width: 1, height: 2 },
   { key: "right", label: "右侧冷藏", hint: "肉类 / 乳制品", custom: false, width: 1, height: 2 },
   { key: "door", label: "门架", hint: "饮品 / 调料", custom: false, width: 1, height: 3 },
+  { key: "drawer", label: "果蔬抽屉", hint: "蔬菜 / 水果", custom: false, width: 2, height: 1 },
 ];
 
 const CUSTOM_ZONES_KEY = "fridgeCustomZones";
@@ -173,6 +175,26 @@ export function displayPlace(zone?: string, slot?: string): string {
   if (!zone && !slot) return "未指定位置";
   if (!slot) return zoneLabel(zone);
   return `${zoneLabel(zone)} · ${slotLabel(slot)}`;
+}
+
+export function getInventoryLayers(zoneId?: string): FridgeLayerConfig[] {
+  return layersForZone(zoneId);
+}
+
+export function inventoryLayerLabel(layerId?: string): string {
+  if (!layerId) return "未指定层";
+  return DEFAULT_INVENTORY_LAYERS.find((layer) => layer.id === layerId)?.name || layerId;
+}
+
+export function displayInventoryPlace(
+  zoneId?: string,
+  layerId?: string,
+  cell?: number,
+): string {
+  if (!zoneId) return "未指定位置";
+  const layer = layerId || layersForZone(zoneId)[0]?.id;
+  if (cell === undefined) return `${zoneLabel(zoneId)} · ${inventoryLayerLabel(layer)}`;
+  return `${zoneLabel(zoneId)} · ${inventoryLayerLabel(layer)} · ${slotLabel(cellToSlot(cell))}`;
 }
 
 export function slotOptions(): Array<{ value: StandardSlot | ""; label: string }> {

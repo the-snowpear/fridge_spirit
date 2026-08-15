@@ -3,5 +3,5 @@
 idf_component_register(
     SRCS "fridge_usb_protocol_minimal.c"
     INCLUDE_DIRS "include"
-    REQUIRES network diagnostics audio asr wake_word voice_asr tfcard tf_http c6_ota freertos heap log esp_system
+    REQUIRES network diagnostics diagnostics_log audio asr ai_client wake_word voice_asr tfcard agent_storage mqtt_protocol device_binding tool_system agent_runtime trace_service workflow_engine skill_manager glm_realtime tf_http c6_ota touch camera screenshot sht4x sensors ui_p4 freertos heap log esp_system nvs_flash
 )

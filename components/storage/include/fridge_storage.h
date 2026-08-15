@@ -10,7 +10,6 @@ extern "C" {
 #endif
 
 #define FRIDGE_STORAGE_MAX_JSON_LEN 8192
-#define FRIDGE_STORAGE_MAX_MEMORY_LEN 1024
 #define FRIDGE_STORAGE_MAX_STATUS_LEN 384
 #define FRIDGE_STORAGE_MAX_CHAT_ROUNDS 15
 #define FRIDGE_STORAGE_MAX_CHAT_MESSAGES (FRIDGE_STORAGE_MAX_CHAT_ROUNDS * 2)
@@ -138,19 +137,6 @@ esp_err_t fridge_storage_get_kitchen_ai_meta(char *out, size_t out_size);
 
 // 写入厨房 AI 生成元数据；只记录日期、次数和错误摘要，不保存 API Key 或完整隐私对话。
 esp_err_t fridge_storage_set_kitchen_ai_meta(const char *meta_json);
-
-// 从 cache LittleFS 读取结构化记忆摘要；不会保存完整聊天记录。
-esp_err_t fridge_storage_get_memory_summary(char *out, size_t out_size);
-
-// 写入结构化记忆摘要；用于 Web/USB 调试或后续用户确认后的偏好同步。
-// 注意：该接口会写入 cache LittleFS，Web 面板应由用户明确点击后再调用，避免高频磨损。
-esp_err_t fridge_storage_set_memory_summary(const char *memory_json);
-
-// 清除结构化记忆摘要，保留库存、提醒和偏好。
-esp_err_t fridge_storage_clear_memory_summary(void);
-
-// 执行 AI 回复末尾的 MEMORY_OP 隐藏指令；会从 assistant_text 中剥离指令后返回可展示文本。
-esp_err_t fridge_storage_apply_memory_directive(const char *assistant_text, char *clean_reply, size_t clean_reply_size, bool *memory_updated);
 
 // 读取设备端短期会话历史；返回前会自动删除过期消息并裁剪到最多 15 轮（30 条消息）。
 esp_err_t fridge_storage_get_chat_history(fridge_storage_chat_history_t *out, size_t *pruned_count);

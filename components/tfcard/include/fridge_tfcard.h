@@ -16,6 +16,8 @@ extern "C" {
 
 #define FRIDGE_TFCARD_MOUNT_POINT "/sdcard"
 #define FRIDGE_TFCARD_SYSTEM_DIR ".fridge_spirit"
+#define FRIDGE_TFCARD_LOG_DIR ".fridge_spirit/logs"
+#define FRIDGE_TFCARD_DIAGNOSTICS_DIR ".fridge_spirit/diagnostics"
 #define FRIDGE_TFCARD_TRASH_DIR ".fridge_spirit/trash"
 #define FRIDGE_TFCARD_UPLOAD_DIR ".fridge_spirit/uploads"
 #define FRIDGE_TFCARD_EXPORT_DIR ".fridge_spirit/exports"
@@ -82,6 +84,13 @@ typedef struct {
     uint32_t read_kib_s;
 } fridge_tfcard_benchmark_result_t;
 
+// 诊断二进制流读取回调。回调不能访问 TF 卡，只负责从 Flash/其它只读源提供数据。
+typedef esp_err_t (*fridge_tfcard_diagnostic_read_cb_t)(void *context,
+                                                        uint64_t offset,
+                                                        uint8_t *buffer,
+                                                        size_t capacity,
+                                                        size_t *out_size);
+
 // 初始化/挂载接口。默认挂载失败绝不自动格式化。
 esp_err_t fridge_tfcard_init(void);
 esp_err_t fridge_tfcard_mount(void);
@@ -109,8 +118,28 @@ esp_err_t fridge_tfcard_empty_trash(void);
 // 小文本原子读写；写入先落 .part、fflush/fsync，再同卷改名。
 esp_err_t fridge_tfcard_text_read(const char *relative_path, char *buffer, size_t buffer_size,
                                  size_t *out_size);
+// 分页读取文本文件。即使文件大于 buffer，也只读取指定区间并返回总大小，供 Agent 大文件按页加载。
+esp_err_t fridge_tfcard_text_read_range(const char *relative_path, size_t offset,
+                                       char *buffer, size_t buffer_size,
+                                       size_t *out_size, size_t *out_total_size);
 esp_err_t fridge_tfcard_text_write(const char *relative_path, const char *text, size_t text_size,
                                   bool overwrite);
+// 可恢复写入会保留上一版为同目录 .bak；Agent 权威数据启动时据此完成损坏/断电恢复。
+esp_err_t fridge_tfcard_text_write_recoverable(const char *relative_path, const char *text,
+                                              size_t text_size, bool overwrite);
+
+// 追加运行日志。只允许写入 FRIDGE_TFCARD_LOG_DIR，写入期间复用 TF 全局互斥锁。
+esp_err_t fridge_tfcard_append_log(const char *relative_path, const void *data,
+                                   size_t data_size, bool sync);
+
+// 将敏感诊断文本原子写入 FRIDGE_TFCARD_DIAGNOSTICS_DIR；普通 TF 浏览接口拒绝读取该目录。
+esp_err_t fridge_tfcard_write_diagnostic_text(const char *relative_path, const char *text,
+                                              size_t text_size, bool overwrite);
+
+// 将只读源流式原子写入 FRIDGE_TFCARD_DIAGNOSTICS_DIR，避免把 coredump 整体搬入 SRAM/PSRAM。
+esp_err_t fridge_tfcard_write_diagnostic_stream(const char *relative_path, uint64_t total_size,
+                                                fridge_tfcard_diagnostic_read_cb_t read_cb,
+                                                void *context, bool overwrite);
 
 // 固件内部诊断导出专用接口；只允许写入 exports 下的单层文件，不受专家模式影响。
 esp_err_t fridge_tfcard_write_diagnostic_export(const char *file_name, const char *text,

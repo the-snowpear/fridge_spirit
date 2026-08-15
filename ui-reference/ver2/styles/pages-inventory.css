@@ -1,0 +1,566 @@
+/* ==================================================================
+ * 冰箱小精灵 ver2 —— 库存模块专属样式（INV-01 .. INV-08）
+ * 新类统一 inv- 前缀；flex/grid，px 单位，字号只用令牌，圆角 ≤8px，触控高 ≥48px。
+ * ================================================================== */
+
+/* ---------------- INV-01 顶部工具条（seg 切换 + 范围信息条） ----------------
+ * 布局：左侧常驻 空间/列表 seg，右侧一块"范围信息条"= 面包屑 + 统计芯片。
+ * 语义底色跟随当前范围最差食材（.tone-*），让"这个范围要不要处理"在顶部就能看到。
+ */
+.inv-toolbar {
+  display: flex; align-items: stretch; gap: var(--sp-3);
+  flex: none;
+}
+.inv-toolbar > .seg { flex: none; align-items: center; }
+
+.inv-scope-info {
+  position: relative;
+  flex: 1; min-width: 0;
+  display: flex; align-items: center; gap: var(--sp-2);
+  padding: 0 var(--sp-3) 0 var(--sp-4);
+  min-height: var(--touch);
+  border: 1px solid var(--line-strong); border-radius: var(--r-m);
+}
+.inv-scope-info > .crumb { flex: none; }
+.inv-stat-row {
+  /* 去除重复冰箱图标后，根范围的四枚统计胶囊可稳定保持单行。 */
+  display: flex; align-items: center; flex-wrap: nowrap; gap: 4px;
+  margin-left: auto; flex: none; min-width: 0;
+}
+.inv-stat-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  height: 30px; padding: 0 8px;
+  border-radius: var(--r-pill); font-size: var(--fs-cap);
+  background: var(--surface); color: var(--ink); border: 1px solid var(--line);
+  white-space: nowrap;
+}
+.inv-stat-chip b { font-weight: 700; }
+.inv-stat-chip.ok { color: var(--sage-dark); }
+.inv-stat-chip.warn { background: var(--warn-bg); color: var(--warn-ink); border-color: transparent; }
+.inv-stat-chip.danger { background: var(--danger-bg); color: var(--danger); border-color: transparent; }
+
+/* L1/L2 内胆卡与 L3 九宫格都要吃掉 pg-body 的剩余高度（不滚动） */
+.inv-browse-pg .pg-body > .fridge-box,
+.inv-browse-pg .pg-body > .inv-g9-wrap { flex: 1; min-height: 0; }
+/* L3 九宫格包裹层：不套内胆卡头，整块高度给九宫格 */
+.inv-g9-wrap { display: flex; flex-direction: column; min-height: 0; }
+
+/* 竖屏主区仅 600 宽：seg 与信息条改上下两行，避免统计芯片被挤没 */
+#stage.mode-portrait .inv-toolbar { flex-direction: column; gap: var(--sp-2); }
+#stage.mode-portrait .inv-toolbar > .seg { align-self: flex-start; }
+#stage.mode-portrait .inv-scope-info { width: 100%; }
+
+/* 食材列表 / 层卡列 */
+.inv-list { display: flex; flex-direction: column; gap: var(--sp-2); }
+.inv-layers { display: flex; flex-direction: column; gap: var(--sp-2); }
+
+/* ---------------- INV-03 详情滚动区 ---------------- */
+.inv-detail { display: flex; flex-direction: column; gap: var(--sp-4); }
+
+/* ---------------- INV-04 表单 / chip 选择行 ---------------- */
+.inv-form { display: flex; flex-direction: column; }
+/* 备注通常比名称更长，单独扩大输入区，避免长文本过早截断。 */
+.inv-note-control .input-like { min-width: 300px; }
+.inv-chiprow { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
+.inv-cat, .inv-filter { cursor: pointer; border: 1px solid var(--line-strong); background: var(--surface); min-height: 40px; }
+.inv-cat.ok, .inv-filter.ok { background: var(--ok-bg); border-color: var(--sage); color: var(--sage-dark); font-weight: 600; }
+.inv-src { font-size: var(--fs-body); color: var(--ink); }
+
+/* INV-04 存放位置：整行可点；未选显示「选择位置」，已选显示路径，再点即重选 */
+.inv-loc-value {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
+  min-width: 0;
+  min-height: var(--touch);
+  padding: 0 var(--sp-3);
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-m);
+  color: var(--muted);
+  font-size: var(--fs-body);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.inv-loc-value:hover { background: var(--cream); border-color: var(--sage); }
+.inv-loc-value.has {
+  background: var(--mint);
+  border-color: var(--sage);
+  color: var(--sage-dark);
+  font-weight: 600;
+}
+.inv-loc-value .ic { flex: none; color: var(--sage-dark); }
+.inv-loc-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.inv-loc-placeholder { color: var(--muted); font-weight: 500; }
+.inv-loc-arrow { margin-left: auto; color: var(--muted); width: 18px; height: 18px; }
+
+/* ---------------- 位置选择模式（INV-01?pick=1） ---------------- */
+.inv-pick-pg .pg-body { gap: var(--sp-3); }
+.inv-pick-bar { width: 100%; }
+.inv-pick-steps {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+.inv-step {
+  font-size: var(--fs-cap);
+  color: var(--muted);
+  padding: 4px 10px;
+  border-radius: var(--r-pill);
+  background: var(--cream);
+}
+.inv-step.on {
+  background: var(--sage);
+  color: #fff;
+  font-weight: 600;
+}
+.inv-step.done {
+  background: var(--mint);
+  color: var(--sage-dark);
+  font-weight: 600;
+}
+.inv-step-sep { color: var(--muted); font-size: var(--fs-cap); }
+/* 选位态的 L1/L3 也要占满主区（与浏览态同一套 fridge-box 规则） */
+.inv-pick-pg .pg-body > .fridge-box { flex: 1; min-height: 0; }
+/* 选位态格子的可点样式统一在 components.css 的 .g9-cell[data-pickable] 中定义 */
+.inv-pick-foot { flex: none; }
+
+/* ---------------- INV-05 取景框（占满页头与底栏之间的中间区） ---------------- */
+.pg-body.inv-cam {
+  padding: 0;
+  gap: 0;
+  overflow: hidden;
+}
+.inv-frame {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  background: #1d2a24;
+  border-radius: 0;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.inv-frame .img-ph {
+  width: 280px;
+  height: 280px;
+  background: rgba(255,255,255,.06);
+  border-color: rgba(255,255,255,.3);
+  color: #cfe0d6;
+}
+/* 九宫格辅助线 */
+.inv-frame-grid { position: absolute; inset: 0; pointer-events: none; }
+.inv-frame-grid i { position: absolute; background: rgba(255,255,255,.18); }
+.inv-frame-grid i:nth-child(1) { left: 33.33%; top: 0; bottom: 0; width: 1px; }
+.inv-frame-grid i:nth-child(2) { left: 66.66%; top: 0; bottom: 0; width: 1px; }
+.inv-frame-grid i:nth-child(3) { top: 33.33%; left: 0; right: 0; height: 1px; }
+.inv-frame-grid i:nth-child(4) { top: 66.66%; left: 0; right: 0; height: 1px; }
+/* 四角取景框 */
+.inv-corner {
+  position: absolute; width: 40px; height: 40px;
+  border: 3px solid var(--yolk); pointer-events: none;
+}
+.inv-corner.tl { top: 16px; left: 16px; border-right: none; border-bottom: none; }
+.inv-corner.tr { top: 16px; right: 16px; border-left: none; border-bottom: none; }
+.inv-corner.bl { bottom: 48px; left: 16px; border-right: none; border-top: none; }
+.inv-corner.br { bottom: 48px; right: 16px; border-left: none; border-top: none; }
+
+/* 网络状态叠在取景框底边，不单独占中间高度 */
+.inv-net {
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  display: flex; align-items: center; justify-content: center; gap: var(--sp-2);
+  min-height: 40px;
+  padding: 0 var(--sp-4);
+  background: rgba(29, 42, 36, .72);
+  font-size: var(--fs-cap); color: rgba(255, 253, 248, .88);
+  flex: none;
+}
+.inv-net .sd-label { color: inherit; }
+.inv-net .status-dot { box-shadow: 0 0 0 1px rgba(255,255,255,.2); }
+
+/* ---------------- INV-06 识别候选 ---------------- */
+.inv-rulebar {
+  display: flex; align-items: center; gap: var(--sp-2);
+  min-height: var(--touch); padding: 0 var(--sp-3);
+  background: var(--warn-bg); border: 1px solid var(--warn); border-radius: var(--r-m);
+  color: var(--warn-ink); font-size: var(--fs-body); font-weight: 500; flex: none;
+}
+.inv-rulebar .ic { color: var(--warn-ink); }
+
+.inv-reco-list { display: flex; flex-direction: column; gap: var(--sp-3); }
+.inv-reco {
+  display: flex; align-items: flex-start; gap: var(--sp-3);
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-m);
+  padding: var(--sp-3);
+}
+.inv-reco.keep { border-color: var(--sage); }
+.inv-check { display: flex; align-items: center; min-height: var(--touch); }
+.inv-check input { width: 26px; height: 26px; accent-color: var(--sage); }
+.inv-reco-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: var(--sp-2); }
+.inv-reco-top { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; }
+.inv-reco-qty { font-size: var(--fs-body); font-weight: 600; color: var(--ink); }
+.inv-reco-loc { display: flex; align-items: center; gap: var(--sp-2); font-size: var(--fs-cap); color: var(--muted); }
+.inv-reco-loc .ic { color: var(--sage); }
+.inv-warn, .inv-merge {
+  display: flex; align-items: center; gap: var(--sp-2);
+  font-size: var(--fs-cap); padding: 6px var(--sp-2); border-radius: var(--r-s);
+}
+.inv-warn { background: var(--warn-bg); color: var(--warn-ink); }
+.inv-warn .ic { color: var(--warn-ink); width: 18px; height: 18px; }
+.inv-merge { background: var(--info-bg); color: var(--info); }
+.inv-merge .ic { width: 18px; height: 18px; }
+
+/* ---------------- INV-07 搜索条 ---------------- */
+.inv-searchbar { display: flex; align-items: center; gap: var(--sp-3); flex: none; }
+.inv-searchbar .input-like { flex: 1; }
+
+
+/* ==================================================================
+ * INV-08 空间形状编辑（分区 / 指定分区的层 / 指定层设置为独立页面）
+ * 新增分区需先进入明确的编辑模式；九宫格恒为 A1–C3，一格只放一项食材。
+ * ================================================================== */
+.inv-studio-pg .pg-body {
+  gap: var(--sp-3);
+  /* 始终预留滚动条宽度，内容超高时不会因出现滚动条而横向跳变。 */
+  scrollbar-gutter: stable;
+}
+/* 分区超过首屏三行后由页面主区单独滚动，底部操作栏保持可见。 */
+.inv-studio-pg .pg-body:has(.inv-studio-zones.is-extended) { overflow-y: auto; }
+/* 命名面板用页面内绝对定位，需要 .pg 提供定位上下文 */
+.inv-studio-pg { position: relative; }
+
+.inv-studio {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  flex: 1;
+  min-height: 0;
+}
+.inv-studio-zones.is-extended { flex: none; min-height: auto; padding-bottom: var(--sp-3); }
+.inv-studio-hint {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: 44px;
+  padding: 8px var(--sp-3);
+  background: var(--info-bg);
+  border-radius: var(--r-m);
+  color: var(--ink);
+  font-size: var(--fs-cap);
+  flex: none;
+}
+.inv-studio-hint .ic { color: var(--info); flex: none; }
+/* 选中构成合法矩形时转绿，给"这一步可以继续"的即时反馈 */
+.inv-studio-hint.ok { background: var(--ok-bg); }
+.inv-studio-hint.ok .ic { color: var(--sage); }
+
+.inv-draft-chip { margin-right: var(--sp-2); }
+
+/* ---------------- 分区形状画布：固定 3 列、可向下扩展，分区可跨格 ---------------- */
+.inv-lay-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  /* 恒定三列；首屏为三行，新增分区时按 --lay-rows 向下延展。 */
+  grid-template-rows: repeat(var(--lay-rows, 3), minmax(92px, 1fr));
+  gap: var(--sp-2);
+  flex: 1;
+  min-height: 0;
+}
+.inv-lay-cell {
+  position: relative;
+  min-width: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-m);
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  cursor: pointer;
+  padding: var(--sp-2);
+  font-family: inherit;
+  color: inherit;
+  overflow: hidden;
+}
+.inv-lay-cell.filled { background: var(--mint); }
+/* Ver1 风格的低饱和色差：储物类型一眼可辨，仍维持整体克制。 */
+.inv-lay-cell.filled.tone-cool { background: linear-gradient(180deg, #f8fcff, #e8f1f4); border-color: #bdd1d5; }
+.inv-lay-cell.filled.tone-fresh { background: linear-gradient(180deg, #fbfff9, #edf6ea); border-color: #b8cfb9; }
+.inv-lay-cell.filled.tone-sand { background: linear-gradient(180deg, #fffdf9, #f7f1e8); border-color: #d8cbb8; }
+.inv-lay-cell.filled.tone-amber { background: linear-gradient(180deg, #fffaf0, #f8efd8); border-color: #dcc898; }
+.inv-lay-cell.filled.tone-rose { background: linear-gradient(180deg, #fffaf9, #f7ece9); border-color: #d8c1bb; }
+/* 空位：虚线弱化 + 居中加号，明确"这里可以建分区" */
+.inv-lay-cell.empty {
+  background: var(--paper);
+  border-style: dashed;
+  color: var(--muted);
+}
+.inv-lay-cell.empty.add {
+  background: var(--cream);
+  border-color: var(--sage);
+  color: var(--sage-dark);
+}
+.inv-lay-cell.empty.add:hover { background: var(--ok-bg); }
+.inv-lay-cell.empty.locked { cursor: default; }
+.inv-lay-cell.empty.locked:hover { background: var(--paper); border-color: var(--line-strong); }
+.inv-lay-cell.empty:hover { background: var(--cream); border-color: var(--sage); }
+.inv-lay-cell.empty.placeable { background: var(--ok-bg); border-color: var(--sage); border-style: solid; color: var(--sage-dark); }
+.inv-lay-cell.empty.placeable:hover { background: var(--mint); }
+.inv-lay-cell.sel {
+  outline: 2px solid var(--sage);
+  outline-offset: -1px;
+  background: var(--ok-bg);
+  border-color: var(--sage);
+  border-style: solid;
+}
+.inv-lay-cell.filled.sel { background: var(--ok-bg); }
+.inv-lay-cell:active { transform: scale(0.98); }
+.inv-lay-name { font-size: var(--fs-body); font-weight: 600; color: var(--sage-dark); text-align: center; }
+.inv-lay-type {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: var(--fs-cap); color: var(--muted);
+}
+.inv-lay-type .ic { width: 17px; height: 17px; }
+.inv-lay-sub { font-size: var(--fs-cap); color: var(--muted); }
+.inv-lay-empty { font-size: var(--fs-cap); color: var(--muted); }
+.inv-lay-plus { display: inline-flex; color: var(--line-strong); }
+.inv-lay-plus .ic { width: 28px; height: 28px; }
+.inv-lay-cell.add .inv-lay-plus { color: var(--sage); }
+.inv-lay-add-label { font-size: var(--fs-cap); font-weight: 600; }
+.inv-lay-flag {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: var(--fs-cap); font-weight: 600; color: var(--sage-dark);
+}
+.inv-lay-flag .ic { width: 17px; height: 17px; }
+
+/* 旧版分区芯片样式保留给兼容页面；INV-08 不再在页内切换分区。 */
+.inv-zone-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  flex: none;
+}
+.inv-zone-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  min-height: var(--touch);
+  padding: 0 var(--sp-3);
+  border-radius: var(--r-m);
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  color: var(--ink);
+  font-family: inherit;
+  font-size: var(--fs-cap);
+}
+.inv-zone-chip .izc-name { font-size: var(--fs-body); font-weight: 500; white-space: nowrap; }
+/* 层数徽标：小圆底数字，比"N 层"省一半横向空间 */
+.inv-zone-chip .izc-n {
+  min-width: 22px; height: 22px; padding: 0 5px;
+  border-radius: var(--r-pill);
+  background: var(--cream); color: var(--muted);
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: var(--fs-cap);
+}
+.inv-zone-chip:hover { background: var(--cream); }
+.inv-zone-chip.on {
+  background: var(--mint);
+  border-color: var(--sage);
+  color: var(--sage-dark);
+}
+.inv-zone-chip.on .izc-n { background: var(--surface); color: var(--sage-dark); }
+.inv-zone-chip.on .izc-name { font-weight: 600; }
+
+/* ---------------- 层结构：层卡 ---------------- */
+.inv-layer-list { display: flex; flex-direction: column; gap: var(--sp-2); }
+.inv-layer-card {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  min-height: 80px;
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-m);
+  min-width: 0;
+}
+.inv-layer-entry { cursor: pointer; }
+.inv-layer-entry:hover { background: var(--cream); border-color: var(--sage); }
+.inv-layer-entry > .ic { flex: none; color: var(--muted); }
+.inv-layer-idx {
+  flex: none;
+  width: 40px; height: 40px;
+  border-radius: var(--r-m);
+  background: var(--mint);
+  display: flex; align-items: center; justify-content: center;
+  font-family: var(--font-mono);
+  font-size: var(--fs-body);
+  font-weight: 700;
+  color: var(--sage-dark);
+}
+.inv-layer-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.inv-layer-title {
+  font-size: var(--fs-body);
+  font-weight: 600;
+  color: var(--ink);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+.inv-layer-meta { font-size: var(--fs-cap); color: var(--muted); }
+
+/* 指定层页面只解释固定格位规则，避免出现无法理解的开关。 */
+.inv-layer-detail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-4);
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-m);
+}
+.inv-layer-detail-name { font-size: var(--fs-title); font-weight: 700; color: var(--sage-dark); }
+.inv-layer-detail-meta { font-size: var(--fs-body); color: var(--muted); }
+.inv-layer-detail-rule {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: var(--touch);
+  padding: 0 var(--sp-3);
+  border-radius: var(--r-m);
+  background: var(--ok-bg);
+  color: var(--sage-dark);
+  font-size: var(--fs-body);
+}
+.inv-layer-detail-rule .ic { flex: none; }
+/* 「精确到格」开关：开关与说明同属一个可点区域；整行撑到 48px 触控高 */
+.inv-layer-grid-sw {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: var(--touch);
+  font-size: var(--fs-cap);
+  color: var(--muted);
+  cursor: pointer;
+}
+/* 开关本体视觉仍是 56×32 轨道，用伪元素把可点区域上下撑到 48px */
+.inv-layer-grid-sw .switch { position: relative; }
+.inv-layer-grid-sw .switch::after {
+  content: '';
+  position: absolute;
+  left: 0; right: 0;
+  top: 50%; transform: translateY(-50%);
+  height: var(--touch);
+}
+.inv-layer-acts {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex: none;
+}
+.inv-layer-ord { display: flex; align-items: center; gap: 2px; flex: none; }
+.inv-layer-acts .icon-btn.danger { color: var(--danger); }
+.inv-layer-acts .icon-btn:disabled { opacity: .35; }
+
+/* 迷你九宫格缩略（只读，恒 9 格，仅按有无食材着色） */
+.inv-mini-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  grid-template-rows: repeat(3, 1fr);
+  gap: 2px;
+  width: 40px;
+  height: 40px;
+  flex: none;
+}
+.inv-mini-grid .mg-cell {
+  display: block;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  min-width: 0;
+  min-height: 0;
+}
+.inv-mini-grid .mg-cell.has { background: var(--mint); border-color: var(--sage); }
+
+/* ---------------- 命名 / 类型面板（页面内子容器，不占全局浮层名额） ---------------- */
+.inv-name-scrim {
+  position: absolute;
+  inset: 0;
+  background: var(--scrim);
+  z-index: 5;
+}
+.inv-name-panel {
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-5) var(--sp-4);
+  background: var(--paper);
+  border-top: 1px solid var(--line-strong);
+}
+.inv-name-head { display: flex; align-items: center; gap: var(--sp-2); }
+.inv-name-title {
+  flex: 1; min-width: 0;
+  font-size: var(--fs-body); font-weight: 600; color: var(--sage-dark);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.inv-name-label { font-size: var(--fs-cap); color: var(--muted); }
+.inv-preset-row { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
+.inv-preset {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: var(--touch);
+  padding: 0 var(--sp-3);
+  border-radius: var(--r-m);
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  color: var(--ink);
+  font-family: inherit;
+  font-size: var(--fs-body);
+}
+.inv-preset .ic { width: 18px; height: 18px; color: var(--muted); }
+.inv-preset:hover { background: var(--cream); }
+.inv-preset.on {
+  background: var(--sage);
+  border-color: var(--sage);
+  color: #fff;
+  font-weight: 600;
+}
+.inv-preset.on .ic { color: #fff; }
+.inv-name-foot { display: flex; align-items: center; gap: var(--sp-2); margin-top: var(--sp-1); }
+.inv-name-foot .spacer { flex: 1; }
+
+/* ---------------- 底栏：左侧上下文动作 + 右侧草稿/提交 ---------------- */
+.inv-studio-foot {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.inv-ctx-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+.inv-foot-tip { font-size: var(--fs-cap); color: var(--muted); }
+
+/* 竖屏主区仅 600 宽：底栏与上下文动作允许换行，避免挤出主区 */
+#stage.mode-portrait .inv-studio-foot { flex-wrap: wrap; }
+#stage.mode-portrait .inv-ctx-bar { flex-wrap: wrap; }
+
+/* 浏览 zone-map 编辑高亮（若复用） */
+.zone-cell.sel { outline: 2px solid var(--sage); background: var(--ok-bg); }
+.zone-cell.editable { cursor: pointer; }

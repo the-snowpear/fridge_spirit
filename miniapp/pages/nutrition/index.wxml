@@ -43,5 +43,20 @@
     <view class="subtitle">{{view.restrictNote}}</view>
   </view>
 
+  <view class="nutrition-section">
+    <view class="section-title">同步饮食记录</view>
+    <view class="record-list">
+      <view wx:for="{{records}}" wx:key="id" class="record-row">
+        <view class="row">
+          <view class="record-title">{{item.title}}</view>
+          <view class="record-time">{{item.consumedText}}</view>
+        </view>
+        <view class="record-nutrients">{{item.nutrientText}}</view>
+        <view wx:if="{{item.note}}" class="record-note">{{item.note}}</view>
+      </view>
+      <view wx:if="{{records.length === 0}}" class="empty compact">暂无设备同步的饮食记录</view>
+    </view>
+  </view>
+
   <button class="btn" loading="{{loading}}" bindtap="onTapRefresh">按当前库存生成营养建议</button>
 </view>

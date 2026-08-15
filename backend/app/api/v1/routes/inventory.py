@@ -53,6 +53,7 @@ def _now_ms() -> int:
 
 # 把 ORM 实例渲染为对外的 schema。从 ORM 直读避免漏字段，集中在一处便于扩展。
 def _item_to_schema(item: InventoryItem) -> InventoryItemSchema:
+    extra = item.extra if isinstance(item.extra, dict) else {}
     return InventoryItemSchema(
         id=item.id,
         name=item.name,
@@ -61,13 +62,16 @@ def _item_to_schema(item: InventoryItem) -> InventoryItemSchema:
         unit=item.unit,
         zone=item.zone,
         slot=item.slot,
+        zone_id=item.zone,
+        layer_id=extra.get("layerId"),
+        cell=extra.get("cell"),
         location=item.location,
         expire_date=item.expire_date,
         status=item.status,
         source=item.source,
         confidence=item.confidence,
         updated_at=item.updated_at,
-        extra=item.extra if isinstance(item.extra, dict) else {},
+        extra=extra,
     )
 
 
@@ -141,10 +145,21 @@ async def inventory_patch_v2(
 
     # 只用 model_dump(exclude_unset=True) 拿用户真正传了的字段，避免把缺省 None 当成"清空"语义。
     patch_data = payload.model_dump(exclude_unset=True, by_alias=False)
+    position_data = {
+        key: patch_data.pop(key)
+        for key in ("zone_id", "layer_id", "cell")
+        if key in patch_data
+    }
     for key, value in patch_data.items():
         setattr(item, key, value)
     # 记录本次编辑时间，供设备快照回流时做后写覆盖比较。
     patch_extra = dict(item.extra) if isinstance(item.extra, dict) else {}
+    if "zone_id" in position_data:
+        item.zone = position_data["zone_id"]
+    if "layer_id" in position_data:
+        patch_extra["layerId"] = position_data["layer_id"]
+    if "cell" in position_data:
+        patch_extra["cell"] = position_data["cell"]
     patch_extra["syncUpdatedAtMs"] = _now_ms()
     item.extra = patch_extra
 
@@ -372,6 +387,12 @@ async def _upsert_item(
     item.confidence = payload.confidence
     # 记录本次编辑时间，供设备快照回流时做后写覆盖比较（与同步通道写入的 syncUpdatedAtMs 对齐）。
     next_extra = dict(payload.extra) if isinstance(payload.extra, dict) else {}
+    # 新三级位置写进现有 JSON 字段，避免给已部署数据库增加一次强制迁移。
+    item.zone = payload.zone_id or payload.zone
+    if payload.layer_id is not None:
+        next_extra["layerId"] = payload.layer_id
+    if payload.cell is not None:
+        next_extra["cell"] = payload.cell
     next_extra["syncUpdatedAtMs"] = _now_ms()
     item.extra = next_extra
 

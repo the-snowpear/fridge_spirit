@@ -1,104 +1,97 @@
 /**
- * 库存页：顶部 zone tab（freezer/left/right/door + 全部），下方按九宫格 slot 展示该 zone 食材。
- *
- * - 数据：getInventory() 一次取当前 home 全量；前端按 zone 过滤；
- * - "+" 按钮跳 /pages/scan（拍照入库）；
- * - 单格点击：已占 → 跳 /pages/inventory-detail/{id}，空 → 跳 detail 新增（带 zone+slot 预填）；
- * - 顶部"刷新冰箱"按钮：调 /inventory/refresh 异步触发 MQTT 命令；
- * - 切 tab 时若 globalData.pendingZone 存在，自动定位到该 zone（首页跳过来用）。
+ * 库存三级浏览页：区域（zone）→ 层（layer）→ 3×3 格位（cell）。
+ * 历史 zone + slot 数据会由服务层自动落到该区域默认层，避免升级后丢位置。
  */
-
 import type { MiniAppInstance } from "../../app";
 import { getInventory, refreshInventory } from "../../services/api";
-import type { InventoryItem, StandardZone } from "../../types/models";
-import { STANDARD_SLOTS, STANDARD_ZONES } from "../../types/models";
+import type { InventoryItem } from "../../types/models";
 import { RequestError } from "../../utils/request";
-import { displayPlace, getFridgeZones } from "../../utils/fridgeZones";
+import {
+  displayInventoryPlace,
+  getFridgeZones,
+  getInventoryLayers,
+} from "../../utils/fridgeZones";
+import { cellToSlot } from "../../utils/inventoryLocation";
 import { updateOfflineSnapshot } from "../../utils/localFeatures";
 import { formatInventoryQuantity } from "../../utils/quantity";
 
-interface ZoneTab {
+type Level = "zone" | "layer" | "cell";
+type ItemView = InventoryItem & { locationText: string; quantityText: string };
+type SummaryView = {
   key: string;
   label: string;
-}
-
-interface SlotCellView {
-  slot: string;
+  hint: string;
+  count: number;
+  warnCount: number;
+};
+type CellView = {
+  cell: number;
+  code: string;
   occupied: boolean;
-  item?: InventoryItem & { quantityText?: string };
+  item?: ItemView;
   level?: "normal" | "warn" | "danger";
   expireText?: string;
-}
+};
 
-type InventoryListViewItem = InventoryItem & { locationText: string; quantityText: string };
-
-function zoneTabs(): ZoneTab[] {
-  return [
-    { key: "all", label: "全部" },
-    ...getFridgeZones().map((z) => ({ key: z.key, label: z.label })),
-  ];
-}
-
-function freshnessLevel(item: InventoryItem): "normal" | "warn" | "danger" {
+function freshness(item: InventoryItem): "normal" | "warn" | "danger" {
   if (!item.expireDate) return "normal";
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const target = new Date(item.expireDate + "T00:00:00");
-  const diff = Math.round(
-    (target.getTime() - today.getTime()) / (24 * 3600 * 1000),
+  const now = new Date();
+  now.setHours(0, 0, 0, 0);
+  const days = Math.round(
+    (new Date(`${item.expireDate}T00:00:00`).getTime() - now.getTime()) / 86400000,
   );
-  if (diff <= 1) return "danger";
-  if (diff <= 3) return "warn";
-  return "normal";
+  return days <= 1 ? "danger" : days <= 3 ? "warn" : "normal";
 }
 
-function expireText(item: InventoryItem): string {
+function expiry(item: InventoryItem): string {
   if (!item.expireDate) return "";
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const target = new Date(item.expireDate + "T00:00:00");
-  const diff = Math.round(
-    (target.getTime() - today.getTime()) / (24 * 3600 * 1000),
+  const now = new Date();
+  now.setHours(0, 0, 0, 0);
+  const days = Math.round(
+    (new Date(`${item.expireDate}T00:00:00`).getTime() - now.getTime()) / 86400000,
   );
-  if (diff <= 0) return "今天";
-  if (diff === 1) return "明天";
-  return `${diff}天`;
+  if (days <= 0) return "今天";
+  if (days === 1) return "明天";
+  return `${days}天`;
 }
 
 Page({
   data: {
     loading: false,
     refreshing: false,
-    items: [] as InventoryItem[],
-    zones: zoneTabs(),
-    activeZone: "all",
-    cells: [] as SlotCellView[],
-    listView: [] as InventoryListViewItem[],
-    showAsGrid: true,
     errorText: "",
+    items: [] as InventoryItem[],
+    level: "zone" as Level,
+    activeZone: "",
+    activeZoneLabel: "",
+    activeLayer: "",
+    activeLayerLabel: "",
+    summaries: [] as SummaryView[],
+    cells: [] as CellView[],
+    unplaced: [] as ItemView[],
   },
 
   onShow() {
     const app = getApp<MiniAppInstance["globalData"]>() as unknown as MiniAppInstance;
-    this.setData({ zones: zoneTabs() });
-    // 首页跳转过来时通过 globalData.pendingZone 传值
-    const pendingZone = (app.globalData as MiniAppInstance["globalData"] & { pendingZone?: string })
+    const pending = (app.globalData as MiniAppInstance["globalData"] & { pendingZone?: string })
       .pendingZone;
-    if (pendingZone) {
-      this.setData({ activeZone: pendingZone, showAsGrid: pendingZone !== "all" });
-      (app.globalData as MiniAppInstance["globalData"] & { pendingZone?: string }).pendingZone = undefined;
+    if (pending) {
+      const zone = getFridgeZones().find((item) => item.key === pending);
+      if (zone) {
+        this.setData({ level: "layer", activeZone: zone.key, activeZoneLabel: zone.label });
+      }
+      (app.globalData as MiniAppInstance["globalData"] & { pendingZone?: string }).pendingZone =
+        undefined;
     }
-    this.load();
+    void this.load();
   },
 
   onPullDownRefresh() {
-    this.load().finally(() => wx.stopPullDownRefresh());
+    void this.load().finally(() => wx.stopPullDownRefresh());
   },
 
   onCloudSyncApplied() {
-    if (this.data.loading) return;
-    this.setData({ zones: zoneTabs() });
-    void this.load();
+    if (!this.data.loading) void this.load();
   },
 
   async load() {
@@ -106,88 +99,169 @@ Page({
     this.setData({ loading: true, errorText: "" });
     try {
       const data = await getInventory();
-      this.setData({ items: data.items });
+      this.setData({ items: data.items || [] });
       updateOfflineSnapshot({ inventoryItems: data.items || [] });
-      this.applyZoneFilter();
-    } catch (err) {
+      this.renderLevel();
+    } catch (error) {
       const message =
-        err instanceof RequestError
-          ? err.message
-          : err instanceof Error
-            ? err.message
+        error instanceof RequestError
+          ? error.message
+          : error instanceof Error
+            ? error.message
             : "加载失败";
-      this.setData({ errorText: message, items: [], cells: [], listView: [] });
+      this.setData({ errorText: message, summaries: [], cells: [], unplaced: [] });
     } finally {
       this.setData({ loading: false });
     }
   },
 
-  onTapTab(event: WechatMiniprogram.BaseEvent) {
-    const zone = event.currentTarget.dataset.zone as string;
-    this.setData({ activeZone: zone, showAsGrid: zone !== "all" });
-    this.applyZoneFilter();
-  },
-
-  applyZoneFilter() {
-    const zone = this.data.activeZone;
-    if (zone === "all") {
-      this.setData({ listView: this.toListView(this.data.items), cells: [] });
+  renderLevel() {
+    if (this.data.level === "zone") {
+      const summaries = getFridgeZones().map((zone) => {
+        const items = this.data.items.filter((item) => item.zoneId === zone.key);
+        return {
+          key: zone.key,
+          label: zone.label,
+          hint: zone.hint || "查看各层",
+          count: items.length,
+          warnCount: items.filter((item) => freshness(item) !== "normal").length,
+        };
+      });
+      this.setData({
+        summaries,
+        cells: [],
+        unplaced: this.toItemViews(this.data.items.filter((item) => !item.zoneId)),
+      });
       return;
     }
-    // 当前 zone 视图：按 STANDARD_SLOTS 排九宫格
-    const inZone = this.data.items.filter((it) => it.zone === zone);
-    const occupied = new Map<string, InventoryItem>();
-    for (const it of inZone) {
-      if (it.slot) occupied.set(it.slot, it);
+
+    if (this.data.level === "layer") {
+      const summaries = getInventoryLayers(this.data.activeZone).map((layer) => {
+        const items = this.data.items.filter(
+          (item) => item.zoneId === this.data.activeZone && item.layerId === layer.id,
+        );
+        return {
+          key: layer.id,
+          label: layer.name,
+          hint: "3 × 3 格位",
+          count: items.length,
+          warnCount: items.filter((item) => freshness(item) !== "normal").length,
+        };
+      });
+      this.setData({
+        summaries,
+        cells: [],
+        unplaced: this.toItemViews(
+          this.data.items.filter(
+            (item) => item.zoneId === this.data.activeZone && !item.layerId,
+          ),
+        ),
+      });
+      return;
     }
-    const cells: SlotCellView[] = STANDARD_SLOTS.map((slot) => {
-      const item = occupied.get(slot);
-      return item
-        ? {
-            slot,
-            occupied: true,
-            item: { ...item, quantityText: formatInventoryQuantity(item) },
-            level: freshnessLevel(item),
-            expireText: expireText(item),
-          }
-        : { slot, occupied: false };
+
+    const items = this.data.items.filter(
+      (item) =>
+        item.zoneId === this.data.activeZone && item.layerId === this.data.activeLayer,
+    );
+    const occupied = new Map(items.filter((item) => item.cell != null).map((item) => [item.cell!, item]));
+    this.setData({
+      summaries: [],
+      cells: Array.from({ length: 9 }, (_, cell): CellView => {
+        const item = occupied.get(cell);
+        return item
+          ? {
+              cell,
+              code: cellToSlot(cell) || String(cell + 1),
+              occupied: true,
+              item: this.toItemViews([item])[0],
+              level: freshness(item),
+              expireText: expiry(item),
+            }
+          : { cell, code: cellToSlot(cell) || String(cell + 1), occupied: false };
+      }),
+      unplaced: this.toItemViews(items.filter((item) => item.cell == null)),
     });
-    // zone 里 slot 未指定的，单独放进 listView 当"待归位"。
-    const unplaced = this.toListView(inZone.filter((it) => !it.slot));
-    this.setData({ cells, listView: unplaced });
   },
 
-  toListView(items: InventoryItem[]): InventoryListViewItem[] {
+  toItemViews(items: InventoryItem[]): ItemView[] {
     return items.map((item) => ({
       ...item,
-      locationText: item.location || displayPlace(item.zone, item.slot),
+      locationText:
+        item.location || displayInventoryPlace(item.zoneId, item.layerId, item.cell),
       quantityText: formatInventoryQuantity(item),
     }));
   },
 
-  onTapCell(event: WechatMiniprogram.BaseEvent) {
-    const slot = event.currentTarget.dataset.slot as string;
-    const cell = this.data.cells.find((c) => c.slot === slot);
-    if (cell?.occupied && cell.item) {
-      wx.navigateTo({ url: `/pages/inventory-detail/index?id=${cell.item.id}` });
+  onTapSummary(event: WechatMiniprogram.BaseEvent) {
+    const key = String(event.currentTarget.dataset.key || "");
+    if (this.data.level === "zone") {
+      const zone = getFridgeZones().find((item) => item.key === key);
+      if (!zone) return;
+      this.setData({
+        level: "layer",
+        activeZone: key,
+        activeZoneLabel: zone.label,
+        activeLayer: "",
+        activeLayerLabel: "",
+      });
     } else {
-      const zone = this.data.activeZone;
-      wx.navigateTo({
-        url: `/pages/inventory-detail/index?mode=create&zone=${zone}&slot=${slot}`,
+      const layer = getInventoryLayers(this.data.activeZone).find((item) => item.id === key);
+      if (!layer) return;
+      this.setData({
+        level: "cell",
+        activeLayer: key,
+        activeLayerLabel: layer.name,
       });
     }
+    this.renderLevel();
+  },
+
+  onTapBackLevel() {
+    if (this.data.level === "cell") {
+      this.setData({ level: "layer", activeLayer: "", activeLayerLabel: "" });
+    } else if (this.data.level === "layer") {
+      this.setData({ level: "zone", activeZone: "", activeZoneLabel: "" });
+    }
+    this.renderLevel();
+  },
+
+  onTapRootLevel() {
+    if (this.data.level === "zone") return;
+    this.setData({
+      level: "zone",
+      activeZone: "",
+      activeZoneLabel: "",
+      activeLayer: "",
+      activeLayerLabel: "",
+    });
+    this.renderLevel();
+  },
+
+  onTapZoneLevel() {
+    if (!this.data.activeZone || this.data.level !== "cell") return;
+    this.setData({ level: "layer", activeLayer: "", activeLayerLabel: "" });
+    this.renderLevel();
+  },
+
+  onTapCell(event: WechatMiniprogram.BaseEvent) {
+    const cell = Number(event.currentTarget.dataset.cell);
+    const item = this.data.cells.find((entry) => entry.cell === cell)?.item;
+    const url = item
+      ? `/pages/inventory-detail/index?id=${encodeURIComponent(item.id)}`
+      : `/pages/inventory-detail/index?mode=create&zoneId=${encodeURIComponent(this.data.activeZone)}&layerId=${encodeURIComponent(this.data.activeLayer)}&cell=${cell}`;
+    wx.navigateTo({ url });
   },
 
   onTapItem(event: WechatMiniprogram.BaseEvent) {
-    const id = event.currentTarget.dataset.id as string;
-    wx.navigateTo({ url: `/pages/inventory-detail/index?id=${id}` });
+    wx.navigateTo({
+      url: `/pages/inventory-detail/index?id=${encodeURIComponent(String(event.currentTarget.dataset.id || ""))}`,
+    });
   },
 
   onTapScan() {
-    const zone = this.data.activeZone !== "all" ? this.data.activeZone : "";
     const app = getApp<MiniAppInstance["globalData"]>() as unknown as MiniAppInstance;
-    app.globalData.pendingScanZone = zone || undefined;
-    // scan 是 tabBar 页面，必须用 switchTab；zone 通过 globalData 暂存。
+    app.globalData.pendingScanZone = this.data.activeZone || undefined;
     wx.switchTab({ url: "/pages/scan/index" });
   },
 
@@ -196,22 +270,11 @@ Page({
     this.setData({ refreshing: true });
     try {
       const data = await refreshInventory();
-      wx.showToast({
-        title: data.queued ? "已发起刷新" : "未连接设备",
-        icon: data.queued ? "success" : "none",
-      });
+      wx.showToast({ title: data.queued ? "已发起刷新" : "设备未在线", icon: "none" });
     } catch {
       wx.showToast({ title: "刷新失败", icon: "none" });
     } finally {
       this.setData({ refreshing: false });
     }
   },
-
-  // 简化的类型守卫，避免 wx.event 强转 noise
-  asStandardZone(zone: string): StandardZone | null {
-    return STANDARD_ZONES.includes(zone as StandardZone)
-      ? (zone as StandardZone)
-      : null;
-  },
-
 });

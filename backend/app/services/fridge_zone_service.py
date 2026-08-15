@@ -19,6 +19,7 @@ DEFAULT_ZONES = [
     FridgeZoneConfig(key="left", label="左侧冷藏", hint="蔬菜 / 熟食", custom=False, width=1, height=2),
     FridgeZoneConfig(key="right", label="右侧冷藏", hint="肉类 / 乳制品", custom=False, width=1, height=2),
     FridgeZoneConfig(key="door", label="门架", hint="饮品 / 调料", custom=False, width=1, height=3),
+    FridgeZoneConfig(key="drawer", label="果蔬抽屉", hint="蔬菜 / 水果", custom=False, width=2, height=1),
 ]
 
 
@@ -38,7 +39,7 @@ async def _load_row(db: AsyncSession, home_id: UUID) -> SystemConfig | None:
 
 def _normalize_zone(zone: FridgeZoneConfig) -> FridgeZoneConfig:
     """收敛宽高和 custom 标记，防止前端缓存异常值污染云端配置。"""
-    is_standard = zone.key in {"freezer", "left", "right", "door"}
+    is_standard = zone.key in {"freezer", "left", "right", "door", "drawer"}
     return FridgeZoneConfig(
         key=zone.key.strip()[:32],
         label=zone.label.strip()[:32],

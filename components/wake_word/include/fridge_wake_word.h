@@ -48,12 +48,14 @@ typedef struct {
     size_t min_dma_block_threshold;             // 启动所需的最小连续块门槛（字节）
     char wake_word[32];
     char model[48];
+    char audio_source[16];                      // 当前实际音频音源（fy_sp703 / es8311）
     char error[128];
 } fridge_wake_word_status_t;
 
 // 初始化本地唤醒词服务。
-// P4 硬件约束：服务复用板载 ES8311 I2S0 RX 和 GPIO28/29 控制总线，
-// 监听期间与普通录音、摄像头 SCCB 访问互斥。
+// P4 硬件约束：默认使用外接 FY-SP703（I2S1 从机 RX，GPIO7=LRCK/GPIO8=BCLK/GPIO9=DIN），
+// 16kHz/16-bit/mono 直通喂给 WakeNet，不占用 GPIO28/29 摄像头共享 I2C；
+// 监听期间与普通录音互斥。
 esp_err_t fridge_wake_word_init(void);
 
 // 注册唤醒事件回调。回调在唤醒任务上下文中执行，不能做长时间阻塞操作。
@@ -72,6 +74,10 @@ esp_err_t fridge_wake_word_set_user_enabled(bool enabled);
 // display_ready/screen_awake 由调用方提供；函数内部综合用户开关、音频/扬声器忙闲和内部 DMA 余量，
 // 决定启动或停止 WakeNet。重要：该函数不阻塞调用者——停止只投递请求，不在此等待任务退出。
 void fridge_wake_word_policy_update(bool display_ready, bool screen_awake);
+
+// 非持久维护门禁：TF 部署/截屏会在 ready 后、WakeNet 分配 AFE 前临时持有。
+// 复位自动清除，不修改用户 NVS 开关；释放后由下一次策略 tick 正常恢复。
+esp_err_t fridge_wake_word_set_maintenance_hold(bool hold);
 
 // 注册“唤醒后自动对话”回调。唤醒命中时由 wake 任务调用，回调内部禁止做录音/HTTPS 等阻塞工作，
 // 只应投递信号给独立任务处理。与 set_event_callback 相互独立，可同时使用。

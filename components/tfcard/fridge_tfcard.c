@@ -18,6 +18,7 @@
 #include "driver/sdmmc_host.h"
 #include "esp_err.h"
 #include "esp_check.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_vfs_fat.h"
@@ -60,6 +61,17 @@ static char s_last_error[FRIDGE_TFCARD_MAX_ERROR_LEN + 1];
 static tfcard_transfer_t s_transfer;
 static uint32_t s_next_transfer_id = 1;
 static uint32_t s_trash_sequence;
+
+// SDMMC DMA 只能使用内部可寻址内存；在真实读取前后输出连续块，便于定位碎片化。
+static void log_internal_dma_heap(const char *phase)
+{
+    const uint32_t caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA;
+    ESP_LOGI(TAG, "internal_dma[%s]: free=%u largest=%u minimum=%u",
+             phase ? phase : "unknown",
+             (unsigned)heap_caps_get_free_size(caps),
+             (unsigned)heap_caps_get_largest_free_block(caps),
+             (unsigned)heap_caps_get_minimum_free_size(caps));
+}
 
 static esp_err_t lock_storage(void)
 {
@@ -149,17 +161,40 @@ static esp_err_t validate_relative_path(const char *path, bool allow_root)
     return ESP_OK;
 }
 
+// 判断路径是否为指定目录本身或其子路径。所有输入在调用前都必须已经通过路径校验。
+static bool path_in_directory(const char *path, const char *directory)
+{
+    if (!path || !directory) return false;
+    const size_t path_length = strlen(path);
+    const size_t directory_length = strlen(directory);
+    return path_length >= directory_length && strncmp(path, directory, directory_length) == 0 &&
+           (path_length == directory_length || path[directory_length] == '/');
+}
+
 static bool protected_path(const char *path)
 {
-    const size_t n = strlen(FRIDGE_TFCARD_SYSTEM_DIR);
-    return strncmp(path, FRIDGE_TFCARD_SYSTEM_DIR, n) == 0 && (path[n] == '\0' || path[n] == '/');
+    return path_in_directory(path, FRIDGE_TFCARD_SYSTEM_DIR);
+}
+
+// 诊断目录保存 coredump 等敏感内容，禁止通用浏览、读取和传输接口触达。
+static bool diagnostic_path(const char *path)
+{
+    return path_in_directory(path, FRIDGE_TFCARD_DIAGNOSTICS_DIR);
+}
+
+// 日志不包含敏感 coredump，允许通过普通文本接口轮转清空；追加接口仍会再次校验该前缀。
+static bool log_path(const char *path)
+{
+    return path_in_directory(path, FRIDGE_TFCARD_LOG_DIR);
 }
 
 static esp_err_t require_mutable_path(const char *path)
 {
     esp_err_t err = validate_relative_path(path, false);
     if (err != ESP_OK) return err;
-    return protected_path(path) && !s_expert_mode ? ESP_ERR_NOT_ALLOWED : ESP_OK;
+    // diagnostics 目录始终只允许组件内部原子写入，即使用户开启 TF 专家模式也不得通过通用接口触达。
+    if (diagnostic_path(path)) return ESP_ERR_NOT_ALLOWED;
+    return protected_path(path) && !log_path(path) && !s_expert_mode ? ESP_ERR_NOT_ALLOWED : ESP_OK;
 }
 
 static esp_err_t make_absolute(const char *relative, char *out, size_t out_size)
@@ -187,7 +222,8 @@ static esp_err_t mkdir_if_missing(const char *absolute)
 
 static esp_err_t ensure_system_dirs_locked(void)
 {
-    const char *dirs[] = {FRIDGE_TFCARD_SYSTEM_DIR, FRIDGE_TFCARD_TRASH_DIR,
+    const char *dirs[] = {FRIDGE_TFCARD_SYSTEM_DIR, FRIDGE_TFCARD_LOG_DIR,
+                          FRIDGE_TFCARD_DIAGNOSTICS_DIR, FRIDGE_TFCARD_TRASH_DIR,
                           FRIDGE_TFCARD_UPLOAD_DIR, FRIDGE_TFCARD_EXPORT_DIR};
     char absolute[sizeof(FRIDGE_TFCARD_MOUNT_POINT) + FRIDGE_TFCARD_MAX_PATH + 2];
     for (size_t i = 0; i < sizeof(dirs) / sizeof(dirs[0]); ++i) {
@@ -242,7 +278,9 @@ static esp_err_t mount_locked(bool allow_format)
     slot.d3 = FRIDGE_PIN_TF_D3;
     slot.width = 4;
     slot.flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
+    log_internal_dma_heap("sdmmc_mount_before");
     esp_err_t err = esp_vfs_fat_sdmmc_mount(FRIDGE_TFCARD_MOUNT_POINT, &host, &slot, &config, &s_card);
+    log_internal_dma_heap("sdmmc_mount_after");
     if (err != ESP_OK) {
         s_card = NULL;
         s_format_required = err == ESP_FAIL;
@@ -286,7 +324,8 @@ static esp_err_t remove_tree_locked(const char *absolute)
 }
 
 // FATFS 不能保证 rename 覆盖既有目标；用同卷 .bak 完成可回滚替换，任一步失败都保留旧文件。
-static esp_err_t replace_file_locked(const char *temporary, const char *target, bool overwrite)
+static esp_err_t replace_file_locked(const char *temporary, const char *target,
+                                     bool overwrite, bool keep_backup)
 {
     struct stat st;
     if (!path_exists(target, &st)) return rename(temporary, target) == 0 ? ESP_OK : errno_to_esp();
@@ -300,7 +339,7 @@ static esp_err_t replace_file_locked(const char *temporary, const char *target, 
         rename(backup, target);
         return err;
     }
-    unlink(backup);
+    if (!keep_backup) unlink(backup);
     return ESP_OK;
 }
 
@@ -458,6 +497,7 @@ esp_err_t fridge_tfcard_list(const char *relative_dir, uint32_t cursor, size_t l
 {
     if (!out || limit == 0 || limit > FRIDGE_TFCARD_LIST_PAGE_MAX) return ESP_ERR_INVALID_ARG;
     ESP_RETURN_ON_ERROR(validate_relative_path(relative_dir, true), TAG, "非法 TF 路径");
+    if (diagnostic_path(relative_dir)) return ESP_ERR_NOT_ALLOWED;
     ESP_RETURN_ON_ERROR(lock_storage(), TAG, "TF 互斥锁超时");
     memset(out, 0, sizeof(*out));
     if (!s_card) { unlock_storage(); return ESP_ERR_INVALID_STATE; }
@@ -469,6 +509,9 @@ esp_err_t fridge_tfcard_list(const char *relative_dir, uint32_t cursor, size_t l
     uint32_t position = 0;
     while ((entry = readdir(dir)) != NULL) {
         if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+        // 只在系统目录的直接列表中隐藏 diagnostics，避免通用浏览器发现敏感目录。
+        if (!strcmp(relative_dir, FRIDGE_TFCARD_SYSTEM_DIR) &&
+            !strcmp(entry->d_name, "diagnostics")) continue;
         if (position++ < cursor) continue;
         if (out->count == limit) { out->has_more = true; break; }
         char relative[FRIDGE_TFCARD_MAX_PATH + 1];
@@ -490,6 +533,7 @@ esp_err_t fridge_tfcard_stat(const char *relative_path, fridge_tfcard_entry_t *o
 {
     if (!out) return ESP_ERR_INVALID_ARG;
     ESP_RETURN_ON_ERROR(validate_relative_path(relative_path, true), TAG, "非法 TF 路径");
+    if (diagnostic_path(relative_path)) return ESP_ERR_NOT_ALLOWED;
     ESP_RETURN_ON_ERROR(lock_storage(), TAG, "TF 互斥锁超时");
     char absolute[sizeof(FRIDGE_TFCARD_MOUNT_POINT) + FRIDGE_TFCARD_MAX_PATH + 2];
     make_absolute(relative_path, absolute, sizeof(absolute));
@@ -630,10 +674,11 @@ esp_err_t fridge_tfcard_empty_trash(void)
 }
 
 esp_err_t fridge_tfcard_text_read(const char *relative_path, char *buffer, size_t buffer_size,
-                                 size_t *out_size)
+                                  size_t *out_size)
 {
     if (!buffer || buffer_size == 0 || !out_size) return ESP_ERR_INVALID_ARG;
     ESP_RETURN_ON_ERROR(validate_relative_path(relative_path, false), TAG, "非法 TF 路径");
+    if (diagnostic_path(relative_path)) return ESP_ERR_NOT_ALLOWED;
     ESP_RETURN_ON_ERROR(lock_storage(), TAG, "TF 互斥锁超时");
     char absolute[sizeof(FRIDGE_TFCARD_MOUNT_POINT) + FRIDGE_TFCARD_MAX_PATH + 2];
     make_absolute(relative_path, absolute, sizeof(absolute));
@@ -643,17 +688,54 @@ esp_err_t fridge_tfcard_text_read(const char *relative_path, char *buffer, size_
     FILE *file = err == ESP_OK ? fopen(absolute, "rb") : NULL;
     if (err == ESP_OK && !file) err = errno_to_esp();
     if (err == ESP_OK) {
+        log_internal_dma_heap("text_read_before");
         *out_size = fread(buffer, 1, st.st_size, file);
         buffer[*out_size] = '\0';
         if (*out_size != (size_t)st.st_size) err = ESP_FAIL;
+        log_internal_dma_heap("text_read_after");
     }
     if (file) fclose(file);
     unlock_storage();
     return err;
 }
 
-esp_err_t fridge_tfcard_text_write(const char *relative_path, const char *text, size_t text_size,
-                                  bool overwrite)
+esp_err_t fridge_tfcard_text_read_range(const char *relative_path, size_t offset,
+                                       char *buffer, size_t buffer_size,
+                                       size_t *out_size, size_t *out_total_size)
+{
+    if (!buffer || buffer_size == 0 || !out_size || !out_total_size) return ESP_ERR_INVALID_ARG;
+    ESP_RETURN_ON_ERROR(validate_relative_path(relative_path, false), TAG, "非法 TF 路径");
+    if (diagnostic_path(relative_path)) return ESP_ERR_NOT_ALLOWED;
+    ESP_RETURN_ON_ERROR(lock_storage(), TAG, "TF 互斥锁超时");
+
+    char absolute[sizeof(FRIDGE_TFCARD_MOUNT_POINT) + FRIDGE_TFCARD_MAX_PATH + 2];
+    make_absolute(relative_path, absolute, sizeof(absolute));
+    struct stat st;
+    esp_err_t err = stat(absolute, &st) == 0 ? ESP_OK : errno_to_esp();
+    if (err == ESP_OK && ((uint64_t)st.st_size > FRIDGE_TFCARD_TEXT_MAX || offset > (size_t)st.st_size)) {
+        err = ESP_ERR_INVALID_SIZE;
+    }
+
+    FILE *file = err == ESP_OK ? fopen(absolute, "rb") : NULL;
+    if (err == ESP_OK && !file) err = errno_to_esp();
+    if (err == ESP_OK && offset > 0 && fseek(file, (long)offset, SEEK_SET) != 0) err = errno_to_esp();
+    if (err == ESP_OK) {
+        const size_t remaining = (size_t)st.st_size - offset;
+        const size_t wanted = remaining < (buffer_size - 1) ? remaining : (buffer_size - 1);
+        log_internal_dma_heap("text_read_range_before");
+        *out_size = fread(buffer, 1, wanted, file);
+        buffer[*out_size] = '\0';
+        *out_total_size = (size_t)st.st_size;
+        if (*out_size != wanted) err = ESP_FAIL;
+        log_internal_dma_heap("text_read_range_after");
+    }
+    if (file) fclose(file);
+    unlock_storage();
+    return err;
+}
+
+static esp_err_t text_write_internal(const char *relative_path, const char *text,
+                                    size_t text_size, bool overwrite, bool keep_backup)
 {
     if (!text || text_size > FRIDGE_TFCARD_TEXT_MAX) return ESP_ERR_INVALID_ARG;
     ESP_RETURN_ON_ERROR(lock_storage(), TAG, "TF 互斥锁超时");
@@ -666,8 +748,151 @@ esp_err_t fridge_tfcard_text_write(const char *relative_path, const char *text, 
     if (err == ESP_OK && !file) err = errno_to_esp();
     if (err == ESP_OK && fwrite(text, 1, text_size, file) != text_size) err = ESP_FAIL;
     if (file) { if (fflush(file) != 0 || fsync(fileno(file)) != 0) err = ESP_FAIL; fclose(file); }
-    if (err == ESP_OK) err = replace_file_locked(temporary, target, overwrite);
+    if (err == ESP_OK) err = replace_file_locked(temporary, target, overwrite, keep_backup);
     if (err != ESP_OK) unlink(temporary);
+    unlock_storage();
+    return err;
+}
+
+esp_err_t fridge_tfcard_text_write(const char *relative_path, const char *text, size_t text_size,
+                                  bool overwrite)
+{
+    return text_write_internal(relative_path, text, text_size, overwrite, false);
+}
+
+esp_err_t fridge_tfcard_text_write_recoverable(const char *relative_path, const char *text,
+                                              size_t text_size, bool overwrite)
+{
+    return text_write_internal(relative_path, text, text_size, overwrite, true);
+}
+
+// 校验只能由内部诊断/日志接口使用的单文件路径；目录本身不是可写文件目标。
+static esp_err_t validate_scoped_file_path(const char *relative_path, const char *directory)
+{
+    esp_err_t err = validate_relative_path(relative_path, false);
+    if (err != ESP_OK) return err;
+    const size_t directory_length = strlen(directory);
+    if (!path_in_directory(relative_path, directory) ||
+        relative_path[directory_length] != '/' || relative_path[directory_length + 1] == '\0') {
+        return ESP_ERR_NOT_ALLOWED;
+    }
+    return ESP_OK;
+}
+
+// 在锁内以追加模式写入日志文件。每次调用关闭文件，确保即使后台任务随后被暂停，
+// stdio 缓冲也已刷入 FATFS；sync=true 时再额外执行 fsync，降低掉电丢失窗口。
+esp_err_t fridge_tfcard_append_log(const char *relative_path, const void *data,
+                                   size_t data_size, bool sync)
+{
+    // data_size 已经是 size_t；此接口不需要再与 64 位文件上限比较，避免在
+    // 32 位 P4 构建中产生“比较恒为假”的无效编译警告。
+    if (!data && data_size != 0) return ESP_ERR_INVALID_ARG;
+    ESP_RETURN_ON_ERROR(validate_scoped_file_path(relative_path, FRIDGE_TFCARD_LOG_DIR), TAG,
+                        "日志路径必须位于 %s", FRIDGE_TFCARD_LOG_DIR);
+    ESP_RETURN_ON_ERROR(lock_storage(), TAG, "TF 互斥锁超时");
+
+    esp_err_t err = s_card ? ESP_OK : ESP_ERR_INVALID_STATE;
+    char absolute[sizeof(FRIDGE_TFCARD_MOUNT_POINT) + FRIDGE_TFCARD_MAX_PATH + 2];
+    if (err == ESP_OK) err = make_absolute(relative_path, absolute, sizeof(absolute));
+    FILE *file = err == ESP_OK ? fopen(absolute, "ab") : NULL;
+    if (err == ESP_OK && !file) err = errno_to_esp();
+    if (err == ESP_OK && data_size != 0 && fwrite(data, 1, data_size, file) != data_size) err = ESP_FAIL;
+    if (file) {
+        if (fflush(file) != 0) err = ESP_FAIL;
+        if (err == ESP_OK && sync && fsync(fileno(file)) != 0) err = ESP_FAIL;
+        if (fclose(file) != 0) err = ESP_FAIL;
+    }
+    if (err != ESP_OK) set_error("log append failed");
+    unlock_storage();
+    return err;
+}
+
+// 将诊断文本写入临时文件并原子替换目标。诊断目录不经过普通 TF 写接口，避免被 USB/HTTP
+// 浏览器意外读到；覆盖时沿用同卷 .bak 回滚策略，成功后删除备份。
+esp_err_t fridge_tfcard_write_diagnostic_text(const char *relative_path, const char *text,
+                                              size_t text_size, bool overwrite)
+{
+    if (!text || text_size > FRIDGE_TFCARD_TEXT_MAX) return ESP_ERR_INVALID_ARG;
+    ESP_RETURN_ON_ERROR(validate_scoped_file_path(relative_path, FRIDGE_TFCARD_DIAGNOSTICS_DIR), TAG,
+                        "诊断路径必须位于 %s", FRIDGE_TFCARD_DIAGNOSTICS_DIR);
+    ESP_RETURN_ON_ERROR(lock_storage(), TAG, "TF 互斥锁超时");
+
+    esp_err_t err = s_card ? ESP_OK : ESP_ERR_INVALID_STATE;
+    char target[sizeof(FRIDGE_TFCARD_MOUNT_POINT) + FRIDGE_TFCARD_MAX_PATH + 2];
+    char temporary[sizeof(target) + 6];
+    if (err == ESP_OK) err = make_absolute(relative_path, target, sizeof(target));
+    if (err == ESP_OK && snprintf(temporary, sizeof(temporary), "%s.part", target) >= (int)sizeof(temporary)) {
+        err = ESP_ERR_INVALID_SIZE;
+    }
+    FILE *file = err == ESP_OK ? fopen(temporary, "wb") : NULL;
+    if (err == ESP_OK && !file) err = errno_to_esp();
+    if (err == ESP_OK && fwrite(text, 1, text_size, file) != text_size) err = ESP_FAIL;
+    if (file) {
+        if (fflush(file) != 0 || fsync(fileno(file)) != 0) err = ESP_FAIL;
+        if (fclose(file) != 0) err = ESP_FAIL;
+    }
+    if (err == ESP_OK) err = replace_file_locked(temporary, target, overwrite, false);
+    if (err != ESP_OK) {
+        unlink(temporary);
+        set_error("diagnostic text write failed");
+    }
+    unlock_storage();
+    return err;
+}
+
+// 从只读回调分块复制诊断二进制数据，固定 4 KiB 缓冲避免把 Flash coredump 整体搬入内存。
+// 回调必须按 offset 返回本次实际字节数，不能访问 TF 卡，避免在全局 TF 锁内产生递归死锁。
+esp_err_t fridge_tfcard_write_diagnostic_stream(const char *relative_path, uint64_t total_size,
+                                                fridge_tfcard_diagnostic_read_cb_t read_cb,
+                                                void *context, bool overwrite)
+{
+    if (!read_cb || total_size > FRIDGE_TFCARD_FILE_MAX) return ESP_ERR_INVALID_ARG;
+    ESP_RETURN_ON_ERROR(validate_scoped_file_path(relative_path, FRIDGE_TFCARD_DIAGNOSTICS_DIR), TAG,
+                        "诊断路径必须位于 %s", FRIDGE_TFCARD_DIAGNOSTICS_DIR);
+    ESP_RETURN_ON_ERROR(lock_storage(), TAG, "TF 互斥锁超时");
+
+    esp_err_t err = s_card ? ESP_OK : ESP_ERR_INVALID_STATE;
+    char target[sizeof(FRIDGE_TFCARD_MOUNT_POINT) + FRIDGE_TFCARD_MAX_PATH + 2];
+    char temporary[sizeof(target) + 6];
+    uint8_t *buffer = NULL;
+    FILE *file = NULL;
+    if (err == ESP_OK) err = make_absolute(relative_path, target, sizeof(target));
+    if (err == ESP_OK && snprintf(temporary, sizeof(temporary), "%s.part", target) >= (int)sizeof(temporary)) {
+        err = ESP_ERR_INVALID_SIZE;
+    }
+    if (err == ESP_OK) {
+        file = fopen(temporary, "wb");
+        if (!file) err = errno_to_esp();
+    }
+    if (err == ESP_OK) {
+        buffer = malloc(4U * 1024U);
+        if (!buffer) err = ESP_ERR_NO_MEM;
+    }
+    uint64_t offset = 0;
+    while (err == ESP_OK && offset < total_size) {
+        const size_t capacity = (size_t)((total_size - offset) > 4U * 1024U ? 4U * 1024U : (total_size - offset));
+        size_t received = 0;
+        err = read_cb(context, offset, buffer, capacity, &received);
+        if (err != ESP_OK) break;
+        if (received == 0 || received > capacity || fwrite(buffer, 1, received, file) != received) {
+            err = received == 0 || received > capacity ? ESP_ERR_INVALID_SIZE : ESP_FAIL;
+            break;
+        }
+        offset += received;
+    }
+    if (err == ESP_OK && offset != total_size) err = ESP_ERR_INVALID_SIZE;
+    if (file) {
+        if (fflush(file) != 0 || fsync(fileno(file)) != 0) err = ESP_FAIL;
+        if (fclose(file) != 0) err = ESP_FAIL;
+        file = NULL;
+    }
+    free(buffer);
+    if (err == ESP_OK) err = replace_file_locked(temporary, target, overwrite, false);
+    if (err != ESP_OK) {
+        if (file) fclose(file);
+        unlink(temporary);
+        set_error("diagnostic stream write failed");
+    }
     unlock_storage();
     return err;
 }
@@ -693,7 +918,7 @@ esp_err_t fridge_tfcard_write_diagnostic_export(const char *file_name, const cha
     if (err == ESP_OK && !file) err = errno_to_esp();
     if (err == ESP_OK && fwrite(text, 1, text_size, file) != text_size) err = ESP_FAIL;
     if (file) { if (fflush(file) != 0 || fsync(fileno(file)) != 0) err = ESP_FAIL; fclose(file); }
-    if (err == ESP_OK) err = replace_file_locked(temporary, target, true);
+    if (err == ESP_OK) err = replace_file_locked(temporary, target, true, false);
     if (err != ESP_OK) unlink(temporary);
     else strlcpy(out_path, relative, out_path_size);
     unlock_storage();
@@ -709,6 +934,7 @@ esp_err_t fridge_tfcard_transfer_begin(const char *relative_path,
         total_size > FRIDGE_TFCARD_FILE_MAX) return ESP_ERR_INVALID_ARG;
     ESP_RETURN_ON_ERROR(lock_storage(), TAG, "TF 互斥锁超时");
     esp_err_t err = s_card ? validate_relative_path(relative_path, false) : ESP_ERR_INVALID_STATE;
+    if (err == ESP_OK && diagnostic_path(relative_path)) err = ESP_ERR_NOT_ALLOWED;
     if (err == ESP_OK && direction == FRIDGE_TFCARD_TRANSFER_WRITE) err = require_mutable_path(relative_path);
     if (err == ESP_OK && s_transfer.active) err = ESP_ERR_INVALID_STATE;
     char absolute[sizeof(FRIDGE_TFCARD_MOUNT_POINT) + FRIDGE_TFCARD_MAX_PATH + 2];
@@ -826,7 +1052,7 @@ esp_err_t fridge_tfcard_transfer_end(uint32_t session_id)
         if (fflush(s_transfer.file) != 0 || fsync(fileno(s_transfer.file)) != 0) err = ESP_FAIL;
         fclose(s_transfer.file); s_transfer.file = NULL;
         if (err == ESP_OK) err = replace_file_locked(s_transfer.temporary, s_transfer.absolute,
-                                                     s_transfer.overwrite);
+                                                     s_transfer.overwrite, false);
     }
     // 完成尝试后关闭会话；失败时保留 .part 供诊断/恢复，不让已关闭 FILE* 留在活动会话中。
     if (s_transfer.direction == FRIDGE_TFCARD_TRANSFER_READ || s_transfer.file == NULL) {

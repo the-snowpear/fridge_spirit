@@ -5,6 +5,7 @@ import {
   createMockDiagnostics,
   createMockLogs,
   createMockMQTTConfig,
+  createMockMq5Sensor,
   createMockNetwork,
   createMockPins,
   createMockRadar,
@@ -17,7 +18,11 @@ import {
 import type {
   AIAssistantChatRequest,
   AIAssistantChatResponse,
-  AIChatResponse,
+  AgentChatResponse,
+  AgentRunStatus,
+  AgentSession,
+  AgentSessionRecord,
+  AgentSubmitResponse,
   AIConfig,
   AIContextPreview,
   AIProfilesResponse,
@@ -35,23 +40,43 @@ import type {
   KitchenAIPage,
   KitchenAIStatus,
   KitchenToolsStatus,
-  MemorySummary,
   MQTTConfig,
+  MicSource,
   NetworkConfig,
   ProjectAITaskRequest,
   ProjectAITaskResponse,
   RadarSnapshot,
+  SensorSnapshot,
   StateMachineConfig,
   StateMachineStatus,
   TTSConfig,
   TTSStatus,
   TfFileEntry,
   TfTransferSession,
+  UiStatus,
   WakeStatus,
   VoiceChatResponse,
   VoiceChatStatus,
 } from "../types";
 import { BaseTransport } from "./DeviceTransport";
+
+// MockTransport 与固件共享竖屏白名单，避免测试面板把已移植设置页错误折回横屏。
+const portraitUiPages = new Set([
+  "home",
+  "home_detail",
+  "plan",
+  "chat",
+  "chat_history",
+  "chat_tool_detail",
+  "chat_pending_actions",
+  "more",
+  "timer",
+  "alarm",
+  "stopwatch",
+  "safety",
+  "settings",
+  "maintenance",
+]);
 
 function crc32Mock(bytes: Uint8Array) {
   let crc = 0xffffffff;
@@ -110,11 +135,55 @@ function createMockWavBase64(durationMs: number) {
   };
 }
 
+function decodeMockBase64(base64: string) {
+  const binary = window.atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return bytes;
+}
+
+// Mock 截屏使用一个很小的合法 BMP，覆盖首页的 TF 读回、CRC 校验、预览和下载链路。
+function createMockScreenshotBmp() {
+  const width = 2;
+  const height = 2;
+  const rowBytes = 8;
+  const pixelOffset = 54;
+  const bytes = new Uint8Array(pixelOffset + rowBytes * height);
+  const view = new DataView(bytes.buffer);
+  const writeAscii = (offset: number, text: string) => {
+    for (let index = 0; index < text.length; index += 1) view.setUint8(offset + index, text.charCodeAt(index));
+  };
+  writeAscii(0, "BM");
+  view.setUint32(2, bytes.length, true);
+  view.setUint32(10, pixelOffset, true);
+  view.setUint32(14, 40, true);
+  view.setInt32(18, width, true);
+  view.setInt32(22, height, true);
+  view.setUint16(26, 1, true);
+  view.setUint16(28, 24, true);
+  view.setUint32(34, rowBytes * height, true);
+  const pixels = [
+    [0x22, 0x91, 0xff], [0x31, 0xb4, 0x77],
+    [0xee, 0xc3, 0x44], [0xc9, 0x55, 0x2c],
+  ];
+  pixels.forEach(([blue, green, red], index) => {
+    const row = Math.floor(index / width);
+    const column = index % width;
+    const offset = pixelOffset + row * rowBytes + column * 3;
+    view.setUint8(offset, blue);
+    view.setUint8(offset + 1, green);
+    view.setUint8(offset + 2, red);
+  });
+  return bytes;
+}
+
 export class MockTransport extends BaseTransport {
   private timer: number | undefined;
   private wakeTimer: number | undefined;
   private connectedAt = Date.now();
   private connected = false;
+  private uiPage = "home";
+  private uiOrientation: UiStatus["orientation"] = "landscape";
   private network = createMockNetwork();
   private mqttConfig: MQTTConfig = createMockMQTTConfig();
   private aiConfig = createMockAIConfig();
@@ -182,6 +251,8 @@ export class MockTransport extends BaseTransport {
   private cameraStatus: CameraStatus = createMockCameraStatus(false);
   private cameraPreviewDataUrl: string | null = null;
   private radar: RadarSnapshot = createMockRadar(null);
+  // MQ-5 燃气模块 Mock 状态（相对 ADC，非 ppm）；与 get_sensors 快照共用。
+  private mq5 = createMockMq5Sensor();
   private voiceStatus: VoiceChatStatus = {
     state: "idle",
     durationMs: 0,
@@ -189,6 +260,9 @@ export class MockTransport extends BaseTransport {
     rms: 0,
     error: "",
   };
+  private micWavCache: ReturnType<typeof createMockWavBase64> | null = null;
+  private micWavBytes: Uint8Array | null = null;
+  private micWavSession = 0;
   private tfMounted = true;
   private tfExpertMode = false;
   private tfFiles = new Map<string, { entry: TfFileEntry; bytes: Uint8Array }>([
@@ -201,15 +275,6 @@ export class MockTransport extends BaseTransport {
   ]);
   private tfTransfers = new Map<number, TfTransferSession & { bytes: Uint8Array }>();
   private tfNextSession = 1;
-  private memorySummary: MemorySummary = {
-    schema_version: 1,
-    memory_policy: "硬件测试记忆：只保存结构化摘要，不保存完整聊天记录",
-    family_size: 2,
-    taste: ["清淡", "少油"],
-    avoid: ["香菜"],
-    allergies: [],
-    recent_summary: ["用户希望优先处理临期食材", "早餐偏快手，晚餐偏家常"],
-  };
   private chatHistory: DeviceChatHistory = {
     schemaVersion: 1,
     updatedAt: Math.floor(Date.now() / 1000),
@@ -220,22 +285,105 @@ export class MockTransport extends BaseTransport {
     prunedCount: 0,
     messages: [],
   };
+  private agentSession: AgentSession = {
+    schema_version: 1,
+    foreground: {
+      next_sequence: 1,
+      messages: [],
+    },
+  };
+  private agentRun: AgentRunStatus = {
+    active: false,
+    runId: "",
+    state: "COMPLETED",
+    intent: "",
+    reply: "",
+    error: "",
+    httpStatus: 0,
+    modelLatencyMs: 0,
+    contextBytes: 0,
+    toolSchemaCount: 18,
+    modelSteps: 0,
+    cloudStackHighWater: 12288,
+    freePsramBytes: 28 * 1024 * 1024,
+    internalDmaLargestBytes: 96 * 1024,
+    cloudPending: false,
+    confirmation: null,
+  };
+  private agentPollCount = 0;
+  private agentPendingReply = "";
+  private realtimeConfig = {
+    url: "wss://open.bigmodel.cn/api/paas/v4/realtime",
+    model: "glm-realtime-flash",
+    voice: "tongtong",
+    instructions: "你是冰箱小精灵，厨房语音助手。用简短中文回答。",
+    vadMode: "server_vad",
+    timeoutMs: 30000,
+    enabled: true,
+    hasApiKey: false,
+    ready: false,
+    apiKeyPreview: "",
+    lastError: "",
+  };
+  private realtimeStatus = {
+    ready: true,
+    sessionActive: false,
+    networkOk: true,
+    internetReady: true,
+    audioUpActive: false,
+    audioDownActive: false,
+    toolsReady: true,
+    state: "idle",
+    model: "glm-realtime-flash",
+    voice: "tongtong",
+    lastError: "",
+    toolsExported: 10,
+    audioUpBytes: 0,
+    audioDownBytes: 0,
+    toolCallsOk: 0,
+    toolCallsFail: 0,
+    lastEventAgeMs: 0,
+  };
+  private realtimeHasKey = false;
+  private realtimeSessionGeneration = 0;
+  private realtimeResponseGeneration = 0;
+
+  // 模拟 MQ-5 每次 get_sensors 的轻微读数波动；基线固定，差值随当前读数更新。
+  private buildMq5Snapshot(): Partial<SensorSnapshot> {
+    const jitter = Math.floor(Math.random() * 41) - 20; // -20..+20
+    const raw12bit = Math.max(0, Math.min(4095, (this.mq5.mq5Raw12bit ?? 1024) + jitter));
+    this.mq5 = {
+      ...this.mq5,
+      mq5Raw12bit: raw12bit,
+      mq5Value10bit: Math.round((raw12bit * 1023) / 4095),
+      mq5AdcPercent: Math.round((raw12bit * 100) / 4095),
+      mq5SampleCount: (this.mq5.mq5SampleCount ?? 0) + 1,
+      mq5UpdatedAtMs: Date.now(),
+      mq5DeltaFromBaseline: this.mq5.mq5BaselineReady
+        ? raw12bit - (this.mq5.mq5BaselineRaw12bit ?? 0)
+        : 0,
+    };
+    return { ...this.mq5 };
+  }
 
   private createStateMachineStatus(): StateMachineStatus {
     const sensors = createMockSensors();
+    // P4 MPU 快照不再伪造未接入的光敏字段；状态机 Mock 使用自己的测试输入。
+    const mockLightValue10bit = 600;
+    const mockLightDelta = 0;
     return {
       state: sensors.stateMachine?.state ?? "SLEEP",
       doorState: sensors.stateMachine?.doorState ?? "CLOSED",
       offline: false,
-      isNight: (sensors.lightValue10bit ?? sensors.lux) < this.stateMachineConfig.nightLightThreshold,
-      radarSoftwarePaused: (sensors.lightValue10bit ?? sensors.lux) < this.stateMachineConfig.nightLightThreshold,
+      isNight: mockLightValue10bit < this.stateMachineConfig.nightLightThreshold,
+      radarSoftwarePaused: mockLightValue10bit < this.stateMachineConfig.nightLightThreshold,
       radarPresenceReliable: Boolean(sensors.radar?.stablePresence),
       radarWithin2m: false,
       radarWithin1m: false,
       radarApproaching: Boolean(sensors.radar?.approaching),
       imuMotionStrength: 0.08,
-      lightValue10bit: sensors.lightValue10bit ?? sensors.lux,
-      lightDelta: sensors.lightDelta,
+      lightValue10bit: mockLightValue10bit,
+      lightDelta: mockLightDelta,
       radarDistanceRaw: sensors.radar?.smoothedDistanceRaw ?? 0,
       radarGate: sensors.radar?.stableGate ?? 0,
       lastReason: "Mock 状态机：亮度与雷达阈值模拟",
@@ -282,6 +430,8 @@ export class MockTransport extends BaseTransport {
 
   async disconnect() {
     this.connected = false;
+    this.realtimeSessionGeneration += 1;
+    this.realtimeResponseGeneration += 1;
     if (this.timer) {
       window.clearInterval(this.timer);
     }
@@ -290,6 +440,50 @@ export class MockTransport extends BaseTransport {
       this.wakeTimer = undefined;
     }
     this.emitLog("info", "Mock 设备已断开。", "mock");
+  }
+
+  // Mock 只模拟 P4 唯一 foreground Session，记录结构与 TF sessions.json 保持一致。
+  private appendAgentRecord(record: Partial<AgentSessionRecord> & Pick<AgentSessionRecord, "kind" | "run_id" | "text">) {
+    const item: AgentSessionRecord = {
+      kind: record.kind,
+      run_id: record.run_id,
+      call_id: record.call_id ?? "",
+      time: record.time ?? new Date().toLocaleTimeString("zh-CN", { hour12: false }).slice(0, 5),
+      text: record.text,
+      tool_name: record.tool_name ?? "",
+      detail: record.detail ?? "",
+      latency: record.latency ?? "",
+      risk: record.risk ?? 0,
+      tool_status: record.tool_status ?? 0,
+      requires_confirmation: record.requires_confirmation ?? false,
+    };
+    this.agentSession = {
+      ...this.agentSession,
+      foreground: {
+        next_sequence: this.agentSession.foreground.next_sequence + 1,
+        messages: [...this.agentSession.foreground.messages, item].slice(-48),
+      },
+    };
+  }
+
+  // 云 Worker 在第二次状态轮询时结束，便于 WebUI 验证等待态、完成态和诊断字段。
+  private advanceMockAgentRun() {
+    if (!this.agentRun.active || this.agentRun.state !== "WAITING_MODEL") return;
+    this.agentPollCount += 1;
+    if (this.agentPollCount < 2) return;
+    const reply = this.agentPendingReply || "Mock P4 小精灵已完成本次请求。";
+    this.agentRun = {
+      ...this.agentRun,
+      active: false,
+      state: "COMPLETED",
+      reply,
+      httpStatus: 200,
+      modelLatencyMs: 420,
+      modelSteps: Math.max(1, this.agentRun.modelSteps),
+      cloudPending: false,
+      confirmation: null,
+    };
+    this.appendAgentRecord({ kind: "assistant", run_id: this.agentRun.runId, text: reply, latency: "420" });
   }
 
   async sendCommand<TPayload = unknown>(command: DeviceCommand, payload?: unknown): Promise<DeviceResponse<TPayload>> {
@@ -519,18 +713,132 @@ export class MockTransport extends BaseTransport {
         responsePayload = this.aiConfig;
         break;
       }
+      case "agent_submit": {
+        const message = String((payload as { message?: string } | undefined)?.message ?? "").trim().slice(0, 512);
+        if (!message) throw new Error("Mock 小精灵需要 message");
+        if (this.agentRun.active) throw new Error("Mock 小精灵已有任务正在执行");
+        const runId = `mock-run-${Date.now()}`;
+        const needsConfirmation = /删除|清空|写入|添加|设置|修改/.test(message);
+        this.appendAgentRecord({ kind: "user", run_id: runId, text: message });
+        this.agentPollCount = 0;
+        this.agentPendingReply = needsConfirmation
+          ? "Mock P4 小精灵已收到工具处理结果，并完成后续推理。"
+          : `Mock P4 小精灵：已收到“${message.slice(0, 80)}”。真实设备会构建完整上下文并进入最多 6 步的处理流程。`;
+        this.agentRun = {
+          active: true,
+          runId,
+          state: needsConfirmation ? "WAITING_CONFIRMATION" : "WAITING_MODEL",
+          intent: needsConfirmation ? "tool_write" : "open_chat",
+          reply: "",
+          error: "",
+          httpStatus: 0,
+          modelLatencyMs: 0,
+          contextBytes: 32768,
+          toolSchemaCount: 18,
+          modelSteps: 1,
+          cloudStackHighWater: 12288,
+          freePsramBytes: 28 * 1024 * 1024,
+          internalDmaLargestBytes: 96 * 1024,
+          cloudPending: !needsConfirmation,
+          confirmation: needsConfirmation ? {
+            callId: `mock-call-${Date.now()}`,
+            toolName: "shopping.add_item",
+            arguments: { name: "牛奶", quantity: "1盒", source: "web_mock" },
+            permission: "WRITE",
+          } : null,
+        };
+        if (this.agentRun.confirmation) {
+          this.appendAgentRecord({
+            kind: "tool",
+            run_id: runId,
+            call_id: this.agentRun.confirmation.callId,
+            text: "等待用户确认",
+            tool_name: this.agentRun.confirmation.toolName,
+            detail: JSON.stringify(this.agentRun.confirmation.arguments),
+            risk: 1,
+            requires_confirmation: true,
+          });
+        }
+        responsePayload = { queued: true, runId, state: "ROUTING" } satisfies AgentSubmitResponse;
+        break;
+      }
+      case "agent_run_status":
+        this.advanceMockAgentRun();
+        responsePayload = this.agentRun;
+        break;
+      case "agent_cancel": {
+        if (!this.agentRun.active) throw new Error("没有可取消的 Mock 小精灵任务");
+        this.agentRun = {
+          ...this.agentRun,
+          active: false,
+          state: "CANCELLED",
+          error: "",
+          cloudPending: false,
+          confirmation: null,
+        };
+        responsePayload = this.agentRun;
+        break;
+      }
+      case "agent_confirm":
+      case "agent_reject": {
+        const request = payload as { runId?: string; callId?: string } | undefined;
+        const confirmation = this.agentRun.confirmation;
+        if (!this.agentRun.active || this.agentRun.state !== "WAITING_CONFIRMATION" || !confirmation) {
+          throw new Error("当前没有待确认的 Mock 工具");
+        }
+        if (request?.runId !== this.agentRun.runId || request?.callId !== confirmation.callId) {
+          throw new Error("Mock 小精灵任务或 callId 不匹配");
+        }
+        const confirmed = command === "agent_confirm";
+        this.appendAgentRecord({
+          kind: "result",
+          run_id: this.agentRun.runId,
+          call_id: confirmation.callId,
+          text: confirmed ? "用户确认，工具执行成功" : "用户拒绝，工具未执行",
+          tool_name: confirmation.toolName,
+          detail: confirmed ? "ok" : "rejected",
+          tool_status: confirmed ? 1 : 2,
+        });
+        this.agentPendingReply = confirmed
+          ? "Mock P4 小精灵：工具已经执行，我已把牛奶加入购物清单。"
+          : "Mock P4 小精灵：已拒绝该工具调用，没有修改购物清单。";
+        this.agentPollCount = 0;
+        this.agentRun = {
+          ...this.agentRun,
+          state: "WAITING_MODEL",
+          modelSteps: this.agentRun.modelSteps + 1,
+          cloudPending: true,
+          confirmation: null,
+        };
+        responsePayload = { accepted: true, confirmed, runId: this.agentRun.runId, callId: confirmation.callId };
+        break;
+      }
+      case "agent_session_read":
+        responsePayload = this.agentSession;
+        break;
+      case "agent_session_clear":
+        if (this.agentRun.active) throw new Error("小精灵运行中，不能清空会话");
+        this.agentSession = {
+          schema_version: 1,
+          foreground: {
+            next_sequence: this.agentSession.foreground.next_sequence,
+            messages: [],
+          },
+        };
+        responsePayload = this.agentSession;
+        break;
       case "test_ai_chat": {
         const message = (payload as { message?: string })?.message ?? "";
         if (!this.aiConfig.hasApiKey) {
           throw new Error("Mock AI 缺少 API Key，请先保存一个测试 Key。");
         }
         responsePayload = {
-          reply: `Mock 回复：已收到“${message.slice(0, 80)}”。真实设备会通过 OpenAI-compatible /chat/completions 请求。`,
-          model: this.aiConfig.model,
+          reply: `Mock P4 小精灵：已收到“${message.slice(0, 80)}”。真实设备会构建完整上下文并进入处理流程。`,
           latencyMs: 180,
-          status: "mock_ok",
+          runId: `mock-run-${Date.now()}`,
+          status: "COMPLETED",
           httpStatus: 200,
-        } satisfies AIChatResponse;
+        } satisfies AgentChatResponse;
         break;
       }
       case "ai_assistant_chat": {
@@ -549,7 +857,7 @@ export class MockTransport extends BaseTransport {
           status: "mock_ok",
           httpStatus: 200,
           taskType: request.taskType,
-          contextInjected: request.includeInventory || request.includeMemory || request.includeReminders || request.includePreferences,
+          contextInjected: true,
           localSnapshotVersion: 1,
           needsConfirmation: request.taskType !== "chat_assist",
           historyInjected: historyCount > 0,
@@ -723,20 +1031,29 @@ export class MockTransport extends BaseTransport {
         responsePayload = this.wakeStatus;
         break;
       case "mic_record_start":
-      case "voice_chat_start":
+      case "voice_chat_start": {
         if (this.wakeStatus.enabled) {
           throw new Error("audio busy");
         }
+        // 读取请求 payload 的 source：缺省时默认 FY-SP703，显式 es8311 仍可用作回退；
+        // 非法值与真机协议保持一致，直接拒绝而不是静默切换音源。
+        const request = payload as { source?: MicSource } | undefined;
+        if (request?.source && request.source !== "es8311" && request.source !== "fy_sp703") {
+          throw new Error("unsupported audio source");
+        }
+        const source: MicSource = request?.source ?? "fy_sp703";
         this.voiceStatus = this.withVoiceDiagnostics({
           state: "recording",
           durationMs: 0,
           pcmBytes: 0,
           rms: 0,
           error: "",
+          source,
         });
-        this.emitLog("info", "Mock voice recording started.", "asr");
+        this.emitLog("info", `Mock ${source} voice recording started.`, "asr");
         responsePayload = this.voiceStatus;
         break;
+      }
       case "mic_record_status":
       case "voice_chat_status":
         if (this.voiceStatus.state === "recording") {
@@ -764,6 +1081,61 @@ export class MockTransport extends BaseTransport {
         }
         responsePayload = createMockWavBase64(Math.max(this.voiceStatus.durationMs, 1000));
         break;
+      case "mic_record_wav_info": {
+        if (this.voiceStatus.state !== "ready" || this.voiceStatus.pcmBytes <= 0) {
+          throw new Error("no recorded PCM ready");
+        }
+        this.micWavCache = createMockWavBase64(Math.min(2000, Math.max(this.voiceStatus.durationMs, 1000)));
+        this.micWavBytes = decodeMockBase64(this.micWavCache.wavBase64);
+        this.micWavSession += 1;
+        responsePayload = {
+          sampleRate: this.micWavCache.sampleRate,
+          channels: this.micWavCache.channels,
+          bitsPerSample: this.micWavCache.bitsPerSample,
+          durationMs: this.micWavCache.durationMs,
+          pcmBytes: this.micWavCache.pcmBytes,
+          wavBytes: this.micWavCache.wavBytes,
+          chunkBytes: 1024,
+          session: this.micWavSession,
+          fullCrc32: crc32Mock(this.micWavBytes),
+        };
+        break;
+      }
+      case "mic_record_wav_chunk": {
+        if (!this.micWavCache || !this.micWavBytes) {
+          throw new Error("mic_record_wav_info is required first");
+        }
+        const request = payload as { session?: number; offset?: number } | undefined;
+        if (request?.session !== this.micWavSession) {
+          throw new Error("WAV transfer session is not active");
+        }
+        const offset = request?.offset ?? -1;
+        if (!Number.isInteger(offset) || offset < 0 || offset >= this.micWavBytes.length) {
+          throw new Error("WAV offset out of range");
+        }
+        const chunk = this.micWavBytes.slice(offset, Math.min(offset + 1024, this.micWavBytes.length));
+        let binary = "";
+        for (const byte of chunk) binary += String.fromCharCode(byte);
+        responsePayload = {
+          session: this.micWavSession,
+          offset,
+          length: chunk.length,
+          crc32: crc32Mock(chunk),
+          eof: offset + chunk.length === this.micWavBytes.length,
+          data_b64: window.btoa(binary),
+        };
+        break;
+      }
+      case "mic_record_wav_end": {
+        const request = payload as { session?: number } | undefined;
+        if (!this.micWavCache || request?.session !== this.micWavSession) {
+          throw new Error("WAV transfer session is not active");
+        }
+        this.micWavCache = null;
+        this.micWavBytes = null;
+        responsePayload = { session: this.micWavSession, released: true };
+        break;
+      }
       case "asr_transcribe": {
         if (!this.asrConfig.hasApiKey) {
           throw new Error("Mock ASR 缺少 API Key，请先保存 ASR Key。");
@@ -882,6 +1254,10 @@ export class MockTransport extends BaseTransport {
         };
         this.emitLog("info", "Mock TTS 播放已停止。", "tts");
         responsePayload = this.ttsStatus;
+        break;
+      case "speaker_beep":
+        this.emitLog("info", "Mock 板载扬声器自检：1000 Hz / 500 ms。", "tts");
+        responsePayload = { played: true, frequencyHz: 1000, durationMs: 500 };
         break;
       case "get_camera_status":
         responsePayload = this.cameraStatus;
@@ -1013,38 +1389,6 @@ export class MockTransport extends BaseTransport {
         this.emitLog("info", `Mock 项目 AI 任务完成：${request.taskType}`, "ai_context");
         break;
       }
-      case "get_memory_summary":
-        responsePayload = this.memorySummary;
-        break;
-      case "set_memory_summary": {
-        const update = payload as { memory?: MemorySummary } | MemorySummary | undefined;
-        const next = update && "memory" in update ? update.memory : update;
-        this.memorySummary = {
-          schema_version: 1,
-          memory_policy: "硬件测试记忆：只保存结构化摘要，不保存完整聊天记录",
-          family_size: 2,
-          taste: [],
-          avoid: [],
-          allergies: [],
-          recent_summary: [],
-          ...(next as MemorySummary),
-        };
-        responsePayload = this.memorySummary;
-        this.emitLog("info", "Mock 硬件测试记忆已写入。", "ai_context");
-        break;
-      }
-      case "clear_memory_summary":
-        this.memorySummary = {
-          schema_version: 1,
-          memory_policy: "已清空结构化记忆摘要，不保存完整聊天记录",
-          family_size: 0,
-          taste: [],
-          avoid: [],
-          allergies: [],
-          recent_summary: [],
-        };
-        responsePayload = this.memorySummary;
-        break;
       case "get_chat_history":
         responsePayload = this.chatHistory;
         break;
@@ -1061,6 +1405,17 @@ export class MockTransport extends BaseTransport {
       case "get_tfcard_status": {
         const usedBytes = [...this.tfFiles.values()].reduce((sum, item) => sum + item.bytes.length, 0);
         responsePayload = { mounted: this.tfMounted, filesystem: "FAT32", mountPoint: "/sdcard", capacityMb: Math.floor(64_026_652_672 / 1024 / 1024), freeMb: Math.floor((64_026_652_672 - usedBytes) / 1024 / 1024), expertMode: this.tfExpertMode, transferActive: this.tfTransfers.size > 0, formatRequired: false, lastError: "" };
+        break;
+      }
+      case "screenshot_capture": {
+        const path = `.fridge_spirit/exports/shot_mock_${Date.now()}.bmp`;
+        const bytes = createMockScreenshotBmp();
+        this.tfFiles.set(path, {
+          entry: { name: path.split("/").at(-1) || "shot_mock.bmp", path, type: "file", size: bytes.length, modifiedAt: Math.floor(Date.now() / 1000) },
+          bytes,
+        });
+        responsePayload = { path, format: "bmp" };
+        this.emitLog("info", "Mock 截屏已保存并可读回。", "screenshot");
         break;
       }
       case "tf_get_access_mode":
@@ -1169,15 +1524,283 @@ export class MockTransport extends BaseTransport {
       case "get_sensors":
         responsePayload = {
           ...createMockSensors(),
+          ...this.buildMq5Snapshot(),
           stateMachine: this.createStateMachineStatus(),
         };
         break;
+      case "mq5_confirm_burn_in": {
+        const confirm = (payload as { confirm?: string } | undefined)?.confirm;
+        if (confirm !== "MQ5_BURN_IN_COMPLETE") {
+          throw new Error("confirm=MQ5_BURN_IN_COMPLETE 是必需的，拒绝执行首次老化确认");
+        }
+        if (!this.mq5.mq5DailyWarmupComplete) {
+          throw new Error("日常预热尚未完成，无法确认首次老化");
+        }
+        if (this.mq5.mq5BurnInConfirmed) {
+          throw new Error("首次老化已确认，无需重复确认");
+        }
+        this.mq5 = {
+          ...this.mq5,
+          mq5BurnInConfirmed: true,
+          mq5State: this.mq5.mq5BaselineReady ? "monitoring" : "ready_to_calibrate",
+        };
+        this.emitLog("info", "MQ-5 首次老化确认完成。", "sensors");
+        responsePayload = this.buildMq5Snapshot();
+        break;
+      }
+      case "mq5_capture_baseline": {
+        const confirm = (payload as { confirm?: string } | undefined)?.confirm;
+        if (confirm !== "CAPTURE_MQ5_CLEAN_AIR") {
+          throw new Error("confirm=CAPTURE_MQ5_CLEAN_AIR 是必需的，拒绝采集洁净空气基线");
+        }
+        if (!this.mq5.mq5DailyWarmupComplete || !this.mq5.mq5BurnInConfirmed ||
+            (this.mq5.mq5SampleCount ?? 0) < 64) {
+          throw new Error("预热/老化/64 样本窗口前置未满足，无法采集洁净空气基线");
+        }
+        const raw12bit = this.mq5.mq5Raw12bit ?? 0;
+        this.mq5 = {
+          ...this.mq5,
+          mq5BaselineRaw12bit: raw12bit,
+          mq5BaselineReady: true,
+          mq5DeltaFromBaseline: 0,
+          mq5State: "monitoring",
+        };
+        this.emitLog("info", "MQ-5 洁净空气基线已采集（相对 ADC，非 ppm）。", "sensors");
+        responsePayload = this.buildMq5Snapshot();
+        break;
+      }
+      case "mq5_reset_calibration": {
+        const confirm = (payload as { confirm?: string } | undefined)?.confirm;
+        if (confirm !== "RESET_MQ5_CALIBRATION") {
+          throw new Error("confirm=RESET_MQ5_CALIBRATION 是必需的，拒绝重置老化与基线");
+        }
+        if (!this.mq5.mq5BurnInConfirmed && !this.mq5.mq5BaselineReady) {
+          throw new Error("尚无老化确认或基线标定，无需重置校准");
+        }
+        this.mq5 = {
+          ...this.mq5,
+          mq5BurnInConfirmed: false,
+          mq5BaselineReady: false,
+          mq5BaselineRaw12bit: 0,
+          mq5DeltaFromBaseline: 0,
+          mq5SampleCount: 0,
+          mq5State: "needs_burn_in",
+        };
+        this.emitLog("warn", "MQ-5 老化与基线已重置，需重新完成首次老化。", "sensors");
+        // 复位后返回当前快照（样本计数保持 0，与固件 reset 后立即读快照一致），
+        // 下一次 get_sensors 起重新累计样本，直到满 64 才能再次采集基线。
+        responsePayload = { ...this.mq5 };
+        break;
+      }
       case "get_diagnostics":
         responsePayload = createMockDiagnostics();
         break;
       case "get_logs":
         responsePayload = createMockLogs();
         break;
+      case "ui_status":
+        responsePayload = {
+          ready: true,
+          resourceReady: true,
+          framebuffersSynced: true,
+          pageFrameReady: true,
+          page: this.uiPage,
+          orientation: this.uiOrientation,
+          privacyMode: this.uiOrientation === "portrait_privacy",
+        } satisfies UiStatus;
+        break;
+      case "tool_call": {
+        const call = (payload ?? {}) as {
+          tool?: string;
+          arguments?: Record<string, unknown>;
+        };
+        if (call.tool === "ui.switch_page") {
+          const page = String(call.arguments?.page ?? "");
+          if (!page) throw new Error("ui.switch_page 需要 page");
+          this.uiPage = page;
+          if (!portraitUiPages.has(page)) this.uiOrientation = "landscape";
+        } else if (call.tool === "ui.set_orientation") {
+          const orientation = call.arguments?.orientation;
+          if (orientation !== "landscape" && orientation !== "portrait_privacy") {
+            throw new Error("ui.set_orientation 方向无效");
+          }
+          if (
+            orientation === "portrait_privacy" &&
+            !portraitUiPages.has(this.uiPage)
+          ) {
+            throw new Error("该页面尚未移植竖屏，请先进入首页、计划、对话、更多或设置类页面");
+          }
+          this.uiOrientation = orientation;
+        } else {
+          throw new Error(`Mock 不支持 Tool：${call.tool || "(empty)"}`);
+        }
+        responsePayload = {
+          tool: call.tool,
+          confirmed: false,
+          status: "ok",
+          code: "ok",
+          summary: "Mock UI 请求已入队",
+          latencyMs: 1,
+          data: { queued: true },
+        };
+        break;
+      }
+      case "get_realtime_config":
+        responsePayload = {
+          ...this.realtimeConfig,
+          hasApiKey: this.realtimeHasKey,
+          ready: this.realtimeHasKey,
+          apiKeyPreview: this.realtimeHasKey ? "sk-m...demo" : "",
+        };
+        break;
+      case "set_realtime_config": {
+        const body = (payload ?? {}) as Record<string, unknown>;
+        if (typeof body.url === "string" && body.url) this.realtimeConfig.url = body.url;
+        if (typeof body.model === "string" && body.model) this.realtimeConfig.model = body.model;
+        if (typeof body.voice === "string" && body.voice) this.realtimeConfig.voice = body.voice;
+        if (typeof body.instructions === "string" && body.instructions) {
+          this.realtimeConfig.instructions = body.instructions;
+        }
+        if (typeof body.timeoutMs === "number" && body.timeoutMs > 0) {
+          this.realtimeConfig.timeoutMs = body.timeoutMs;
+        }
+        if (typeof body.enabled === "boolean") this.realtimeConfig.enabled = body.enabled;
+        if (typeof body.apiKey === "string" && body.apiKey) {
+          this.realtimeHasKey = true;
+          this.realtimeConfig.apiKeyPreview = "sk-m...demo";
+        }
+        this.realtimeConfig.hasApiKey = this.realtimeHasKey;
+        this.realtimeConfig.ready = this.realtimeHasKey;
+        this.realtimeStatus.model = this.realtimeConfig.model;
+        this.realtimeStatus.voice = this.realtimeConfig.voice;
+        responsePayload = { ...this.realtimeConfig };
+        break;
+      }
+      case "clear_realtime_key":
+        this.realtimeHasKey = false;
+        this.realtimeConfig.hasApiKey = false;
+        this.realtimeConfig.ready = false;
+        this.realtimeConfig.apiKeyPreview = "";
+        responsePayload = { ...this.realtimeConfig };
+        break;
+      case "realtime_status":
+        responsePayload = { ...this.realtimeStatus };
+        break;
+      case "realtime_start":
+        if (!this.realtimeHasKey) throw new Error("Mock Realtime 缺少 API Key");
+        this.realtimeResponseGeneration += 1;
+        const sessionGeneration = ++this.realtimeSessionGeneration;
+        this.realtimeStatus.sessionActive = true;
+        this.realtimeStatus.state = "listening";
+        this.realtimeStatus.audioUpActive = true;
+        this.realtimeStatus.toolsExported = 10;
+        window.setTimeout(() => {
+          if (!this.connected ||
+              !this.realtimeStatus.sessionActive ||
+              sessionGeneration !== this.realtimeSessionGeneration) return;
+          this.emitMessage({
+            type: "event",
+            event: "realtime_state",
+            payload: { state: "session_ready", summary: "mock session ready" },
+          });
+          this.emitMessage({
+            type: "event",
+            event: "realtime_state",
+            payload: { state: "listening", summary: "mock listening" },
+          });
+        }, 200);
+        responsePayload = { accepted: true };
+        break;
+      case "realtime_stop":
+        this.realtimeSessionGeneration += 1;
+        this.realtimeResponseGeneration += 1;
+        this.realtimeStatus.sessionActive = false;
+        this.realtimeStatus.state = "idle";
+        this.realtimeStatus.audioUpActive = false;
+        this.realtimeStatus.audioDownActive = false;
+        responsePayload = { accepted: true };
+        break;
+      case "realtime_cancel":
+        this.realtimeResponseGeneration += 1;
+        this.realtimeStatus.audioDownActive = false;
+        this.realtimeStatus.state = this.realtimeStatus.sessionActive ? "listening" : "idle";
+        responsePayload = { accepted: true };
+        break;
+      case "realtime_send_text": {
+        const text =
+          typeof (payload as { text?: string } | undefined)?.text === "string"
+            ? (payload as { text: string }).text
+            : "还有什么食材？";
+        if (!this.realtimeStatus.sessionActive) throw new Error("session not ready");
+        const responseGeneration = ++this.realtimeResponseGeneration;
+        this.realtimeStatus.state = "tool_call";
+        window.setTimeout(() => {
+          if (!this.connected ||
+              !this.realtimeStatus.sessionActive ||
+              responseGeneration !== this.realtimeResponseGeneration) return;
+          this.emitMessage({
+            type: "event",
+            event: "realtime_state",
+            payload: { state: "responding", summary: "response.created" },
+          });
+          this.emitMessage({
+            type: "event",
+            event: "realtime_tool_call",
+            payload: {
+              tool: "inventory.list",
+              callId: "mock_1",
+              arguments: "{}",
+            },
+          });
+          this.realtimeStatus.toolCallsOk += 1;
+          this.emitMessage({
+            type: "event",
+            event: "realtime_tool_result",
+            payload: {
+              tool: "inventory.list",
+              callId: "mock_1",
+              status: "ok",
+              summary: "已读取库存",
+              latencyMs: 12,
+            },
+          });
+          this.emitMessage({
+            type: "event",
+            event: "realtime_transcript",
+            payload: {
+              role: "assistant",
+              text: `Mock 回复：收到「${text}」。`,
+              isFinal: false,
+            },
+          });
+          this.emitMessage({
+            type: "event",
+            event: "realtime_transcript",
+            payload: {
+              role: "assistant",
+              text: `当前模拟库存有番茄和牛奶。`,
+              isFinal: false,
+            },
+          });
+          this.emitMessage({
+            type: "event",
+            event: "realtime_transcript",
+            payload: {
+              role: "assistant",
+              text: `Mock 回复：收到「${text}」。当前模拟库存有番茄和牛奶。`,
+              isFinal: true,
+            },
+          });
+          this.emitMessage({
+            type: "event",
+            event: "realtime_done",
+            payload: { status: "response.done" },
+          });
+          this.realtimeStatus.state = "listening";
+        }, 350);
+        responsePayload = { accepted: true };
+        break;
+      }
       default:
         responsePayload = {};
     }
@@ -1393,7 +2016,6 @@ export class MockTransport extends BaseTransport {
       taskType: request?.taskType ?? "chat_assist",
       userText: request?.userText ?? "",
       includeInventory: request?.includeInventory ?? true,
-      includeMemory: request?.includeMemory ?? true,
       includeReminders: request?.includeReminders ?? true,
       includePreferences: request?.includePreferences ?? true,
     };
@@ -1447,7 +2069,7 @@ export class MockTransport extends BaseTransport {
       request.includeInventory ? "库存" : "",
       request.includeReminders ? "临期提醒" : "",
       request.includePreferences ? "偏好" : "",
-      request.includeMemory ? "测试记忆" : "",
+      "长期记忆",
     ].filter(Boolean);
     if (request.taskType === "recipe_generate") {
       return `Mock 真实助手：我已注入${contextParts.join("、") || "无额外上下文"}。按当前测试库存，建议先处理牛奶和番茄，可以做番茄鸡蛋汤；如果牛奶有异味、胀包或冷链异常，请不要食用。`;
@@ -1474,7 +2096,11 @@ export class MockTransport extends BaseTransport {
           inventory: request.includeInventory ? { items: [{ name: "牛奶", days_left: 1, location: "门架中层" }, { name: "番茄", days_left: 2, location: "冷藏主仓 B2" }] } : null,
           reminders: request.includeReminders ? { reminders: [{ name: "牛奶", suggestion: "今天优先处理" }] } : null,
           preferences: request.includePreferences ? { people: 2, taste: ["清淡", "少油"], avoid: ["香菜"] } : null,
-          memory_summary: request.includeMemory ? this.memorySummary : null,
+          user_memory: {
+            schema_version: 1,
+            kind: "user_memory",
+            items: [{ id: "mock-memory-1", type: "preference", text: "偏好清淡少油" }],
+          },
           offline_queue: { pending_count: 0 },
           conversation_history: this.chatHistory,
         },

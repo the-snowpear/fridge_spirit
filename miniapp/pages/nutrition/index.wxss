@@ -117,3 +117,37 @@
 .restrict-panel {
   background: linear-gradient(180deg, rgba(255, 241, 208, 0.85), rgba(255, 253, 248, 0.95));
 }
+
+.record-list {
+  border-top: 1rpx solid var(--color-line);
+}
+
+.record-row {
+  padding: var(--space-4) 0;
+  border-bottom: 1rpx solid var(--color-line);
+}
+
+.record-title {
+  color: var(--color-ink);
+  font-weight: 800;
+}
+
+.record-time,
+.record-nutrients,
+.record-note {
+  color: var(--color-text-muted);
+  font-size: var(--text-xs);
+}
+
+.record-time {
+  margin-left: auto;
+}
+
+.record-nutrients,
+.record-note {
+  margin-top: var(--space-2);
+}
+
+.compact {
+  padding: var(--space-5) 0;
+}

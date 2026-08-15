@@ -218,10 +218,16 @@ void fridge_ui_page_offline_create(lv_obj_t *parent);
 void fridge_ui_page_offline_update(void);
 void fridge_ui_page_timer_create(lv_obj_t *parent);
 void fridge_ui_page_timer_update(void);
+void fridge_ui_page_timer_edit_create(lv_obj_t *parent);
+void fridge_ui_page_timer_edit_update(void);
 void fridge_ui_page_stopwatch_create(lv_obj_t *parent);
 void fridge_ui_page_stopwatch_update(void);
 void fridge_ui_page_alarm_create(lv_obj_t *parent);
 void fridge_ui_page_alarm_update(void);
+
+// OV-09 定时器到时浮层：在 UI 任务 poll 中更新，不依赖当前页面。
+void fridge_ui_overlay_timer_ring_create(lv_obj_t *parent);
+void fridge_ui_overlay_timer_ring_update(void);
 
 #ifdef __cplusplus
 }

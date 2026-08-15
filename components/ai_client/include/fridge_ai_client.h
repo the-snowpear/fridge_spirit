@@ -16,6 +16,8 @@ extern "C" {
 #define FRIDGE_AI_MAX_CHAT_MESSAGE_LEN 768
 #define FRIDGE_AI_MAX_CHAT_HISTORY 30
 #define FRIDGE_AI_MAX_CONTEXT_LEN 8192
+#define FRIDGE_AI_AGENT_MAX_CONTEXT_LEN (192U * 1024U)
+#define FRIDGE_AI_AGENT_MAX_REQUEST_LEN (384U * 1024U)
 #define FRIDGE_AI_MAX_REPLY_LEN 8192
 #define FRIDGE_AI_MAX_ERROR_LEN 160
 #define FRIDGE_AI_MAX_PROFILE_NAME_LEN 32
@@ -108,6 +110,24 @@ typedef struct {
     uint32_t local_snapshot_version;
 } fridge_ai_assistant_result_t;
 
+// Agent Runtime 专用请求。只复用 fridge_ai 保存的地址、模型、鉴权和超时配置，
+// 不复用旧助手的计时器或页面切换提示词；长期记忆由 Runtime 默认注入并通过 Tool 管理。
+// context_json 由 Agent Runtime 生成，包含可信设备上下文和可调用工具 schema。
+typedef struct {
+    char message[FRIDGE_AI_MAX_CHAT_MESSAGE_LEN + 1];
+    const char *context_json;  // Agent Runtime 持有的动态 PSRAM JSON，调用期间必须保持有效。
+    size_t context_json_len;   // 不含结尾 NUL；禁止依赖固定 8KB Assistant 缓冲。
+    const fridge_ai_chat_history_item_t *history;
+    const fridge_ai_config_update_t *preloaded_config;  // 非空时不会再次读取 NVS
+    size_t history_count;
+} fridge_ai_agent_request_t;
+
+// Agent Runtime 专用响应。reply 必须由调用方再校验为 Agent JSON，
+// 以便在兼容服务未遵循 schema 时安全降级为普通文字。
+typedef struct {
+    fridge_ai_chat_result_t chat;
+} fridge_ai_agent_result_t;
+
 // AI 图片识别请求：JPEG 只在内存中传入，不在设备端落盘。
 // 注意：首版通过 image_url(data:) 发送给 OpenAI-compatible /chat/completions；服务商需支持视觉模型。
 typedef struct {
@@ -176,6 +196,16 @@ esp_err_t fridge_ai_client_assistant_chat(const fridge_ai_assistant_request_t *r
 esp_err_t fridge_ai_client_assistant_chat_with_config(const fridge_ai_config_update_t *config,
                                                       const fridge_ai_assistant_request_t *request,
                                                       fridge_ai_assistant_result_t *out);
+
+// 使用独立 Agent JSON 协议请求云模型。OpenAI-compatible 使用 response_format，
+// Gemini 使用 responseMimeType；两者均不注入旧 AI 助手策略。
+esp_err_t fridge_ai_client_agent_chat(const fridge_ai_agent_request_t *request,
+                                      fridge_ai_agent_result_t *out);
+
+// 使用预加载的 AI 配置调用 Agent JSON 协议；不会读取 NVS。
+esp_err_t fridge_ai_client_agent_chat_with_config(const fridge_ai_config_update_t *config,
+                                                  const fridge_ai_agent_request_t *request,
+                                                  fridge_ai_agent_result_t *out);
 
 // 使用 OpenAI-compatible /chat/completions + image_url(data:) 分析一张最近拍摄的 JPEG。
 esp_err_t fridge_ai_client_analyze_image(const fridge_ai_image_request_t *request, fridge_ai_image_result_t *out);

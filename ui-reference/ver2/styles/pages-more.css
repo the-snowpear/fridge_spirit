@@ -1,0 +1,384 @@
+/* ==================================================================
+ * 冰箱小精灵 ver2 —— 更多模块（MORE-01..08）页面样式
+ * 统一 more- 前缀；只用 flex/grid + px + var(--fs-*) 六档；圆角 ≤8px；触控 ≥48px。
+ * ================================================================== */
+
+/* ---------------- MORE-01 入口（可滚动） ---------------- */
+.pg-body.more-hub-body {
+  padding: var(--sp-3) var(--sp-4);
+  gap: 0;
+  overflow: hidden;
+}
+.more-hub-scroll {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  padding-bottom: var(--sp-3);
+}
+.more-hub-sec { display: flex; flex-direction: column; gap: var(--sp-3); }
+.more-hub-label {
+  font-size: var(--fs-cap);
+  font-weight: 700;
+  color: var(--sage-dark);
+  letter-spacing: 0.02em;
+  padding: 0 2px;
+}
+.more-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--sp-3);
+  align-content: start;
+}
+.more-entry {
+  position: relative;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-m);
+  padding: var(--sp-4);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  min-height: 132px;
+  cursor: pointer;
+  transition: background .16s ease, border-color .16s ease;
+}
+.more-entry:hover { background: var(--cream); border-color: var(--line-strong); }
+.me-icon {
+  width: 48px; height: 48px;
+  border-radius: var(--r-m);
+  display: flex; align-items: center; justify-content: center;
+  background: var(--mint); color: var(--sage-dark);
+}
+.me-icon.danger { background: var(--danger-bg); color: var(--danger); }
+.me-name { font-size: var(--fs-body); font-weight: 600; color: var(--ink); }
+.me-desc { font-size: var(--fs-cap); color: var(--muted); line-height: 1.35; padding-right: 20px; }
+.me-arrow { position: absolute; right: var(--sp-3); bottom: var(--sp-3); color: var(--muted); width: 20px; height: 20px; }
+.me-badge {
+  position: absolute; top: var(--sp-3); right: var(--sp-3);
+  min-width: 24px; height: 24px; padding: 0 7px;
+  border-radius: var(--r-pill);
+  background: var(--offline); color: #fff;
+  font-size: 14px; font-weight: 600;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.me-badge.danger { background: var(--tomato); }
+
+/* 底部状态摘要行 */
+.more-summary {
+  flex: none;
+  display: flex; align-items: center; gap: var(--sp-4); flex-wrap: wrap;
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-m);
+}
+.more-sum-item { display: inline-flex; align-items: center; gap: 6px; color: var(--sage-dark); font-size: var(--fs-cap); }
+.more-sum-item .ic { width: 18px; height: 18px; }
+
+/* 工具页共用滚动壳（定时器/闹钟/秒表） */
+.pg-body.more-tool-body {
+  padding: var(--sp-3) var(--sp-4);
+  gap: 0;
+  overflow: hidden;
+}
+.more-tool-scroll {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  padding-bottom: var(--sp-2);
+}
+
+/* ---------------- 通用：分组 / 说明 / 空行 ---------------- */
+.more-group { display: flex; flex-direction: column; gap: var(--sp-2); }
+.more-group.done { opacity: .55; }
+.more-none {
+  padding: var(--sp-4);
+  color: var(--muted); font-size: var(--fs-cap);
+  background: var(--surface); border: 1px dashed var(--line); border-radius: var(--r-m);
+  text-align: center;
+}
+.more-note {
+  display: flex; align-items: flex-start; gap: 6px;
+  font-size: var(--fs-cap); color: var(--muted);
+  padding: var(--sp-2) var(--sp-1);
+}
+.more-note .ic { width: 17px; height: 17px; flex: none; margin-top: 2px; }
+.more-rowbtns { display: flex; gap: var(--sp-2); margin-top: var(--sp-3); flex-wrap: wrap; }
+.more-textbtn {
+  display: inline-flex; align-items: center; gap: 4px;
+  min-height: 36px; padding: 0 var(--sp-2);
+  color: var(--sage-dark); font-size: var(--fs-cap);
+  border-radius: var(--r-s);
+}
+.more-textbtn:hover { background: var(--cream); }
+.more-textbtn .ic { width: 17px; height: 17px; }
+
+/* ---------------- MORE-02 定时器：主计时面 + 快捷预设 ---------------- */
+.tt-hero {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-m);
+  padding: var(--sp-4) var(--sp-5);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-2);
+  text-align: center;
+}
+.tt-hero.idle { background: var(--cream); }
+.tt-hero-label {
+  display: flex; align-items: center; gap: 8px; justify-content: center;
+  font-size: var(--fs-body); font-weight: 600; color: var(--sage-dark);
+}
+.tt-hero-face {
+  font-size: var(--fs-hero);
+  font-weight: 700;
+  font-family: var(--font-mono);
+  color: var(--ink);
+  line-height: 1;
+  letter-spacing: -0.02em;
+  min-height: 72px;
+  display: flex; align-items: center;
+}
+.tt-hero-face.muted { color: var(--muted); opacity: .55; }
+.tt-hero-sub { font-size: var(--fs-cap); color: var(--muted); }
+.tt-hero-ops {
+  display: flex; gap: var(--sp-2); flex-wrap: wrap; justify-content: center;
+  margin-top: var(--sp-2); width: 100%;
+}
+.tt-hero-ops .btn { min-width: 100px; }
+
+.tt-presets-wrap { display: flex; flex-direction: column; gap: var(--sp-2); }
+.tt-presets {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: var(--sp-2);
+}
+.tt-preset {
+  min-height: 64px;
+  border-radius: var(--r-m);
+  border: 1px solid var(--line);
+  background: var(--surface);
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 2px; cursor: pointer;
+  color: var(--ink);
+}
+.tt-preset:hover { background: var(--mint); border-color: var(--sage); }
+.tt-preset:active { transform: translateY(1px); }
+.tt-preset-num { font-size: var(--fs-sub); font-weight: 700; font-family: var(--font-mono); color: var(--sage-dark); line-height: 1; }
+.tt-preset-unit { font-size: 14px; color: var(--muted); }
+
+.more-timer-run {
+  display: flex; flex-direction: column; gap: 6px;
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-m);
+  padding: var(--sp-2) var(--sp-2) var(--sp-3);
+}
+.more-timer-run .timer-row { border: none; background: transparent; padding: 0 var(--sp-2); cursor: default; }
+.more-timer-run .timer-row:hover { background: transparent; }
+.more-timer-ctrl { display: flex; gap: var(--sp-2); padding-left: 56px; flex-wrap: wrap; }
+
+/* ---------------- MORE-07 闹钟卡片 ---------------- */
+.al-list { display: flex; flex-direction: column; gap: var(--sp-3); }
+.al-card {
+  display: flex; align-items: center; gap: var(--sp-3);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-m);
+  padding: var(--sp-3) var(--sp-4);
+  min-height: 96px;
+}
+.al-card.off { opacity: .55; }
+.al-card-main {
+  flex: 1; min-width: 0;
+  display: flex; flex-direction: column; gap: 4px;
+  cursor: pointer;
+}
+.al-time {
+  font-size: var(--fs-title);
+  font-weight: 700;
+  font-family: var(--font-mono);
+  color: var(--ink);
+  line-height: 1.1;
+}
+.al-name {
+  font-size: var(--fs-body); font-weight: 600; color: var(--ink);
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+}
+.al-meta { font-size: var(--fs-cap); color: var(--muted); }
+/* 大触控开关 ≥48px 高 */
+.al-toggle {
+  flex: none;
+  width: 64px; height: 36px;
+  border-radius: var(--r-pill);
+  background: var(--offline-bg);
+  border: 1px solid var(--line-strong);
+  position: relative;
+  cursor: pointer;
+  transition: background .16s ease;
+}
+.al-toggle.on { background: var(--sage); border-color: var(--sage); }
+.al-knob {
+  position: absolute; top: 3px; left: 3px;
+  width: 28px; height: 28px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(36, 52, 45, .25);
+  transition: transform .16s ease;
+}
+.al-toggle.on .al-knob { transform: translateX(28px); }
+
+/* ---------------- MORE-08 秒表 ---------------- */
+.sw-body .more-tool-scroll { gap: var(--sp-4); }
+.sw-stage {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-m);
+  padding: var(--sp-5) var(--sp-4) var(--sp-4);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-3);
+}
+.sw-face {
+  font-size: var(--fs-hero);
+  font-weight: 700;
+  font-family: var(--font-mono);
+  color: var(--ink);
+  line-height: 1;
+  letter-spacing: 0.02em;
+  min-height: 72px;
+  display: flex; align-items: center;
+}
+.sw-status {
+  font-size: var(--fs-cap);
+  color: var(--muted);
+  min-height: 22px;
+}
+.sw-ops {
+  display: grid;
+  grid-template-columns: 1fr 1.3fr 1fr;
+  gap: var(--sp-3);
+  width: 100%;
+  max-width: 520px;
+  margin-top: var(--sp-2);
+}
+.sw-btn {
+  min-height: var(--touch-lg);
+  border-radius: var(--r-m);
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
+  font-size: var(--fs-cap); font-weight: 600;
+  border: 1px solid var(--line-strong);
+  cursor: pointer;
+}
+.sw-btn:disabled { opacity: .4; cursor: default; }
+.sw-btn.primary {
+  background: var(--sage); color: #fff; border-color: var(--sage);
+}
+.sw-btn.primary:active { transform: translateY(1px); }
+.sw-btn.ghost {
+  background: var(--cream); color: var(--sage-dark);
+}
+.sw-btn.ghost:hover:not(:disabled) { background: var(--mint); }
+.sw-btn .ic { width: 24px; height: 24px; }
+.sw-btn.big .ic { width: 28px; height: 28px; }
+
+.sw-laps-wrap { display: flex; flex-direction: column; gap: var(--sp-2); }
+.sw-laps {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-m);
+  overflow: hidden;
+}
+.sw-lap {
+  display: flex; align-items: center; justify-content: space-between;
+  min-height: 48px; padding: 0 var(--sp-4);
+  border-bottom: 1px solid var(--line);
+  font-size: var(--fs-body);
+}
+.sw-lap:last-child { border-bottom: none; }
+.sw-lap-n { color: var(--muted); font-size: var(--fs-cap); }
+.sw-lap-t { font-family: var(--font-mono); font-weight: 600; color: var(--ink); }
+.sw-laps-empty { margin: 0; }
+
+/* ---------------- MORE-03 编辑表单 ---------------- */
+.more-form .form-row { border-bottom: 1px solid var(--line); }
+.more-hm { display: flex; align-items: center; gap: var(--sp-3); }
+.more-hm-sep { font-size: var(--fs-sub); color: var(--muted); font-weight: 700; }
+.more-repeat { display: flex; gap: var(--sp-2); flex-wrap: wrap; }
+.more-chip {
+  min-height: 40px; padding: 0 var(--sp-4);
+  border-radius: var(--r-pill);
+  background: var(--cream); border: 1px solid var(--line);
+  color: var(--muted); font-size: var(--fs-body);
+}
+.more-chip.on { background: var(--mint); border-color: var(--sage); color: var(--sage-dark); font-weight: 600; }
+
+/* ---------------- 分区模板（MORE-04/05/06 共用） ---------------- */
+.more-split-body { gap: 0; padding-top: var(--sp-3); }
+.more-split { display: flex; gap: var(--sp-4); flex: 1; min-height: 0; }
+.more-side {
+  flex: none; width: 180px;
+  display: flex; flex-direction: column; gap: var(--sp-2);
+  overflow-y: auto;
+}
+.more-tab {
+  position: relative;
+  display: flex; align-items: center; gap: var(--sp-2);
+  min-height: var(--touch); padding: 0 var(--sp-3);
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-m);
+  color: var(--ink); font-size: var(--fs-body); text-align: left;
+}
+.more-tab .ic { width: 20px; height: 20px; color: var(--sage-dark); flex: none; }
+.more-tab:hover { background: var(--cream); }
+.more-tab.on { background: var(--mint); border-color: var(--sage); color: var(--sage-dark); font-weight: 600; }
+.more-tab.danger .ic { color: var(--danger); }
+.more-tab-badge {
+  margin-left: auto;
+  min-width: 22px; height: 22px; padding: 0 6px;
+  border-radius: var(--r-pill); background: var(--tomato); color: #fff;
+  font-size: 14px; display: inline-flex; align-items: center; justify-content: center;
+}
+.more-content { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: var(--sp-3); padding-right: 2px; }
+
+/* ---------------- MORE-05 设置：value 行 / slider ---------------- */
+.more-value {
+  display: inline-flex; align-items: center; gap: 6px;
+  min-height: var(--touch); padding: 0 var(--sp-3);
+  background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--r-m);
+  color: var(--sage-dark); font-size: var(--fs-body);
+}
+.more-value:hover { background: var(--cream); }
+.more-slider { display: flex; align-items: center; gap: var(--sp-2); min-width: 200px; flex: none; }
+.more-slider .progress { flex: 1; }
+.more-slider-val { font-size: var(--fs-cap); color: var(--muted); min-width: 30px; text-align: right; }
+
+/* ---------------- MORE-06 存储 / 日志 / 危险区 ---------------- */
+.more-dir-head,
+.more-dirrow {
+  display: grid;
+  grid-template-columns: 1fr 90px 40px;
+  align-items: center; gap: var(--sp-2);
+  padding: 7px 2px;
+  font-size: var(--fs-cap);
+}
+.more-dir-head { color: var(--muted); border-bottom: 1px solid var(--line); margin-top: var(--sp-3); font-weight: 600; }
+.more-dirrow { border-bottom: 1px solid var(--line); }
+.more-dirrow:last-of-type { border-bottom: none; }
+.more-dir-path { font-family: var(--font-mono); color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.more-dir-size { text-align: right; color: var(--muted); }
+.more-dirrow .status-dot { justify-self: center; }
+
+.more-logbox { gap: 0; }
+.more-logrow {
+  display: flex; align-items: baseline; gap: var(--sp-3);
+  padding: 6px 2px;
+  font-family: var(--font-mono); font-size: var(--fs-cap);
+  border-bottom: 1px solid var(--line);
+}
+.more-logrow:last-child { border-bottom: none; }
+.more-log-time { color: var(--muted); flex: none; }
+.more-log-level { flex: none; width: 44px; font-weight: 700; }
+.more-log-text { flex: 1; min-width: 0; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.more-danger-zone { display: flex; flex-direction: column; gap: var(--sp-2); align-items: flex-start; }

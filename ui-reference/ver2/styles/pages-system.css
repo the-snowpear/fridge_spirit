@@ -1,0 +1,188 @@
+/* ==================================================================
+ * 冰箱小精灵 ver2 —— 系统模块样式（SYS-01 启动自检 / SYS-02 配网向导 / SYS-03 待机颜文字）
+ * 说明：系统页（system:true）无 72px 侧导航，主区扩展为 776px，整页自绘不用 ui.pageHead；
+ *       本文件所有新类统一 sys- 前缀，字号只用令牌 6 档，圆角 ≤8px，触控 ≥48px。
+ * ================================================================== */
+
+/* 三个系统页共用的整页容器：自带内边距与纵向布局，右上角留页面 ID 角标位 */
+.sys-page {
+  width: 776px;
+  height: 600px;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  padding: var(--sp-5) var(--sp-6);
+  overflow: hidden;
+}
+
+/* 竖屏：主区 600 宽；系统页无导航时高度 776 */
+#stage.mode-portrait .sys-page {
+  width: 600px;
+  height: 100%;
+  padding: var(--sp-4) var(--sp-4);
+}
+#stage.mode-portrait .sys-boot-progress { width: 100%; max-width: 420px; }
+
+/* 页面 ID 角标（主区右上角；预览工具栏可统一隐藏 .pg-id） */
+.sys-page .pg-id { position: absolute; top: var(--sp-4); right: var(--sp-5); }
+
+/* ==================== SYS-01 启动与自检（cabinMode: boot） ==================== */
+
+/* 品牌区：超大标题 + 版本号 */
+.sys-brand { display: flex; flex-direction: column; align-items: center; gap: var(--sp-2); margin-top: var(--sp-2); }
+.sys-brand-name { font-size: var(--fs-hero); font-weight: 700; color: var(--sage-dark); letter-spacing: 2px; }
+.sys-brand-ver { font-size: var(--fs-cap); color: var(--muted); font-family: var(--font-mono); }
+
+/* 启动进度条：居中，宽度收一点避免顶天立地 */
+.sys-boot-progress { margin: var(--sp-3) auto 0; width: 420px; }
+.sys-boot-progress .progress { height: 14px; }
+.sys-boot-progress-text { text-align: center; font-size: var(--fs-cap); color: var(--muted); margin-top: var(--sp-1); }
+
+/* 自检清单卡：内部 2 列网格排布检查项 */
+.sys-boot-checks { margin-top: var(--sp-4); }
+.sys-check-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-2); }
+.sys-check-row {
+  display: flex; align-items: center; gap: var(--sp-2);
+  min-height: var(--touch); padding: 6px var(--sp-3);
+  background: var(--cream); border: 1px solid var(--line); border-radius: var(--r-m);
+}
+.sys-check-ic { width: 28px; height: 28px; flex: none; border-radius: 50%; display: flex; align-items: center; justify-content: center; }
+.sys-check-ic.ok { background: var(--ok-bg); color: var(--sage-dark); }
+.sys-check-ic.warn { background: var(--warn-bg); color: var(--warn-ink); }
+.sys-check-ic .ic { width: 17px; height: 17px; }
+.sys-check-name { font-size: var(--fs-body); color: var(--ink); }
+.sys-check-note { font-size: var(--fs-cap); color: var(--warn-ink); margin-left: auto; text-align: right; }
+
+/* 网络与数据恢复状态行 */
+.sys-boot-net {
+  display: flex; align-items: center; gap: var(--sp-2);
+  margin-top: var(--sp-3); padding: 8px var(--sp-3);
+  background: var(--ok-bg); border-radius: var(--r-m);
+  font-size: var(--fs-cap); color: var(--sage-dark);
+}
+
+/* 异常提示演示卡（可降级运行） */
+.sys-boot-warn {
+  display: flex; align-items: flex-start; gap: var(--sp-3);
+  margin-top: var(--sp-3); padding: var(--sp-3) var(--sp-4);
+  background: var(--warn-bg); border: 1px solid var(--warn); border-radius: var(--r-m);
+  color: var(--warn-ink);
+}
+.sys-boot-warn .ic { flex: none; margin-top: 2px; }
+.sys-boot-warn-text { font-size: var(--fs-cap); line-height: 1.5; }
+
+/* 底部按钮条（贴底） */
+.sys-boot-foot { margin-top: auto; display: flex; gap: var(--sp-3); }
+.sys-boot-foot .spacer { flex: 1; }
+
+/* ==================== SYS-02 首次配网与设备绑定向导（cabinMode: wizard） ==================== */
+
+/* 顶部 4 步指示器 */
+.sys-steps { display: flex; align-items: center; gap: var(--sp-2); }
+.sys-step { display: flex; align-items: center; gap: var(--sp-2); flex: 1; min-width: 0; }
+.sys-step-dot {
+  width: 36px; height: 36px; flex: none; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--cream); border: 1px solid var(--line-strong);
+  color: var(--muted); font-size: var(--fs-cap); font-weight: 600;
+}
+.sys-step-dot .ic { width: 18px; height: 18px; }
+.sys-step.on .sys-step-dot { background: var(--sage); border-color: var(--sage); color: #fff; }
+.sys-step.done .sys-step-dot { background: var(--ok-bg); border-color: var(--sage); color: var(--sage-dark); }
+.sys-step-label { font-size: var(--fs-cap); color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sys-step.on .sys-step-label { color: var(--sage-dark); font-weight: 600; }
+.sys-step-line { flex: none; width: 14px; height: 2px; background: var(--line-strong); border-radius: 2px; }
+
+/* 向导主体内容区（滚动） */
+.sys-wiz-body { flex: 1; min-height: 0; margin-top: var(--sp-4); overflow-y: auto; scrollbar-width: thin; }
+.sys-wiz-body::-webkit-scrollbar { width: 6px; }
+.sys-wiz-body::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 3px; }
+.sys-wiz-title { font-size: var(--fs-title); font-weight: 700; color: var(--ink); }
+.sys-wiz-sub { font-size: var(--fs-body); color: var(--muted); margin-top: var(--sp-1); }
+.sys-wiz-card { margin-top: var(--sp-4); }
+
+/* 第 3 步：隐私说明卡（info 蓝底） */
+.sys-privacy {
+  display: flex; align-items: flex-start; gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--info-bg); border: 1px solid var(--info); border-radius: var(--r-m);
+  color: var(--ink);
+}
+.sys-privacy .ic { flex: none; margin-top: 2px; color: var(--info); }
+.sys-privacy-text { font-size: var(--fs-cap); line-height: 1.5; }
+
+/* 第 2 步：Wi-Fi 列表 */
+.sys-wifi-list { display: flex; flex-direction: column; gap: var(--sp-2); }
+.sys-wifi-row {
+  display: flex; align-items: center; gap: var(--sp-3);
+  min-height: 56px; padding: 6px var(--sp-3);
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-m);
+  cursor: pointer;
+}
+.sys-wifi-row:hover { background: var(--cream); }
+.sys-wifi-row.sel { border-color: var(--sage); background: var(--mint); }
+.sys-wifi-ssid { font-size: var(--fs-body); font-weight: 500; flex: 1; min-width: 0; }
+.sys-wifi-rssi { font-size: var(--fs-cap); color: var(--muted); font-family: var(--font-mono); }
+.sys-wifi-ic { color: var(--muted); display: inline-flex; }
+.sys-wifi-ic .ic { width: 19px; height: 19px; }
+.sys-wifi-ok { color: var(--sage-dark); display: inline-flex; align-items: center; gap: 4px; font-size: var(--fs-cap); }
+.sys-skip { display: inline-block; margin-top: var(--sp-3); color: var(--sage-dark); font-size: var(--fs-cap); cursor: pointer; text-decoration: underline; }
+
+/* 第 4 步：默认布局选择卡（2×2） */
+.sys-layout-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-3); }
+.sys-layout-card {
+  display: flex; flex-direction: column; align-items: center; gap: var(--sp-2);
+  padding: var(--sp-4); min-height: 120px;
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-m);
+  cursor: pointer; color: var(--sage-dark);
+}
+.sys-layout-card:hover { background: var(--cream); }
+.sys-layout-card.sel { border-color: var(--sage); background: var(--mint); }
+.sys-layout-card .ic { width: 36px; height: 36px; }
+.sys-layout-name { font-size: var(--fs-body); font-weight: 600; color: var(--ink); }
+
+/* 布局预览小图：3×3 宫格示意 */
+.sys-layout-preview { margin-top: var(--sp-4); display: flex; flex-direction: column; gap: var(--sp-2); align-items: center; }
+.sys-layout-mini { display: grid; grid-template-columns: repeat(3, 40px); grid-template-rows: repeat(3, 40px); gap: 4px; }
+.sys-layout-mini i { background: var(--mint); border: 1px solid var(--line-strong); border-radius: var(--r-s); display: block; }
+.sys-layout-mini i.a { grid-column: 1 / span 3; }
+.sys-layout-mini i.b { grid-column: 1 / span 1; grid-row: 2 / span 2; }
+.sys-layout-mini i.c { grid-column: 2 / span 2; }
+.sys-layout-mini i.d { grid-column: 2 / span 1; }
+.sys-layout-mini i.e { grid-column: 3 / span 1; }
+.sys-layout-cap { font-size: var(--fs-cap); color: var(--muted); }
+
+/* 底部步骤按钮条（贴底） */
+.sys-wiz-foot { margin-top: var(--sp-3); display: flex; gap: var(--sp-3); flex: none; }
+.sys-wiz-foot .spacer { flex: 1; }
+
+/* ==================== SYS-03 待机颜文字（cabinMode: standby） ==================== */
+
+/* 整页深墨绿低亮度背景（待机低功耗感），浅色文字 */
+.sys-page.standby { background: #1d2622; color: #cfe0d6; align-items: center; justify-content: center; text-align: center; }
+
+/* 超大颜文字：--fs-hero 的 2 倍 */
+.sys-kaomoji { font-size: calc(var(--fs-hero) * 2); font-weight: 700; color: #9dc3ab; line-height: 1; font-family: var(--font-mono); }
+
+/* 当前时间大字 */
+.sys-standby-time { font-size: var(--fs-hero); font-weight: 700; font-family: var(--font-mono); color: #e8f1ea; margin-top: var(--sp-4); }
+.sys-standby-date { font-size: var(--fs-body); color: #8fa79a; margin-top: var(--sp-1); }
+
+/* 一行提示 */
+.sys-standby-hint { font-size: var(--fs-body); color: #a9c2b2; margin-top: var(--sp-5); }
+
+/* 底部三个小 chip */
+.sys-standby-chips { display: flex; gap: var(--sp-3); margin-top: var(--sp-6); }
+.sys-standby-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: var(--touch); padding: 0 var(--sp-4);
+  background: #26332d; border: 1px solid #3a4a41; border-radius: var(--r-pill);
+  font-size: var(--fs-cap); color: #b9d0c1;
+}
+.sys-standby-chip .ic { width: 17px; height: 17px; color: #8fb99e; }
+.sys-standby-chip.warn { color: #e6c877; }
+.sys-standby-chip.warn .ic { color: #e6c877; }
+
+/* 演示按钮（回到首页）：深色面上的幽灵按钮 */
+.sys-standby-back { margin-top: var(--sp-5); }
+.sys-standby-back .btn { background: #2c3b33; color: #cfe0d6; border: 1px solid #41544a; }

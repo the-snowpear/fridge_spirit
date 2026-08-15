@@ -1,0 +1,32 @@
+<view class="page memory-page rise">
+  <view class="hello-bar">
+    <view>
+      <view class="kicker">小精灵同步</view>
+      <view class="title">家庭记忆</view>
+    </view>
+    <view class="count">{{visibleItems.length}} 条</view>
+  </view>
+
+  <view class="privacy-note">这些内容会影响设备端 AI 的偏好与回答。本页只读，防止误删家庭共享记忆。</view>
+
+  <view class="filters">
+    <view class="{{filter === 'all' ? 'active' : ''}}" data-filter="all" bindtap="onTapFilter">全部</view>
+    <view class="{{filter === 'structured' ? 'active' : ''}}" data-filter="structured" bindtap="onTapFilter">偏好</view>
+    <view class="{{filter === 'markdown' ? 'active' : ''}}" data-filter="markdown" bindtap="onTapFilter">长期笔记</view>
+  </view>
+
+  <view wx:if="{{errorText}}" class="error-line">{{errorText}}</view>
+
+  <view class="memory-list">
+    <view wx:for="{{visibleItems}}" wx:key="id" class="memory-row">
+      <view class="memory-head">
+        <text class="kind">{{item.kindText}}</text>
+        <text class="date">{{item.createdText}}</text>
+      </view>
+      <view class="memory-text">{{item.text}}</view>
+      <view class="memory-tags">{{item.tagText}}</view>
+    </view>
+  </view>
+
+  <view wx:if="{{!loading && !errorText && visibleItems.length === 0}}" class="empty">暂时没有同步的家庭记忆</view>
+</view>

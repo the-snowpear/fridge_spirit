@@ -13,15 +13,25 @@ import {
   getInventory,
   updateInventoryItem,
 } from "../../services/api";
-import { enqueueSyncOp, syncNow } from "../../services/sync";
+import { syncNow } from "../../services/sync";
 import type {
   FridgeZoneConfig,
+  FridgeLayerConfig,
   InventoryItem,
   InventoryWritePayload,
-  StandardSlot,
 } from "../../types/models";
 import { RequestError } from "../../utils/request";
-import { displayPlace, getFridgeZones, slotOptions } from "../../utils/fridgeZones";
+import {
+  displayInventoryPlace,
+  getFridgeZones,
+  getInventoryLayers,
+} from "../../utils/fridgeZones";
+import {
+  cellToSlot,
+  defaultLayerId,
+  inventoryPositionPayload,
+  slotToCell,
+} from "../../utils/inventoryLocation";
 
 type ZoneOption = {
   value: string;
@@ -32,8 +42,9 @@ type ZoneOption = {
   zoneClass: string;
   count: number;
 };
-type SlotOption = { value: StandardSlot | ""; label: string; shortLabel: string };
-type PlaceMode = "form" | "zone" | "slot";
+type LayerOption = FridgeLayerConfig;
+type CellOption = { value: number; label: string };
+type PlaceMode = "form" | "zone" | "layer" | "cell";
 
 interface DetailData {
   mode: "create" | "edit";
@@ -47,15 +58,20 @@ interface DetailData {
   quantity: string; // input 用 string，提交时转 number
   unit: string;
   zoneIndex: number;
-  slotIndex: number;
+  layerIndex: number;
+  cellIndex: number;
   zoneOptions: ZoneOption[];
-  slotOptions: SlotOption[];
+  layerOptions: LayerOption[];
+  cellOptions: CellOption[];
   selectedZoneValue: string;
-  selectedSlotValue: string;
+  selectedLayerValue: string;
+  selectedCellValue: number;
   placeText: string;
   placeMode: PlaceMode;
   choosingZoneIndex: number;
   choosingZoneLabel: string;
+  choosingLayerIndex: number;
+  choosingLayerLabel: string;
   expireDate: string;
   storedAt: string;
   note: string;
@@ -81,24 +97,14 @@ function makeZoneOptions(): ZoneOption[] {
   ];
 }
 
-function makeSlotOptions(): SlotOption[] {
-  return slotOptions()
-    .filter((slot) => slot.value)
-    .map((slot) => ({
-      ...slot,
-      shortLabel: slot.label.replace(`${slot.value} · `, ""),
-      label: slot.value,
-    }));
-}
-
 function findZoneIndex(options: ZoneOption[], zone?: string): number {
   if (!zone) return 0;
   const i = options.findIndex((o) => o.value === zone);
   return i >= 0 ? i : 0;
 }
-function findSlotIndex(options: SlotOption[], slot?: string): number {
-  if (!slot) return -1;
-  const i = options.findIndex((o) => o.value === slot);
+function findLayerIndex(options: LayerOption[], layerId?: string): number {
+  if (!layerId) return -1;
+  const i = options.findIndex((o) => o.id === layerId);
   return i >= 0 ? i : -1;
 }
 
@@ -138,15 +144,23 @@ Page({
     quantity: "1",
     unit: "份",
     zoneIndex: 0,
-    slotIndex: 0,
+    layerIndex: -1,
+    cellIndex: -1,
     zoneOptions: makeZoneOptions(),
-    slotOptions: makeSlotOptions(),
+    layerOptions: [] as LayerOption[],
+    cellOptions: Array.from({ length: 9 }, (_, value) => ({
+      value,
+      label: cellToSlot(value) || String(value + 1),
+    })),
     selectedZoneValue: "",
-    selectedSlotValue: "",
+    selectedLayerValue: "",
+    selectedCellValue: -1,
     placeText: "未指定位置",
     placeMode: "form",
     choosingZoneIndex: -1,
     choosingZoneLabel: "",
+    choosingLayerIndex: -1,
+    choosingLayerLabel: "",
     expireDate: "",
     storedAt: "",
     note: "",
@@ -158,17 +172,23 @@ Page({
   onLoad(query: Record<string, string | undefined>) {
     const mode = query.mode === "create" ? "create" : "edit";
     const zoneOptions = makeZoneOptions();
-    const slots = makeSlotOptions();
-    this.setData({ mode, zoneOptions, slotOptions: slots });
+    this.setData({ mode, zoneOptions });
     if (mode === "create") {
+      const zoneId = query.zoneId || query.zone || "";
+      const layers = getInventoryLayers(zoneId);
+      const layerId = query.layerId || (zoneId ? defaultLayerId(zoneId) : "");
+      const cell =
+        query.cell != null ? Number(query.cell) : slotToCell(query.slot);
       // 预填 query 字段
       this.setData({
         name: query.name || "",
         category: query.category || "",
         quantity: query.quantity || "1",
         unit: query.unit || "份",
-        zoneIndex: findZoneIndex(zoneOptions, query.zone),
-        slotIndex: findSlotIndex(slots, query.slot),
+        zoneIndex: findZoneIndex(zoneOptions, zoneId),
+        layerOptions: layers,
+        layerIndex: findLayerIndex(layers, layerId),
+        cellIndex: Number.isInteger(cell) && cell! >= 0 && cell! <= 8 ? cell! : -1,
         storedAt: formatDateTimeInput(new Date()),
         note: query.note || "",
         source: query.source || "manual",
@@ -193,8 +213,8 @@ Page({
       const data = await getInventory();
       const counts: Record<string, number> = {};
       for (const item of data.items || []) {
-        if (!item.zone) continue;
-        counts[item.zone] = (counts[item.zone] || 0) + 1;
+        if (!item.zoneId) continue;
+        counts[item.zoneId] = (counts[item.zoneId] || 0) + 1;
       }
       this.setData({
         zoneOptions: this.data.zoneOptions.map((zone) => ({
@@ -216,14 +236,17 @@ Page({
         this.setData({ errorText: "条目不存在或已删除" });
         return;
       }
+      const layers = getInventoryLayers(target.zoneId);
       this.setData({
         origin: target,
         name: target.name,
         category: target.category || "",
         quantity: String(target.quantity || 1),
         unit: target.unit || "份",
-        zoneIndex: findZoneIndex(this.data.zoneOptions, target.zone),
-        slotIndex: findSlotIndex(this.data.slotOptions, target.slot),
+        zoneIndex: findZoneIndex(this.data.zoneOptions, target.zoneId),
+        layerOptions: layers,
+        layerIndex: findLayerIndex(layers, target.layerId),
+        cellIndex: target.cell == null ? -1 : target.cell,
         expireDate: target.expireDate || "",
         storedAt: getStoredAtText(target),
         note: getExtraString(target.extra, "note"),
@@ -266,15 +289,31 @@ Page({
     this.setData({
       choosingZoneIndex: zoneIndex,
       choosingZoneLabel: this.data.zoneOptions[zoneIndex]?.label || "",
-      placeMode: "slot",
+      layerOptions: getInventoryLayers(value),
+      choosingLayerIndex: -1,
+      choosingLayerLabel: "",
+      placeMode: "layer",
     });
   },
 
-  onTapPlaceSlot(event: WechatMiniprogram.BaseEvent) {
-    const value = String(event.currentTarget.dataset.value || "") as StandardSlot | "";
+  onTapPlaceLayer(event: WechatMiniprogram.BaseEvent) {
+    const value = String(event.currentTarget.dataset.value || "");
+    const index = findLayerIndex(this.data.layerOptions, value);
+    if (index < 0) return;
+    this.setData({
+      choosingLayerIndex: index,
+      choosingLayerLabel: this.data.layerOptions[index]?.name || "",
+      placeMode: "cell",
+    });
+  },
+
+  onTapPlaceCell(event: WechatMiniprogram.BaseEvent) {
+    const value = Number(event.currentTarget.dataset.value);
+    if (!Number.isInteger(value) || value < 0 || value > 8) return;
     this.setData({
       zoneIndex: this.data.choosingZoneIndex > 0 ? this.data.choosingZoneIndex : this.data.zoneIndex,
-      slotIndex: findSlotIndex(this.data.slotOptions, value),
+      layerIndex: this.data.choosingLayerIndex,
+      cellIndex: value,
       placeMode: "form",
     });
     this.updatePlaceText();
@@ -283,9 +322,13 @@ Page({
   onClearPlace() {
     this.setData({
       zoneIndex: 0,
-      slotIndex: -1,
+      layerIndex: -1,
+      cellIndex: -1,
+      layerOptions: [],
       choosingZoneIndex: -1,
       choosingZoneLabel: "",
+      choosingLayerIndex: -1,
+      choosingLayerLabel: "",
       placeMode: "form",
     });
     this.updatePlaceText();
@@ -295,11 +338,17 @@ Page({
     this.setData({ placeMode: "zone" });
   },
 
+  backToPlaceLayers() {
+    this.setData({ placeMode: "layer" });
+  },
+
   cancelPlaceSelection() {
     this.setData({
       placeMode: "form",
       choosingZoneIndex: -1,
       choosingZoneLabel: "",
+      choosingLayerIndex: -1,
+      choosingLayerLabel: "",
     });
   },
 
@@ -309,14 +358,14 @@ Page({
 
   buildPayload(): InventoryWritePayload {
     const zone = this.data.zoneOptions[this.data.zoneIndex]?.value || "";
-    const slot = this.data.slotOptions[this.data.slotIndex]?.value || "";
+    const layer = this.data.layerOptions[this.data.layerIndex]?.id || "";
+    const cell = this.data.cellIndex >= 0 ? this.data.cellIndex : undefined;
     const payload: InventoryWritePayload = {
       name: this.data.name.trim(),
       category: this.data.category.trim() || undefined,
       quantity: parseFloat(this.data.quantity) || 1,
       unit: this.data.unit || "份",
-      zone: zone || undefined,
-      slot: slot || undefined,
+      ...inventoryPositionPayload(zone || undefined, layer || undefined, cell),
       expireDate: this.data.expireDate || undefined,
       source: this.data.source || "manual",
       extra: {
@@ -334,11 +383,13 @@ Page({
 
   updatePlaceText() {
     const zone = this.data.zoneOptions[this.data.zoneIndex]?.value || "";
-    const slot = this.data.slotOptions[this.data.slotIndex]?.value || "";
+    const layer = this.data.layerOptions[this.data.layerIndex]?.id || "";
+    const cell = this.data.cellIndex >= 0 ? this.data.cellIndex : undefined;
     this.setData({
-      placeText: displayPlace(zone, slot),
+      placeText: displayInventoryPlace(zone, layer, cell),
       selectedZoneValue: zone,
-      selectedSlotValue: slot,
+      selectedLayerValue: layer,
+      selectedCellValue: cell == null ? -1 : cell,
     });
   },
 
@@ -365,12 +416,7 @@ Page({
       });
       setTimeout(() => wx.navigateBack(), 400);
     } catch (err) {
-      // 离线/REST 失败才入队，等待恢复后由同步队列补写。
-      const payload = this.buildPayload();
-      enqueueSyncOp("inventory", this.data.mode === "create" ? "create_pending" : "update_pending", {
-        itemId: this.data.itemId || undefined,
-        payload,
-      });
+      // v2 API 在发请求前已用同一 eventId 持久化 outbox。
       const message =
         err instanceof RequestError
           ? err.message
@@ -401,11 +447,7 @@ Page({
           wx.showToast({ title: "已删除", icon: "success" });
           setTimeout(() => wx.navigateBack(), 400);
         } catch (err) {
-          // 离线/REST 失败才入队，等待恢复后补删。
-          enqueueSyncOp("inventory", "delete_pending", {
-            itemId: this.data.itemId,
-            name: this.data.name,
-          });
+          // v2 API 在发请求前已持久化删除事件。
           wx.showToast({ title: "删除失败，已加入待同步", icon: "none" });
         }
       },

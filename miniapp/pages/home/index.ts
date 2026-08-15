@@ -12,15 +12,13 @@
  *
  * 交互：
  *   - 顶部 app-status 点击展开 status-panel（设备 SN / 固件 / 刷新 / 换设备）；
- *   - 未绑定时直接给"一键绑定 DEMO"和"手动绑定"两条路径，不再强制跳 bind 页；
+ *   - 未绑定时引导进入 P4 二维码绑定页；
  *   - 临期 / 待办 / 总库存数字行点击会跳到对应 tab；
  *   - AI fab 跳 ai-chat 页。
  */
 
 import type { MiniAppInstance } from "../../app";
-import { DEMO_BIND_CODE } from "../../config/env";
 import {
-  bindDevice,
   getHomeOverview,
   getInventory,
   refreshInventory,
@@ -30,14 +28,14 @@ import { RequestError } from "../../utils/request";
 import {
   addCustomFridgeZone,
   deleteCustomFridgeZone,
-  displayPlace,
+  displayInventoryPlace,
   getFridgeZones,
   saveFridgeZonesToCloud,
   syncFridgeZonesFromCloud,
   updateCustomFridgeZone,
   updateStandardFridgeZone,
 } from "../../utils/fridgeZones";
-import { enqueueSyncOp, syncNow } from "../../services/sync";
+import { syncNow } from "../../services/sync";
 import { updateOfflineSnapshot } from "../../utils/localFeatures";
 import { formatInventoryQuantity } from "../../utils/quantity";
 
@@ -322,8 +320,8 @@ Page({
       counts[meta.key] = { count: 0, warnCount: 0 };
     }
     for (const it of items) {
-      if (!it.zone) continue;
-      const bucket = counts[it.zone];
+      if (!it.zoneId) continue;
+      const bucket = counts[it.zoneId];
       if (!bucket) continue;
       bucket.count += 1;
       const lvl = freshness(it);
@@ -366,11 +364,9 @@ Page({
         level = diff <= 2 ? "danger" : "warn";
       }
     }
-    const loc = item.location
-      ? item.location
-      : item.zone && item.slot
-        ? displayPlace(item.zone, item.slot)
-        : "未指定位置";
+    const loc =
+      item.location ||
+      displayInventoryPlace(item.zoneId, item.layerId, item.cell);
     return {
       id: item.id,
       name: item.name,
@@ -636,35 +632,9 @@ Page({
     wx.navigateTo({ url: "/pages/bind/index" });
   },
 
-  /** 一键绑定 DEMO 演示设备：成功后立刻刷新 overview。 */
+  /** P4 只允许扫描屏幕生成的一次性二维码绑定。 */
   async onTapBindDemo() {
-    if (this.data.binding) return;
-    const app = getApp<MiniAppInstance["globalData"]>() as unknown as MiniAppInstance;
-    if (!app.globalData.session?.token) {
-      const session = await app.ensureSession();
-      if (!session?.token) {
-        wx.showToast({ title: "登录未完成", icon: "none" });
-        return;
-      }
-    }
-    this.setData({ binding: true });
-    try {
-      const device = await bindDevice({ bindCode: DEMO_BIND_CODE });
-      app.setActiveDevice(device);
-      this.applyDevice(device);
-      wx.showToast({ title: "绑定成功", icon: "success" });
-      void this.refresh();
-    } catch (err) {
-      const message =
-        err instanceof RequestError
-          ? err.message
-          : err instanceof Error
-            ? err.message
-            : "绑定失败";
-      wx.showToast({ title: message, icon: "none" });
-    } finally {
-      this.setData({ binding: false });
-    }
+    wx.navigateTo({ url: "/pages/bind/index" });
   },
 
   /** 状态抽屉中的"刷新冰箱"：透传 MQTT 命令给设备。 */
@@ -696,7 +666,7 @@ Page({
       });
       return synced;
     } catch {
-      enqueueSyncOp("fridge_zones", "replace_pending", { zones });
+      // saveFridgeZonesToCloud 内部已用稳定 eventId 写入 v2 outbox。
       wx.showToast({ title: "已本地保存，待同步", icon: "none" });
       return zones;
     }

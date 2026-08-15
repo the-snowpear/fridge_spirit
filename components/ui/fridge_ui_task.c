@@ -183,6 +183,9 @@ static void update_current_page(void)
     case FRIDGE_UI_PAGE_TIMER:
         fridge_ui_page_timer_update();
         break;
+    case FRIDGE_UI_PAGE_TIMER_EDIT:
+        fridge_ui_page_timer_edit_update();
+        break;
     case FRIDGE_UI_PAGE_STOPWATCH:
         fridge_ui_page_stopwatch_update();
         break;
@@ -349,9 +352,12 @@ static void ui_task(void *arg)
     fridge_ui_page_more_create(s_pages[FRIDGE_UI_PAGE_MORE]);
     fridge_ui_page_offline_create(s_pages[FRIDGE_UI_PAGE_OFFLINE]);
     fridge_ui_page_timer_create(s_pages[FRIDGE_UI_PAGE_TIMER]);
+    fridge_ui_page_timer_edit_create(s_pages[FRIDGE_UI_PAGE_TIMER_EDIT]);
     fridge_ui_page_stopwatch_create(s_pages[FRIDGE_UI_PAGE_STOPWATCH]);
     fridge_ui_page_alarm_create(s_pages[FRIDGE_UI_PAGE_ALARM]);
     s_dock = fridge_ui_dock_create(g_ui_root);
+    // 到时浮层挂在 root，跨页可见；创建时机在 dock 之后，默认 z 序更高。
+    fridge_ui_overlay_timer_ring_create(g_ui_root);
 
     s_toast = lv_label_create(g_ui_root);
     lv_obj_add_flag(s_toast, LV_OBJ_FLAG_HIDDEN);
@@ -377,6 +383,8 @@ static void ui_task(void *arg)
             fridge_ui_model_poll();
             apply_state_machine_ui_policy();
             update_current_page();
+            // 到时浮层跨页检测：任意页面均可弹出 OV-09。
+            fridge_ui_overlay_timer_ring_update();
             // 语音唤醒自动策略：仅在屏幕已就绪且亮屏（非待机、背光>0）时允许监听。
             // policy_update 内部不阻塞（停止动作交给 wake 自己的管理任务），不会拖住 LVGL 刷新。
             bool screen_awake = fridge_display_get_brightness() > 0 &&
@@ -439,6 +447,8 @@ bool fridge_ui_page_from_key(const char *key, fridge_ui_page_t *out)
         *out = FRIDGE_UI_PAGE_AI;
     } else if (strcmp(key, "timer") == 0) {
         *out = FRIDGE_UI_PAGE_TIMER;
+    } else if (strcmp(key, "timer_edit") == 0) {
+        *out = FRIDGE_UI_PAGE_TIMER_EDIT;
     } else if (strcmp(key, "stopwatch") == 0) {
         *out = FRIDGE_UI_PAGE_STOPWATCH;
     } else if (strcmp(key, "alarm") == 0) {
@@ -546,7 +556,10 @@ void fridge_ui_go_back(void)
     case FRIDGE_UI_PAGE_TIMER:
     case FRIDGE_UI_PAGE_STOPWATCH:
     case FRIDGE_UI_PAGE_ALARM:
-        fridge_ui_show_page(FRIDGE_UI_PAGE_HOME);
+        fridge_ui_show_page(FRIDGE_UI_PAGE_MORE);
+        break;
+    case FRIDGE_UI_PAGE_TIMER_EDIT:
+        fridge_ui_show_page(FRIDGE_UI_PAGE_TIMER);
         break;
     case FRIDGE_UI_PAGE_EDIT_FOOD:
         fridge_ui_show_page(FRIDGE_UI_PAGE_ZONE);

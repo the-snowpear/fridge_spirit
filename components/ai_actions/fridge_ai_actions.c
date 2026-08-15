@@ -78,8 +78,10 @@ static bool page_key_allowed(const char *page)
         "offline",
         "ai",
         "timer",
-        "stopwatch",
+        "timer_edit",
         "alarm",
+        "alarm_editor",
+        "stopwatch",
     };
     if (!page) {
         return false;
@@ -132,6 +134,9 @@ static const char *page_label(const char *page)
     }
     if (strcmp(page, "timer") == 0) {
         return "定时器页";
+    }
+    if (strcmp(page, "timer_edit") == 0) {
+        return "定时器编辑页";
     }
     if (strcmp(page, "stopwatch") == 0) {
         return "秒表页";

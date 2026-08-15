@@ -1,0 +1,13 @@
+.memory-page { padding-bottom: 120rpx; }
+.count { color: var(--color-sage-dark); font-weight: 800; }
+.privacy-note { margin: var(--space-4) 0; padding-left: var(--space-4); border-left: 6rpx solid var(--color-yolk); color: var(--color-text-muted); font-size: var(--text-sm); line-height: 1.7; }
+.filters { display: flex; gap: var(--space-5); padding: var(--space-3) 0; border-bottom: 1rpx solid var(--color-line); color: var(--color-text-muted); }
+.filters view { padding: 10rpx 0; }
+.filters .active { color: var(--color-sage-dark); font-weight: 800; border-bottom: 4rpx solid var(--color-sage-dark); }
+.memory-row { padding: var(--space-5) 0; border-bottom: 1rpx solid var(--color-line); }
+.memory-head { display: flex; justify-content: space-between; gap: var(--space-4); }
+.kind { color: var(--color-sage-dark); font-size: var(--text-xs); font-weight: 800; }
+.date { color: var(--color-text-soft); font-size: var(--text-xs); }
+.memory-text { margin-top: var(--space-3); color: var(--color-ink); font-size: var(--text-md); line-height: 1.7; white-space: pre-wrap; word-break: break-word; }
+.memory-tags { margin-top: var(--space-3); color: var(--color-text-soft); font-size: var(--text-xs); }
+.error-line { color: var(--color-tomato); }

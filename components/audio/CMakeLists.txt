@@ -3,5 +3,5 @@
 idf_component_register(
     SRCS "fridge_audio_p4.c"
     INCLUDE_DIRS "include"
-    REQUIRES esp_timer freertos heap log codec_es8311
+    REQUIRES esp_timer freertos heap log codec_es8311 fy_sp703
 )

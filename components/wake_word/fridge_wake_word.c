@@ -1,6 +1,7 @@
 // 冰箱小精灵 ESP32-P4 本地语音唤醒组件。
-// 使用板载 ES8311 的 16kHz/16-bit/mono PCM 喂给 ESP-SR WakeNet，
-// 只负责实时检测与轻量事件上报，不在 AFE 任务中执行录音、NVS 或 HTTPS。
+// 使用外接 FY-SP703（I2S1 从机 RX）的 16kHz/16-bit/mono PCM 直通喂给 ESP-SR WakeNet，
+// 不占用 GPIO28/29 摄像头共享 I2C；只负责实时检测与轻量事件上报，
+// 不在 AFE 任务中执行录音、NVS 或 HTTPS。
 #include "fridge_wake_word.h"
 
 #include <math.h>
@@ -19,8 +20,6 @@
 #include "model_path.h"
 #include "nvs.h"
 
-#define WAKE_FEED_TASK_STACK 8192
-#define WAKE_DETECT_TASK_STACK 6144
 #define WAKE_TASK_PRIORITY 5
 #define WAKE_STOP_WAIT_MS 1500
 #define WAKE_TRIGGER_GUARD_MS 1200
@@ -30,10 +29,12 @@
 #define WAKE_MANAGER_TASK_STACK 4096
 #define WAKE_MANAGER_TASK_PRIORITY 4
 #define WAKE_MANAGER_TICK_MS 200
+#define WAKE_LOW_MEMORY_RETRY_MS 30000
 
-// 启动前内部 DMA 连续块门槛：经验初值 64KB，须用真机实测 WakeNet 实际占用后校准。
-// 低于该门槛时拒绝拉起 WakeNet，避免内部 SRAM 紧张时强行启动引发不稳定。
-#define WAKE_MIN_INTERNAL_DMA_BLOCK (64 * 1024)
+// 此门槛在 AFE/模型已经创建后检查。监听循环复用管理任务已有的内部 SRAM 栈，音频帧在
+// PSRAM，I2S DMA 已在 FY-SP703/ES8311 初始化时分配；因此这里只避免在内部 DMA 完全耗尽时启动。
+// 不使用 PSRAM 任务栈，避免 NVS 擦写关闭 Flash cache 时影响核心唤醒链路。
+#define WAKE_MIN_INTERNAL_DMA_BLOCK (1024)
 // 最小驻留时间：已进入监听后 30s 内忽略“内存余量”边界抖动，避免反复 start/stop 抢占 I2S。
 #define WAKE_MIN_DWELL_MS 30000
 
@@ -43,8 +44,6 @@
 static const char *TAG = "fridge_wake";
 
 static SemaphoreHandle_t s_lock;
-static TaskHandle_t s_feed_task;
-static TaskHandle_t s_detect_task;
 static const esp_afe_sr_iface_t *s_afe_handle;
 static esp_afe_sr_data_t *s_afe_data;
 static srmodel_list_t *s_models;
@@ -69,6 +68,7 @@ static bool s_policy_want_listen;           // 策略层期望是否监听
 static fridge_wake_policy_reason_t s_policy_reason = FRIDGE_WAKE_POLICY_DISABLED_BY_USER;
 static size_t s_largest_internal_dma_block; // 最近一次测得的内部 DMA 最大连续块
 static bool s_dialog_in_progress;           // 唤醒后自动对话进行中，期间不自动恢复监听
+static bool s_maintenance_hold;             // TF/截屏维护门禁，不写 NVS，复位自动清除
 static int64_t s_listen_since_ms;           // 进入监听的时间戳，用于最小驻留反横跳
 static TaskHandle_t s_manager_task;
 static fridge_wake_word_dialog_cb_t s_dialog_cb;
@@ -170,38 +170,11 @@ static void notify_wake_detected(void)
     }
 }
 
-// AFE 检测任务只执行 fetch 和命中判定。音频读取/feed 与 fetch 分离，
-// 避免 fetch 的算法处理时间阻塞 ES8311 DMA 取数。
-static void wake_detect_task(void *arg)
+// 监听循环复用策略管理任务已有的内部栈，依次执行读帧、喂 AFE、非阻塞取结果。
+// 单声道输入的喂帧节拍为约 32ms，而 fetch 不等待新帧，故不会阻塞 FY-SP703 I2S1 DMA 读取；
+// 这样避免在 AFE 模型加载后再申请两个大块内部任务栈，WakeNet 仍保持全内部栈运行。
+static esp_err_t wake_listen_loop(void)
 {
-    (void)arg;
-    while (!should_stop()) {
-        afe_fetch_result_t *result = s_afe_handle->fetch_with_delay
-                                         ? s_afe_handle->fetch_with_delay(s_afe_data, pdMS_TO_TICKS(20))
-                                         : s_afe_handle->fetch(s_afe_data);
-        if (!result || result->ret_value == ESP_FAIL) {
-            continue;
-        }
-        xSemaphoreTake(s_lock, portMAX_DELAY);
-        s_vad_state = result->vad_state;
-        xSemaphoreGive(s_lock);
-        if (result->wakeup_state == WAKENET_DETECTED) {
-            ESP_LOGI(TAG, "wake word detected: %s", FRIDGE_WAKE_WORD_TEXT);
-            notify_wake_detected();
-        }
-    }
-
-    xSemaphoreTake(s_lock, portMAX_DELAY);
-    s_detect_task = NULL;
-    xSemaphoreGive(s_lock);
-    vTaskDelete(NULL);
-}
-
-// Feed 任务是 ES8311 唤醒流的唯一持有者；负责启动/停止编解码器输入，
-// 并把完整单声道帧持续送入 AFE。
-static void wake_feed_task(void *arg)
-{
-    (void)arg;
     int feed_chunksize = s_afe_handle->get_feed_chunksize(s_afe_data);
     int feed_channel = s_afe_handle->get_feed_channel_num(s_afe_data);
     size_t frame_samples = (size_t)feed_chunksize * (size_t)feed_channel;
@@ -211,26 +184,22 @@ static void wake_feed_task(void *arg)
     }
     if (!frame) {
         set_state(FRIDGE_WAKE_WORD_STATE_ERROR, "wake frame allocation failed");
-        goto done;
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        s_enabled = false;
+        s_stop_requested = false;
+        xSemaphoreGive(s_lock);
+        return ESP_ERR_NO_MEM;
     }
 
     esp_err_t err = fridge_audio_wake_stream_start();
     if (err != ESP_OK) {
         set_state(FRIDGE_WAKE_WORD_STATE_ERROR, esp_err_to_name(err));
-        goto done;
-    }
-
-    BaseType_t detect_ok = xTaskCreatePinnedToCore(wake_detect_task,
-                                                   "wake_detect",
-                                                   WAKE_DETECT_TASK_STACK,
-                                                   NULL,
-                                                   WAKE_TASK_PRIORITY,
-                                                   &s_detect_task,
-                                                   1);
-    if (detect_ok != pdPASS) {
-        set_state(FRIDGE_WAKE_WORD_STATE_ERROR, "wake detect task create failed");
-        (void)fridge_audio_wake_stream_stop();
-        goto done;
+        free(frame);
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        s_enabled = false;
+        s_stop_requested = false;
+        xSemaphoreGive(s_lock);
+        return err;
     }
 
     set_state(FRIDGE_WAKE_WORD_STATE_LISTENING, "");
@@ -238,7 +207,16 @@ static void wake_feed_task(void *arg)
     xSemaphoreTake(s_lock, portMAX_DELAY);
     s_listen_since_ms = esp_timer_get_time() / 1000;
     xSemaphoreGive(s_lock);
+    bool stopped_by_policy = false;
     while (!should_stop()) {
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        bool keep_listening = s_policy_want_listen && !s_dialog_in_progress;
+        xSemaphoreGive(s_lock);
+        if (!keep_listening) {
+            stopped_by_policy = true;
+            break;
+        }
+
         size_t sample_count = 0;
         err = fridge_audio_wake_stream_read(frame, frame_samples, &sample_count, pdMS_TO_TICKS(250));
         if (err != ESP_OK) {
@@ -247,6 +225,7 @@ static void wake_feed_task(void *arg)
             xSemaphoreGive(s_lock);
             if (err != ESP_ERR_TIMEOUT) {
                 ESP_LOGW(TAG, "wake stream read failed: %s", esp_err_to_name(err));
+                break;
             }
             continue;
         }
@@ -264,34 +243,35 @@ static void wake_feed_task(void *arg)
             continue;
         }
 
-    }
-
-    (void)fridge_audio_wake_stream_stop();
-    // fetch_with_delay 最多阻塞 20ms；等待检测任务观察 stop 标志后退出，
-    // 再允许下一轮监听复用同一个 AFE 实例。
-    for (int i = 0; i < 25; i++) {
-        xSemaphoreTake(s_lock, portMAX_DELAY);
-        bool detect_running = s_detect_task != NULL;
-        xSemaphoreGive(s_lock);
-        if (!detect_running) {
-            break;
+        afe_fetch_result_t *result = s_afe_handle->fetch_with_delay
+                                         ? s_afe_handle->fetch_with_delay(s_afe_data, 0)
+                                         : s_afe_handle->fetch(s_afe_data);
+        if (result && result->ret_value != ESP_FAIL) {
+            xSemaphoreTake(s_lock, portMAX_DELAY);
+            s_vad_state = result->vad_state;
+            xSemaphoreGive(s_lock);
+            if (result->wakeup_state == WAKENET_DETECTED) {
+                ESP_LOGI(TAG, "wake word detected: %s", FRIDGE_WAKE_WORD_TEXT);
+                notify_wake_detected();
+            }
         }
-        vTaskDelay(pdMS_TO_TICKS(20));
     }
-    xSemaphoreTake(s_lock, portMAX_DELAY);
-    bool detect_still_running = s_detect_task != NULL;
-    xSemaphoreGive(s_lock);
-    set_state(detect_still_running ? FRIDGE_WAKE_WORD_STATE_ERROR : FRIDGE_WAKE_WORD_STATE_IDLE,
-              detect_still_running ? "wake detect task stop timeout" : "");
 
-done:
+    if (stopped_by_policy || should_stop()) {
+        err = ESP_OK;
+    }
+    esp_err_t stop_err = fridge_audio_wake_stream_stop();
     free(frame);
     xSemaphoreTake(s_lock, portMAX_DELAY);
     s_enabled = false;
     s_stop_requested = false;
-    s_feed_task = NULL;
     xSemaphoreGive(s_lock);
-    vTaskDelete(NULL);
+    if (err == ESP_OK && stop_err != ESP_OK) {
+        err = stop_err;
+    }
+    set_state(err == ESP_OK ? FRIDGE_WAKE_WORD_STATE_IDLE : FRIDGE_WAKE_WORD_STATE_ERROR,
+              err == ESP_OK ? "" : esp_err_to_name(err));
+    return err;
 }
 
 esp_err_t fridge_wake_word_init(void)
@@ -317,8 +297,8 @@ esp_err_t fridge_wake_word_init(void)
         return ESP_ERR_NOT_FOUND;
     }
 
-    // 板载 ES8311 ADC 只向本链路提供一个 16kHz mono 通道，输入格式必须为 "M"，
-    // 不能声明扬声器参考通道；PCM 已是紧凑 int16，无需旧 INMP441 位移换算。
+    // FY-SP703 经 I2S1 从机只向本链路提供 16kHz mono PCM（帧内 L/R 已按探测合并），
+    // 输入格式必须为 "M"，不能声明扬声器参考通道；PCM 已是紧凑 int16，无需位移换算。
     afe_config_t *afe_config = afe_config_init("M", s_models, AFE_TYPE_SR, AFE_MODE_LOW_COST);
     if (!afe_config) {
         set_state(FRIDGE_WAKE_WORD_STATE_ERROR, "AFE config init failed");
@@ -393,8 +373,8 @@ esp_err_t fridge_wake_word_start(void)
         return err;
     }
 
-    // 启动前内部 DMA 余量门槛：WakeNet/AFE 的实时缓冲、锁与 I2S DMA 需要连续内部 SRAM。
-    // 连续块低于门槛时拒绝启动，避免在内部 SRAM 紧张时强拉 WakeNet 诱发屏幕/TLS 抢内存。
+    // AFE/模型已在 init 中完成分配；监听循环复用已有管理任务栈，
+    // 不把已由 AFE 占用的模型内存重复计入，否则会让已成功加载模型的 WakeNet 永远无法启动。
     size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
     xSemaphoreTake(s_lock, portMAX_DELAY);
     s_largest_internal_dma_block = largest;
@@ -407,8 +387,8 @@ esp_err_t fridge_wake_word_start(void)
     }
 
     xSemaphoreTake(s_lock, portMAX_DELAY);
-    if (s_feed_task || s_detect_task || s_starting) {
-        // 已在监听或正在创建任务：保持幂等，避免管理任务与 UI 录音恢复并发各建一个 wake 任务。
+    if (s_enabled || s_starting) {
+        // 已在监听或正在进入监听循环：保持幂等，避免管理任务与 UI 录音恢复并发重复启动。
         xSemaphoreGive(s_lock);
         return ESP_OK;
     }
@@ -419,22 +399,8 @@ esp_err_t fridge_wake_word_start(void)
     s_error[0] = '\0';
     xSemaphoreGive(s_lock);
 
-    BaseType_t ok = xTaskCreatePinnedToCore(wake_feed_task,
-                                            "wake_feed",
-                                            WAKE_FEED_TASK_STACK,
-                                            NULL,
-                                            WAKE_TASK_PRIORITY,
-                                            &s_feed_task,
-                                            0);
     xSemaphoreTake(s_lock, portMAX_DELAY);
     s_starting = false;
-    if (ok != pdPASS) {
-        s_enabled = false;
-        s_feed_task = NULL;
-        xSemaphoreGive(s_lock);
-        set_state(FRIDGE_WAKE_WORD_STATE_ERROR, "wake task create failed");
-        return ESP_ERR_NO_MEM;
-    }
     xSemaphoreGive(s_lock);
     return ESP_OK;
 }
@@ -445,20 +411,18 @@ esp_err_t fridge_wake_word_stop(void)
         return ESP_OK;
     }
     xSemaphoreTake(s_lock, portMAX_DELAY);
-    TaskHandle_t feed_task = s_feed_task;
-    TaskHandle_t detect_task = s_detect_task;
+    bool listening = s_enabled;
     s_stop_requested = true;
     xSemaphoreGive(s_lock);
 
-    for (int i = 0; (feed_task || detect_task) && i < (WAKE_STOP_WAIT_MS / 20); i++) {
+    for (int i = 0; listening && i < (WAKE_STOP_WAIT_MS / 20); i++) {
         vTaskDelay(pdMS_TO_TICKS(20));
         xSemaphoreTake(s_lock, portMAX_DELAY);
-        feed_task = s_feed_task;
-        detect_task = s_detect_task;
+        listening = s_enabled;
         xSemaphoreGive(s_lock);
     }
-    if (feed_task || detect_task) {
-        set_state(FRIDGE_WAKE_WORD_STATE_ERROR, "wake tasks stop timeout");
+    if (listening) {
+        set_state(FRIDGE_WAKE_WORD_STATE_ERROR, "wake listener stop timeout");
         return ESP_ERR_TIMEOUT;
     }
     return ESP_OK;
@@ -475,12 +439,26 @@ esp_err_t fridge_wake_word_reset_stats(void)
     return ESP_OK;
 }
 
+// 填充 WakeNet 使用的音频源：监听中回显音频组件的实际 source；
+// 未监听时显示下一次启动将使用的默认源，避免误把最近一次手动 ES8311 录音显示成 WakeNet 音源。
+static void fill_audio_source(char *out, size_t out_size)
+{
+    fridge_audio_status_t audio = {0};
+    fridge_audio_source_t source = FRIDGE_AUDIO_DEFAULT_SOURCE;
+    if (fridge_audio_get_status(&audio) == ESP_OK &&
+        audio.state == FRIDGE_AUDIO_STATE_WAKE_LISTENING) {
+        source = audio.source;
+    }
+    strlcpy(out, fridge_audio_source_name(source), out_size);
+}
+
 esp_err_t fridge_wake_word_get_status(fridge_wake_word_status_t *out)
 {
     if (!out) {
         return ESP_ERR_INVALID_ARG;
     }
     memset(out, 0, sizeof(*out));
+    fill_audio_source(out->audio_source, sizeof(out->audio_source));
     if (!s_lock) {
         out->state = FRIDGE_WAKE_WORD_STATE_IDLE;
         out->policy_reason = FRIDGE_WAKE_POLICY_DISABLED_BY_USER;
@@ -639,26 +617,31 @@ static void wake_manager_task(void *arg)
         xSemaphoreTake(s_lock, portMAX_DELAY);
         bool want = s_policy_want_listen;
         bool dialog = s_dialog_in_progress;
-        bool listening = (s_feed_task != NULL || s_detect_task != NULL);
+        bool listening = s_enabled;
         xSemaphoreGive(s_lock);
 
         int64_t now_ms = esp_timer_get_time() / 1000;
         if (want && !dialog && !listening && now_ms >= next_start_attempt_ms) {
             // 期望监听但当前未监听：尝试启动（start 内部含 TTS/内存/幂等防护）。
             esp_err_t err = fridge_wake_word_start();
-            if (err == ESP_ERR_NO_MEM) {
-                // 内部 DMA 余量不足：记录原因并退避 2s，避免高频重试和日志刷屏。
+            if (err == ESP_OK) {
+                // 管理任务直接运行监听循环，复用它已经分配好的内部 SRAM 栈。
+                // policy_update/stop 只改受锁状态，循环会在一个音频读取周期内退出。
+                err = wake_listen_loop();
+                if (err != ESP_OK) {
+                    ESP_LOGW(TAG, "wake listener stopped: %s", esp_err_to_name(err));
+                    next_start_attempt_ms = now_ms + 2000;
+                }
+            } else if (err == ESP_ERR_NO_MEM) {
+                // 内部 DMA 余量不足通常不会在数秒内自行恢复；长退避避免持续刷串口和抢锁。
                 xSemaphoreTake(s_lock, portMAX_DELAY);
                 s_policy_reason = FRIDGE_WAKE_POLICY_LOW_INTERNAL_DMA;
                 xSemaphoreGive(s_lock);
-                next_start_attempt_ms = now_ms + 2000;
+                next_start_attempt_ms = now_ms + WAKE_LOW_MEMORY_RETRY_MS;
             } else if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
                 ESP_LOGW(TAG, "manager start wake failed: %s", esp_err_to_name(err));
                 next_start_attempt_ms = now_ms + 2000;
             }
-        } else if (!want && listening) {
-            // 期望停止但仍在监听：在本任务里执行可能阻塞 1.5s 的 stop，不影响 UI 任务。
-            (void)fridge_wake_word_stop();
         }
         vTaskDelay(pdMS_TO_TICKS(WAKE_MANAGER_TICK_MS));
     }
@@ -679,7 +662,8 @@ void fridge_wake_word_policy_update(bool display_ready, bool screen_awake)
     }
     bool user_enabled = s_user_enabled;
     bool dialog = s_dialog_in_progress;
-    bool listening = (s_feed_task != NULL || s_detect_task != NULL);
+    bool maintenance_hold = s_maintenance_hold;
+    bool listening = s_enabled;
     int64_t listen_since = s_listen_since_ms;
     xSemaphoreGive(s_lock);
 
@@ -694,7 +678,10 @@ void fridge_wake_word_policy_update(bool display_ready, bool screen_awake)
     // 综合判定是否允许自动监听；任一条件不满足都给出对应原因，便于真机定位。
     fridge_wake_policy_reason_t reason;
     bool want;
-    if (!user_enabled) {
+    if (maintenance_hold) {
+        want = false;
+        reason = FRIDGE_WAKE_POLICY_DISPLAY_NOT_READY;
+    } else if (!user_enabled) {
         want = false;
         reason = FRIDGE_WAKE_POLICY_DISABLED_BY_USER;
     } else if (!display_ready) {
@@ -704,7 +691,7 @@ void fridge_wake_word_policy_update(bool display_ready, bool screen_awake)
         want = false;
         reason = FRIDGE_WAKE_POLICY_SCREEN_OFF;
     } else {
-        // 亮屏且用户开启：检查录音忙闲，避免与普通录音抢占 ES8311/I2S0。
+        // 亮屏且用户开启：检查录音忙闲，避免与普通录音抢占麦克风链路。
         fridge_audio_status_t audio = {0};
         bool audio_busy = fridge_audio_get_status(&audio) == ESP_OK &&
                           (audio.state == FRIDGE_AUDIO_STATE_RECORDING);
@@ -739,4 +726,18 @@ void fridge_wake_word_policy_update(bool display_ready, bool screen_awake)
     s_policy_want_listen = want;
     s_policy_reason = reason;
     xSemaphoreGive(s_lock);
+}
+
+esp_err_t fridge_wake_word_set_maintenance_hold(bool hold)
+{
+    ESP_RETURN_ON_ERROR(ensure_lock(), TAG, "create wake lock failed");
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_maintenance_hold = hold;
+    if (hold) {
+        s_policy_want_listen = false;
+        s_policy_reason = FRIDGE_WAKE_POLICY_DISPLAY_NOT_READY;
+    }
+    xSemaphoreGive(s_lock);
+    // 脚本应在 ready 后、AFE 初始化前持有；若已经监听则先安全退出音频循环。
+    return hold ? fridge_wake_word_stop() : ESP_OK;
 }

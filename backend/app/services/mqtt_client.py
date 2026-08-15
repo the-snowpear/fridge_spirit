@@ -136,6 +136,9 @@ class FridgeMqttClient:
             # 设备 retained 上报当前 AI 配置；backend 用 last-write-wins 与 SystemConfig 协调。
             (f"{prefix}/+/+/ai_config", 1),
         ]
+        from app.services.p4_mqtt import p4_mqtt_bridge
+
+        topics.extend(p4_mqtt_bridge.topics())
         for topic, qos in topics:
             client.subscribe(topic, qos=qos)
         logger.info("MQTT connected, subscribed to %d topics", len(topics))
@@ -156,6 +159,10 @@ class FridgeMqttClient:
         properties: Any,
     ) -> int:
         """统一消息分发；topic 末段决定走哪条处理路径。"""
+        from app.services.p4_mqtt import p4_mqtt_bridge
+
+        if await p4_mqtt_bridge.handle(topic, payload):
+            return 0
         try:
             text = payload.decode("utf-8")
         except UnicodeDecodeError as exc:
@@ -711,6 +718,24 @@ class FridgeMqttClient:
         }
         self._client.publish(topic, json.dumps(body, ensure_ascii=False), qos=qos)
         return topic
+
+    async def publish_topic(
+        self,
+        topic: str,
+        payload: dict,
+        *,
+        qos: int = 1,
+        retain: bool = False,
+    ) -> None:
+        """发布已经完成 topic 归属校验的 v2 envelope。"""
+        await self.ensure_connected()
+        assert self._client is not None
+        self._client.publish(
+            topic,
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+            qos=qos,
+            retain=retain,
+        )
 
     async def _resolve_home_id(self, device_sn: str) -> UUID:
         """根据 device_sn 找到当前 active 绑定的 home_id。"""

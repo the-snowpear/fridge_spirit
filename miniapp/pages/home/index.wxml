@@ -42,7 +42,7 @@
     <view class="kicker">第一步</view>
     <view class="title" style="font-size: var(--text-md); margin: var(--space-2) 0;">绑定演示冰箱贴</view>
     <view class="subtitle">绑定码 DEMO 已经预置在后端 lifespan 里，点下面就能直接进入演示；也可以点击顶部状态进入手动绑定。</view>
-    <button class="btn" loading="{{binding}}" bindtap="onTapBindDemo" style="margin-top: var(--space-5);">一键绑定 DEMO</button>
+    <button class="btn" bindtap="onTapBindDemo" style="margin-top: var(--space-5);">扫描设备二维码</button>
   </view>
 
   <!-- 数字行：库存 / 临期 / 待办 -->

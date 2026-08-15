@@ -17,6 +17,12 @@
 #include "esp_http_client.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+
+// ESP-IDF 5.5.1 尚未提供专用的 HTTP 响应不完整错误码；用“对端已关闭连接”
+// 保持相同的失败/重试语义，同时兼容后续已经定义该错误码的 IDF 版本。
+#ifndef ESP_ERR_HTTP_INCOMPLETE_DATA
+#define ESP_ERR_HTTP_INCOMPLETE_DATA ESP_ERR_HTTP_CONNECTION_CLOSED
+#endif
 #include "fridge_i2s_shared.h"
 #include "fridge_network.h"
 #include "freertos/FreeRTOS.h"
@@ -360,7 +366,9 @@ static void normalize_voice_for_model(const fridge_tts_config_update_t *config, 
         return;
     }
     if (is_moss) {
-        snprintf(out, out_size, "%s:%s", config->model, config->voice);
+        strlcpy(out, config->model, out_size);
+        strlcat(out, ":", out_size);
+        strlcat(out, config->voice, out_size);
         return;
     }
     strlcpy(out, config->voice, out_size);

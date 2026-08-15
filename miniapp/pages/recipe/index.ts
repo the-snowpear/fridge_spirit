@@ -217,6 +217,7 @@ function normalizeRecipe(item: Partial<RecipeRecommendation>, index: number): Re
     time_minutes?: unknown;
     timeMinutes?: unknown;
     reason?: unknown;
+    description?: unknown;
     use_inventory?: unknown;
     useInventory?: unknown;
     missing?: unknown;
@@ -227,15 +228,22 @@ function normalizeRecipe(item: Partial<RecipeRecommendation>, index: number): Re
   return {
     id: item.id || makeLocalId(`recipe${index}`),
     title: String(item.title || `推荐菜 ${index + 1}`),
-    desc: String(item.desc || raw.reason || "基于当前库存生成。"),
+    desc: String(item.desc || raw.description || raw.reason || "基于当前库存生成。"),
     durationText: String(item.durationText || (raw.time_minutes || raw.timeMinutes ? `约 ${raw.time_minutes || raw.timeMinutes} 分钟` : "约 20 分钟")),
     tags: Array.isArray(item.tags) ? item.tags.map(String).slice(0, 4) : [String(raw.tag || "家常")],
     ingredients: Array.isArray(item.ingredients)
-      ? item.ingredients.map((it) => ({
-          name: String(it.name || ""),
-          quantityText: String(it.quantityText || "适量"),
-          missing: !!it.missing,
-        })).filter((it) => it.name)
+      ? item.ingredients.map((it) => {
+          const canonical = it as typeof it & { quantity?: unknown; unit?: unknown };
+          return {
+            name: String(it.name || ""),
+            quantityText: String(
+              it.quantityText ||
+                `${canonical.quantity == null ? "" : canonical.quantity}${canonical.unit || ""}` ||
+                "适量",
+            ),
+            missing: !!it.missing,
+          };
+        }).filter((it) => it.name)
       : [
           ...useInventory.map((name) => ({ name, quantityText: "库存", missing: false })),
           ...missing.map((name) => ({ name, quantityText: "需补充", missing: true })),

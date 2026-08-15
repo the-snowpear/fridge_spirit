@@ -1,0 +1,6 @@
+## 智谱 GLM-Realtime 组件依赖。
+## esp_websocket_client 用于设备端 WSS；版本锁定到与 ESP-IDF 5.5.x 兼容的 1.4 系列。
+dependencies:
+  idf:
+    version: ">=5.5"
+  espressif/esp_websocket_client: "~1.4.0"

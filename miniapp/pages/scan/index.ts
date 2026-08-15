@@ -11,7 +11,7 @@
  */
 
 import { createInventoryItem, scanFoodImage } from "../../services/api";
-import { enqueueSyncOp, syncNow } from "../../services/sync";
+import { syncNow } from "../../services/sync";
 import type { MiniAppInstance } from "../../app";
 import type {
   InventoryWritePayload,
@@ -19,11 +19,14 @@ import type {
   ScanResult,
 } from "../../types/models";
 import { RequestError } from "../../utils/request";
+import { displayInventoryPlace } from "../../utils/fridgeZones";
+import { inventoryPositionPayload, slotToCell } from "../../utils/inventoryLocation";
 import { formatInventoryQuantity } from "../../utils/quantity";
 
 interface CandidateView extends ScanCandidate {
   viewId: string;
   quantityText: string;
+  positionText: string;
   busy?: boolean;
   saved?: boolean;
   confidenceClass: "danger" | "warn" | "mint";
@@ -97,8 +100,13 @@ Page({
       });
       const candidates: CandidateView[] = result.candidates.map((c, index) => ({
         ...c,
-        viewId: `${c.name}_${c.suggestedZone || "none"}_${c.suggestedSlot || "none"}_${index}`,
+        viewId: `${c.name}_${c.suggestedZone || "none"}_${c.suggestedLayerId || "none"}_${c.suggestedCell ?? c.suggestedSlot ?? "none"}_${index}`,
         quantityText: formatInventoryQuantity(c),
+        positionText: displayInventoryPlace(
+          c.suggestedZone,
+          c.suggestedLayerId,
+          c.suggestedCell ?? slotToCell(c.suggestedSlot),
+        ),
         confidenceClass: classifyConfidence(c.confidence),
       }));
       this.setData({
@@ -140,8 +148,11 @@ Page({
       category: target.category || undefined,
       quantity: target.quantity || 1,
       unit: target.unit || "份",
-      zone: target.suggestedZone || undefined,
-      slot: target.suggestedSlot || undefined,
+      ...inventoryPositionPayload(
+        target.suggestedZone,
+        target.suggestedLayerId,
+        target.suggestedCell ?? slotToCell(target.suggestedSlot),
+      ),
       source: "scan",
       confidence: target.confidence,
     };
@@ -154,11 +165,7 @@ Page({
       this.patchCandidate(idx, { busy: false, saved: true });
       wx.showToast({ title: "已入库", icon: "success" });
     } catch (err) {
-      // 离线/REST 失败才入队，等待恢复后补写。
-      enqueueSyncOp("inventory", "scan_create_pending", {
-        payload,
-        candidate: target,
-      });
+      // v2 API 已持久化同一 eventId 的 outbox。
       this.patchCandidate(idx, { busy: false });
       wx.showToast({ title: "入库失败，已加入待同步", icon: "none" });
     }
@@ -182,8 +189,11 @@ Page({
         category: candidate.category || undefined,
         quantity: candidate.quantity || 1,
         unit: candidate.unit || "份",
-        zone: candidate.suggestedZone || undefined,
-        slot: candidate.suggestedSlot || undefined,
+        ...inventoryPositionPayload(
+          candidate.suggestedZone,
+          candidate.suggestedLayerId,
+          candidate.suggestedCell ?? slotToCell(candidate.suggestedSlot),
+        ),
         source: "scan",
         confidence: candidate.confidence,
       };
@@ -193,11 +203,7 @@ Page({
         okCount += 1;
         this.patchCandidate(index, { busy: false, saved: true });
       } catch {
-        // 离线/REST 失败才入队，等待恢复后补写。
-        enqueueSyncOp("inventory", "scan_create_pending", {
-          payload,
-          candidate,
-        });
+        // v2 API 已持久化同一 eventId 的 outbox。
         this.patchCandidate(index, { busy: false });
       }
     }
@@ -220,8 +226,10 @@ Page({
     params.set("quantity", String(target.quantity || 1));
     params.set("unit", target.unit || "份");
     if (target.category) params.set("category", target.category);
-    if (target.suggestedZone) params.set("zone", target.suggestedZone);
-    if (target.suggestedSlot) params.set("slot", target.suggestedSlot);
+    if (target.suggestedZone) params.set("zoneId", target.suggestedZone);
+    if (target.suggestedLayerId) params.set("layerId", target.suggestedLayerId);
+    const cell = target.suggestedCell ?? slotToCell(target.suggestedSlot);
+    if (cell != null) params.set("cell", String(cell));
     params.set("source", "scan");
     params.set("confidence", String(target.confidence));
     wx.navigateTo({
@@ -244,7 +252,7 @@ Page({
     const params = new URLSearchParams();
     params.set("mode", "create");
     params.set("source", "manual");
-    if (this.data.hintZone) params.set("zone", this.data.hintZone);
+    if (this.data.hintZone) params.set("zoneId", this.data.hintZone);
     wx.navigateTo({ url: `/pages/inventory-detail/index?${params.toString()}` });
   },
 });

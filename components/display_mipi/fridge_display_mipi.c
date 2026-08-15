@@ -16,6 +16,7 @@
 #include <string.h>
 
 #include "driver/gpio.h"
+#include "driver/ledc.h"
 #include "esp_check.h"
 #include "esp_ldo_regulator.h"
 #include "esp_lcd_mipi_dsi.h"
@@ -39,6 +40,15 @@ static const char *TAG = "fridge_mipi";
 #define MIPI_VIDEO_REARM_DELAY_MS     40     // 覆盖两个以上帧周期，确保 P4 rev1.x 视频桥完成重新武装
 #define MIPI_FIRST_FRAME_TIMEOUT_MS  2000   // DSI/DPI 首帧启动可能明显慢于稳定刷新
 #define MIPI_FRAME_TIMEOUT_MS         500   // 稳定运行阶段仍保留有界等待，避免任务永久卡死
+#define MIPI_BACKLIGHT_PWM_HZ       20000   // GPIO23 背光 PWM：20kHz，避开可见闪烁频段
+#define MIPI_BACKLIGHT_MIN_PERCENT     10   // 面板最低可选亮度，避免低占空比下背光驱动不稳定
+#define MIPI_BACKLIGHT_MAX_PERCENT    100
+#define MIPI_BACKLIGHT_LEDC_TIMER LEDC_TIMER_1
+#define MIPI_BACKLIGHT_LEDC_CHANNEL LEDC_CHANNEL_1
+// P4 实机验证：20kHz 搭配 13 位会要求 LEDC 分频小于 1，驱动会拒绝初始化。
+// 10 位在 80MHz 时钟下有充足分频余量，且 10%～100% 亮度步进远小于 UI 的 1% 步进。
+#define MIPI_BACKLIGHT_LEDC_RESOLUTION LEDC_TIMER_10_BIT
+#define MIPI_BACKLIGHT_LEDC_MAX_DUTY ((1U << 10) - 1U)
 
 // EK79007 面板时序（PCLK 周期数 / 行数），横屏 1024x600。
 #define EK79007_HBP  160
@@ -77,15 +87,80 @@ static esp_lcd_panel_handle_t s_dpi_panel;    // DPI 视频面板句柄
 static void *s_fb[2];                         // DPI 双帧缓冲（PSRAM）
 static uint8_t s_fb_index;                    // 当前可写帧缓冲索引
 static SemaphoreHandle_t s_refresh_sem;       // 帧刷新完成信号
+static SemaphoreHandle_t s_present_lock;      // 串行化 LVGL/摄像头提交及所有权切换
+static SemaphoreHandle_t s_render_lock;       // 覆盖 LVGL 整轮渲染，摄像头接管后持续持有
 static volatile uint32_t s_refresh_count;     // ISR 刷新计数，仅用于首帧/超时诊断
 static bool s_first_frame;
 static bool s_ready;
+static bool s_backlight_pwm_ready;
+static bool s_backlight_enabled;
+static uint8_t s_backlight_brightness_percent = MIPI_BACKLIGHT_MAX_PERCENT;
+// 摄像头预览独占帧缓冲时置 true；LVGL present 必须拒绝，避免与 PPA 双写。
+static volatile bool s_camera_owns_fb;
+
+// 初始化 GPIO23 的 LEDC 背光 PWM。P4 的 PPA/摄像头路径不占用 Timer1/Channel1；
+// 保留 Timer0/Channel0 给旧相机 XCLK 兼容路径，避免后续切换构建目标时引入资源冲突。
+static esp_err_t mipi_backlight_pwm_init(void)
+{
+    ledc_timer_config_t timer_cfg = {
+        .speed_mode = LEDC_LOW_SPEED_MODE,
+        .duty_resolution = MIPI_BACKLIGHT_LEDC_RESOLUTION,
+        .timer_num = MIPI_BACKLIGHT_LEDC_TIMER,
+        .freq_hz = MIPI_BACKLIGHT_PWM_HZ,
+        .clk_cfg = LEDC_AUTO_CLK,
+        .deconfigure = false,
+    };
+    ESP_RETURN_ON_ERROR(ledc_timer_config(&timer_cfg), TAG, "configure backlight PWM timer failed");
+
+    ledc_channel_config_t channel_cfg = {
+        .gpio_num = MIPI_PIN_BL,
+        .speed_mode = LEDC_LOW_SPEED_MODE,
+        .channel = MIPI_BACKLIGHT_LEDC_CHANNEL,
+        .intr_type = LEDC_INTR_DISABLE,
+        .timer_sel = MIPI_BACKLIGHT_LEDC_TIMER,
+        .duty = 0,
+        .hpoint = 0,
+    };
+    ESP_RETURN_ON_ERROR(ledc_channel_config(&channel_cfg), TAG, "configure backlight PWM channel failed");
+    s_backlight_pwm_ready = true;
+    s_backlight_enabled = false;
+    return ESP_OK;
+}
+
+// 将当前亮度偏好应用到 GPIO23；背光关闭时保持偏好但输出恒为低电平。
+static esp_err_t mipi_backlight_apply(bool enabled)
+{
+    if (!s_backlight_pwm_ready) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    const uint32_t duty = enabled
+        ? (MIPI_BACKLIGHT_LEDC_MAX_DUTY * s_backlight_brightness_percent) / MIPI_BACKLIGHT_MAX_PERCENT
+        : 0;
+    // IDF 5.5 的 ledc_set_duty_and_update() 会走 fade service；本项目未安装该服务，
+    // 直接调用会导致显示初始化失败。常规 set_duty + update_duty 不依赖 fade，
+    // 对 GPIO23 的单通道背光更新仍是一个很短的非阻塞寄存器写入。
+    esp_err_t err = ledc_set_duty(LEDC_LOW_SPEED_MODE, MIPI_BACKLIGHT_LEDC_CHANNEL, duty);
+    if (err == ESP_OK) {
+        err = ledc_update_duty(LEDC_LOW_SPEED_MODE, MIPI_BACKLIGHT_LEDC_CHANNEL);
+    }
+    if (err == ESP_OK) {
+        s_backlight_enabled = enabled;
+    }
+    return err;
+}
 
 // 初始化中途失败时按依赖逆序释放资源，并保持背光关闭。
 static void mipi_cleanup(void)
 {
-    gpio_set_level(MIPI_PIN_BL, 0);
+    // LEDC 停止时明确维持低电平，避免 DSI 初始化失败后背光仍然点亮。
+    if (s_backlight_pwm_ready) {
+        (void)ledc_stop(LEDC_LOW_SPEED_MODE, MIPI_BACKLIGHT_LEDC_CHANNEL, 0);
+    }
+    s_backlight_pwm_ready = false;
+    s_backlight_enabled = false;
     s_ready = false;
+    s_camera_owns_fb = false;
     s_fb[0] = NULL;
     s_fb[1] = NULL;
     s_fb_index = 0;
@@ -110,6 +185,14 @@ static void mipi_cleanup(void)
     if (s_refresh_sem) {
         vSemaphoreDelete(s_refresh_sem);
         s_refresh_sem = NULL;
+    }
+    if (s_present_lock) {
+        vSemaphoreDelete(s_present_lock);
+        s_present_lock = NULL;
+    }
+    if (s_render_lock) {
+        vSemaphoreDelete(s_render_lock);
+        s_render_lock = NULL;
     }
 }
 
@@ -203,13 +286,13 @@ static esp_err_t mipi_rearm_video_bridge(void)
 static esp_err_t mipi_flush_full_fb(void *fb)
 {
     const uint32_t refresh_before = s_refresh_count;
+    // DPI 回调会在连续扫描的每个帧边界给出 token。必须在提交新缓冲前清掉旧 token；
+    // 若提交后再清理，恰好到达的本次完成信号会被误删，随后会无谓地多等一个显示帧。
+    while (xSemaphoreTake(s_refresh_sem, 0) == pdTRUE) {
+    }
     esp_err_t ret = esp_lcd_panel_draw_bitmap(s_dpi_panel, 0, 0, FRIDGE_MIPI_WIDTH, FRIDGE_MIPI_HEIGHT, fb);
     if (ret != ESP_OK) {
         return ret;
-    }
-    // 回调在 DPI 连续扫描时每帧都会触发。切换缓冲后再清掉已有 token，确保随后等待到的
-    // 一定是本次切换之后的刷新边界；最坏多等一帧，但不会覆写仍在扫描的缓冲。
-    while (xSemaphoreTake(s_refresh_sem, 0) == pdTRUE) {
     }
     // 厂商例程对首帧采用无界等待；这里保留保护上限，但首帧给予更长的 DSI/DPI 启动时间。
     const uint32_t timeout_ms = s_first_frame ? MIPI_FIRST_FRAME_TIMEOUT_MS : MIPI_FRAME_TIMEOUT_MS;
@@ -220,7 +303,7 @@ static esp_err_t mipi_flush_full_fb(void *fb)
                  (unsigned long)refresh_before,
                  (unsigned long)s_refresh_count);
         // draw_bitmap 已可能切换 DPI 当前缓冲，继续复用本地索引会覆写活动帧；关闭背光并锁死刷新。
-        gpio_set_level(MIPI_PIN_BL, 0);
+        (void)mipi_backlight_apply(false);
         s_ready = false;
         return ESP_ERR_TIMEOUT;
     }
@@ -244,25 +327,27 @@ esp_err_t fridge_display_mipi_init(void)
     if (!s_refresh_sem) {
         return ESP_ERR_NO_MEM;
     }
+    s_present_lock = xSemaphoreCreateMutex();
+    if (!s_present_lock) {
+        vSemaphoreDelete(s_refresh_sem);
+        s_refresh_sem = NULL;
+        return ESP_ERR_NO_MEM;
+    }
+    s_render_lock = xSemaphoreCreateMutex();
+    if (!s_render_lock) {
+        vSemaphoreDelete(s_present_lock);
+        s_present_lock = NULL;
+        vSemaphoreDelete(s_refresh_sem);
+        s_refresh_sem = NULL;
+        return ESP_ERR_NO_MEM;
+    }
     s_refresh_count = 0;
     s_first_frame = true;
 
-    // 背光引脚先拉低，等整屏刷成黑色后再打开，避免上电初始化时闪花屏。
-    gpio_config_t bl_conf = {
-        .pin_bit_mask = 1ULL << MIPI_PIN_BL,
-        .mode = GPIO_MODE_OUTPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-    ret = gpio_config(&bl_conf);
+    // 背光 PWM 先保持 0% 输出，等整屏刷成黑色后再恢复用户亮度，避免上电花屏。
+    ret = mipi_backlight_pwm_init();
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "configure backlight failed: %s", esp_err_to_name(ret));
-        goto fail;
-    }
-    ret = gpio_set_level(MIPI_PIN_BL, 0);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "disable backlight failed: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "configure backlight PWM failed: %s", esp_err_to_name(ret));
         goto fail;
     }
 
@@ -368,9 +453,9 @@ esp_err_t fridge_display_mipi_init(void)
         ret = clr;
         goto fail;
     }
-    ret = gpio_set_level(MIPI_PIN_BL, 1);
+    ret = mipi_backlight_apply(true);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "enable backlight failed: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "enable backlight PWM failed: %s", esp_err_to_name(ret));
         goto fail;
     }
 
@@ -384,42 +469,247 @@ fail:
 
 esp_err_t fridge_display_mipi_fill_screen(uint16_t rgb565)
 {
-    if (!s_ready) {
-        return ESP_ERR_INVALID_STATE;
-    }
+    ESP_RETURN_ON_ERROR(fridge_display_mipi_begin_ui_render(), TAG, "display render busy");
     // 向当前可写帧缓冲写入单色，再整帧提交并翻页。
     uint16_t *fb = (uint16_t *)s_fb[s_fb_index];
     const size_t count = (size_t)FRIDGE_MIPI_WIDTH * FRIDGE_MIPI_HEIGHT;
     for (size_t i = 0; i < count; i++) {
         fb[i] = rgb565;
     }
-    esp_err_t ret = mipi_flush_full_fb(fb);
-    if (ret == ESP_OK) {
-        s_fb_index ^= 1;
-    }
+    esp_err_t ret = fridge_display_mipi_present_frame(fb);
+    fridge_display_mipi_end_ui_render();
     return ret;
 }
 
 esp_err_t fridge_display_mipi_render(fridge_mipi_paint_cb_t paint, void *ctx)
 {
-    if (!s_ready || !paint) {
+    if (!paint) {
         return ESP_ERR_INVALID_STATE;
     }
+    ESP_RETURN_ON_ERROR(fridge_display_mipi_begin_ui_render(), TAG, "display render busy");
     // 在当前离屏帧缓冲上绘制整屏图案，再整帧提交并翻页（零拷贝双缓冲）。
     uint16_t *fb = (uint16_t *)s_fb[s_fb_index];
     paint(fb, FRIDGE_MIPI_WIDTH, FRIDGE_MIPI_HEIGHT, ctx);
-    esp_err_t ret = mipi_flush_full_fb(fb);
+    esp_err_t ret = fridge_display_mipi_present_frame(fb);
+    fridge_display_mipi_end_ui_render();
+    return ret;
+}
+
+esp_err_t fridge_display_mipi_get_frame_buffers(void **fb0, void **fb1)
+{
+    if (!fb0 || !fb1) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!s_ready || !s_fb[0] || !s_fb[1]) {
+        *fb0 = NULL;
+        *fb1 = NULL;
+        return ESP_ERR_INVALID_STATE;
+    }
+    *fb0 = s_fb[0];
+    *fb1 = s_fb[1];
+    return ESP_OK;
+}
+
+esp_err_t fridge_display_mipi_get_ui_frame_buffers(void **write_fb, void **other_fb)
+{
+    if (!write_fb || !other_fb) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!s_ready || !s_present_lock) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (xSemaphoreTake(s_present_lock, pdMS_TO_TICKS(MIPI_FRAME_TIMEOUT_MS)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+    esp_err_t ret = ESP_OK;
+    if (s_camera_owns_fb || !s_fb[0] || !s_fb[1]) {
+        *write_fb = NULL;
+        *other_fb = NULL;
+        ret = ESP_ERR_INVALID_STATE;
+    } else {
+        // 调用者已经持有 UI render lock；present lock 只保护翻页索引的一致性。
+        *write_fb = s_fb[s_fb_index];
+        *other_fb = s_fb[s_fb_index ^ 1U];
+    }
+    xSemaphoreGive(s_present_lock);
+    return ret;
+}
+
+esp_err_t fridge_display_mipi_begin_ui_render(void)
+{
+    if (!s_ready || !s_render_lock || s_camera_owns_fb) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (xSemaphoreTake(s_render_lock, pdMS_TO_TICKS(MIPI_FRAME_TIMEOUT_MS)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+    // 摄像头可能在首次检查后抢先接管；持锁后必须再次确认所有权。
+    if (s_camera_owns_fb) {
+        xSemaphoreGive(s_render_lock);
+        return ESP_ERR_INVALID_STATE;
+    }
+    return ESP_OK;
+}
+
+void fridge_display_mipi_end_ui_render(void)
+{
+    if (s_render_lock) {
+        xSemaphoreGive(s_render_lock);
+    }
+}
+
+static esp_err_t present_frame_locked(void *frame_buffer, bool camera_caller)
+{
+    if (!s_ready || !frame_buffer) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (frame_buffer != s_fb[0] && frame_buffer != s_fb[1]) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (camera_caller != s_camera_owns_fb) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    esp_err_t ret = mipi_flush_full_fb(frame_buffer);
     if (ret == ESP_OK) {
-        s_fb_index ^= 1;
+        // LVGL 的下一次全屏绘制必须落到另一块未被 DPI 扫描的缓冲。
+        s_fb_index = frame_buffer == s_fb[0] ? 1 : 0;
     }
     return ret;
 }
 
+static esp_err_t present_frame_for_owner(void *frame_buffer, bool camera_caller)
+{
+    if (!s_present_lock) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (xSemaphoreTake(s_present_lock, pdMS_TO_TICKS(MIPI_FRAME_TIMEOUT_MS)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+    esp_err_t ret = present_frame_locked(frame_buffer, camera_caller);
+    xSemaphoreGive(s_present_lock);
+    return ret;
+}
+
+esp_err_t fridge_display_mipi_present_frame(void *frame_buffer)
+{
+    return present_frame_for_owner(frame_buffer, false);
+}
+
+esp_err_t fridge_display_mipi_present_camera_frame(void *frame_buffer)
+{
+    return present_frame_for_owner(frame_buffer, true);
+}
+
+esp_err_t fridge_display_mipi_get_camera_frame_buffers(void **write_fb, void **other_fb)
+{
+    if (!write_fb || !other_fb) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!s_ready || !s_present_lock) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (xSemaphoreTake(s_present_lock, pdMS_TO_TICKS(MIPI_FRAME_TIMEOUT_MS)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+    esp_err_t ret = ESP_OK;
+    if (!s_camera_owns_fb || !s_fb[0] || !s_fb[1]) {
+        *write_fb = NULL;
+        *other_fb = NULL;
+        ret = ESP_ERR_INVALID_STATE;
+    } else {
+        *write_fb = s_fb[s_fb_index];
+        *other_fb = s_fb[s_fb_index ^ 1U];
+    }
+    xSemaphoreGive(s_present_lock);
+    return ret;
+}
+
+esp_err_t fridge_display_mipi_acquire_for_camera(void)
+{
+    if (!s_ready || !s_present_lock || !s_render_lock) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    // 先等当前 LVGL 整轮渲染结束，并在整个预览期间持有，避免 renderer/PPA 双写。
+    if (xSemaphoreTake(s_render_lock, pdMS_TO_TICKS(MIPI_FRAME_TIMEOUT_MS)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+    if (xSemaphoreTake(s_present_lock, pdMS_TO_TICKS(MIPI_FRAME_TIMEOUT_MS)) != pdTRUE) {
+        xSemaphoreGive(s_render_lock);
+        return ESP_ERR_TIMEOUT;
+    }
+    if (s_camera_owns_fb) {
+        xSemaphoreGive(s_present_lock);
+        xSemaphoreGive(s_render_lock);
+        return ESP_OK;
+    }
+    s_camera_owns_fb = true;
+    xSemaphoreGive(s_present_lock);
+    ESP_LOGI(TAG, "DPI framebuffers acquired by camera preview");
+    return ESP_OK;
+}
+
+esp_err_t fridge_display_mipi_release_from_camera(void)
+{
+    if (!s_present_lock) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (xSemaphoreTake(s_present_lock, pdMS_TO_TICKS(MIPI_FRAME_TIMEOUT_MS)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+    if (!s_camera_owns_fb) {
+        xSemaphoreGive(s_present_lock);
+        return ESP_OK;
+    }
+    s_camera_owns_fb = false;
+    xSemaphoreGive(s_present_lock);
+    xSemaphoreGive(s_render_lock);
+    ESP_LOGI(TAG, "DPI framebuffers released from camera preview");
+    return ESP_OK;
+}
+
+bool fridge_display_mipi_camera_owns_framebuffers(void)
+{
+    return s_camera_owns_fb;
+}
+
 void fridge_display_mipi_set_backlight(bool on)
 {
-    if (s_ready) {
-        gpio_set_level(MIPI_PIN_BL, on ? 1 : 0);
+    if (!s_ready || !s_backlight_pwm_ready) {
+        return;
     }
+
+    esp_err_t err = mipi_backlight_apply(on);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "set backlight state failed: %s", esp_err_to_name(err));
+    }
+}
+
+esp_err_t fridge_display_mipi_set_brightness(uint8_t percent)
+{
+    if (percent < MIPI_BACKLIGHT_MIN_PERCENT || percent > MIPI_BACKLIGHT_MAX_PERCENT) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!s_ready || !s_backlight_pwm_ready) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    s_backlight_brightness_percent = percent;
+    esp_err_t err = mipi_backlight_apply(s_backlight_enabled);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "set backlight brightness failed: %s", esp_err_to_name(err));
+    }
+    return err;
+}
+
+uint8_t fridge_display_mipi_get_brightness(void)
+{
+    return s_backlight_brightness_percent;
+}
+
+bool fridge_display_mipi_is_backlight_enabled(void)
+{
+    return s_ready && s_backlight_enabled;
 }
 
 bool fridge_display_mipi_is_ready(void)

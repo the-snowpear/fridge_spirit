@@ -9,6 +9,8 @@
     "pages/inventory-detail/index",
     "pages/recipe/index",
     "pages/nutrition/index",
+    "pages/time-tools/index",
+    "pages/memory/index",
     "pages/shopping/index",
     "pages/reminders/index",
     "pages/offline/index",

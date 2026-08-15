@@ -928,7 +928,6 @@ static void build_ai_task_request_from_line(const char *line, fridge_ai_task_req
     }
     json_get_string(line, "userText", request->user_text, sizeof(request->user_text));
     request->include_inventory = json_get_bool(line, "includeInventory", true);
-    request->include_memory = json_get_bool(line, "includeMemory", true);
     request->include_reminders = json_get_bool(line, "includeReminders", true);
     request->include_preferences = json_get_bool(line, "includePreferences", true);
 }
@@ -1188,65 +1187,6 @@ static void handle_alarm_id_action(const char *line, const char *request_id, con
         return;
     }
     handle_get_kitchen_tools(request_id, command);
-}
-
-static void handle_get_memory_summary(const char *request_id, const char *command)
-{
-    char *memory = calloc(1, FRIDGE_STORAGE_MAX_MEMORY_LEN + 1);
-    if (!memory) {
-        send_error(request_id, command, "memory allocation failed");
-        return;
-    }
-
-    esp_err_t err = fridge_storage_get_memory_summary(memory, FRIDGE_STORAGE_MAX_MEMORY_LEN + 1);
-    if (err != ESP_OK) {
-        free(memory);
-        send_error(request_id, command, esp_err_to_name(err));
-        return;
-    }
-
-    response_begin(request_id, command, true);
-    fputs(",\"payload\":", stdout);
-    fputs(memory, stdout);
-    response_end();
-    free(memory);
-}
-
-static void handle_clear_memory_summary(const char *request_id, const char *command)
-{
-    esp_err_t err = fridge_storage_clear_memory_summary();
-    if (err != ESP_OK) {
-        send_error(request_id, command, esp_err_to_name(err));
-        return;
-    }
-    handle_get_memory_summary(request_id, command);
-}
-
-static void handle_set_memory_summary(const char *line, const char *request_id, const char *command)
-{
-    char *memory = calloc(1, FRIDGE_STORAGE_MAX_MEMORY_LEN + 1);
-    if (!memory) {
-        send_error(request_id, command, "memory allocation failed");
-        return;
-    }
-
-    bool found = json_get_object_raw(line, "memory", memory, FRIDGE_STORAGE_MAX_MEMORY_LEN + 1);
-    if (!found) {
-        found = json_get_object_raw(line, "payload", memory, FRIDGE_STORAGE_MAX_MEMORY_LEN + 1);
-    }
-    if (!found) {
-        free(memory);
-        send_error(request_id, command, "memory JSON object is required");
-        return;
-    }
-
-    esp_err_t err = fridge_storage_set_memory_summary(memory);
-    free(memory);
-    if (err != ESP_OK) {
-        send_error(request_id, command, esp_err_to_name(err));
-        return;
-    }
-    handle_get_memory_summary(request_id, command);
 }
 
 static void print_chat_history_payload(const fridge_storage_chat_history_t *history, size_t pruned_count)
@@ -2105,25 +2045,6 @@ static void handle_ai_assistant_chat(const char *line, const char *request_id, c
     }
 
     fridge_ai_action_result_t action_result = {0};
-    bool memory_updated = false;
-    const char *memory_marker = strstr(result->chat.reply, "MEMORY_OP:");
-    if (memory_marker) {
-        // WebUI 文字测试优先保证响应稳定返回；MEMORY_OP 会写 LittleFS，先不在 USB 响应路径同步落盘。
-        size_t visible_len = (size_t)(memory_marker - result->chat.reply);
-        while (visible_len > 0 && (result->chat.reply[visible_len - 1] == '\n' ||
-                                   result->chat.reply[visible_len - 1] == '\r' ||
-                                   result->chat.reply[visible_len - 1] == ' ')) {
-            visible_len--;
-        }
-        if (visible_len > FRIDGE_AI_MAX_REPLY_LEN) {
-            visible_len = FRIDGE_AI_MAX_REPLY_LEN;
-        }
-        memcpy(clean_ai_reply, result->chat.reply, visible_len);
-        clean_ai_reply[visible_len] = '\0';
-        strlcpy(result->chat.reply, clean_ai_reply, sizeof(result->chat.reply));
-        ESP_LOGW(TAG, "MEMORY_OP skipped on USB assistant response path to avoid synchronous flash write");
-    }
-
     esp_err_t action_err = fridge_ai_actions_strip_directives(result->chat.reply,
                                                               visible_reply,
                                                               FRIDGE_AI_MAX_REPLY_LEN + 1,
@@ -2173,8 +2094,6 @@ static void handle_ai_assistant_chat(const char *line, const char *request_id, c
     fputs(",\"historyPersisted\":", stdout);
     fputs(history_persisted ? "true" : "false", stdout);
     printf(",\"historyPrunedCount\":%u", (unsigned)(history_pruned_count + write_pruned_count));
-    fputs(",\"memoryUpdated\":", stdout);
-    fputs(memory_updated ? "true" : "false", stdout);
     fputs(",\"toolExecuted\":", stdout);
     fputs(tool_handled ? "true" : "false", stdout);
     fputs(",\"toolMessage\":", stdout);
@@ -2739,7 +2658,6 @@ static void handle_voice_chat_stop(const char *request_id, const char *command)
     size_t history_pruned_count = 0;
     fridge_ai_task_request_t context_request = {
         .include_inventory = true,
-        .include_memory = true,
         .include_reminders = true,
         .include_preferences = true,
     };
@@ -2826,12 +2744,6 @@ static void handle_voice_chat_stop(const char *request_id, const char *command)
         free(visible_reply);
         send_error(request_id, command, message);
         return;
-    }
-
-    bool memory_updated = false;
-    (void)fridge_storage_apply_memory_directive(ai->chat.reply, clean_reply, FRIDGE_VOICE_SESSION_REPLY_LEN + 1, &memory_updated);
-    if (clean_reply[0] != '\0') {
-        strlcpy(ai->chat.reply, clean_reply, sizeof(ai->chat.reply));
     }
 
     fridge_ai_action_result_t action_result = {0};
@@ -3823,12 +3735,6 @@ static void handle_line(const char *line)
         handle_get_ai_context_preview(line, request_id, command);
     } else if (strcmp(command, "test_ai_task") == 0) {
         handle_test_ai_task(line, request_id, command);
-    } else if (strcmp(command, "get_memory_summary") == 0) {
-        handle_get_memory_summary(request_id, command);
-    } else if (strcmp(command, "set_memory_summary") == 0) {
-        handle_set_memory_summary(line, request_id, command);
-    } else if (strcmp(command, "clear_memory_summary") == 0) {
-        handle_clear_memory_summary(request_id, command);
     } else if (strcmp(command, "get_chat_history") == 0) {
         handle_get_chat_history(request_id, command);
     } else if (strcmp(command, "clear_chat_history") == 0) {

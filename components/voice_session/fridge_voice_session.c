@@ -344,7 +344,6 @@ esp_err_t fridge_voice_session_run_latest_recording_ex(const fridge_voice_sessio
     if (err == ESP_OK) {
         fridge_ai_task_request_t context_request = {
             .include_inventory = true,
-            .include_memory = true,
             .include_reminders = true,
             .include_preferences = true,
         };
@@ -386,11 +385,7 @@ esp_err_t fridge_voice_session_run_latest_recording_ex(const fridge_voice_sessio
     }
 
     if (err == ESP_OK) {
-        bool memory_updated = false;
-        (void)fridge_storage_apply_memory_directive(ai->chat.reply,
-                                                    clean_reply,
-                                                    FRIDGE_VOICE_SESSION_REPLY_LEN + 1,
-                                                    &memory_updated);
+        strlcpy(clean_reply, ai->chat.reply, FRIDGE_VOICE_SESSION_REPLY_LEN + 1);
         if (clean_reply[0] != '\0') {
             strlcpy(ai->chat.reply, clean_reply, sizeof(ai->chat.reply));
         }
@@ -428,7 +423,7 @@ esp_err_t fridge_voice_session_run_latest_recording_ex(const fridge_voice_sessio
     }
 
     // TTS 播报放在历史写入和上报之后；此时录音早已结束，避免与麦克风 RX 争用同一组 BCLK/WS。
-    // ai->chat.reply 此时已经剥离 MEMORY_OP/工具指令，可直接作为屏幕展示和 TTS 文本。
+    // ai->chat.reply 此时已经剥离设备动作指令，可直接作为屏幕展示和 TTS 文本。
     if (err == ESP_OK && options && options->play_tts && ai->chat.reply[0] != '\0' &&
         fridge_speaker_get_tts_enabled()) {
         fridge_speaker_status_t speaker_status = {0};

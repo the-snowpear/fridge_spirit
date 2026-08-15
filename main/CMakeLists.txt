@@ -27,22 +27,37 @@ elseif(FRIDGE_MIPI_TEST_BUILD)
         esp_psram
     )
 else()
-    # 静态最小闭包保证首次 set-target（尚无 sdkconfig）也不会误拉入旧 UI/摄像头/ESP-SR。
-    # display_test 体积小且用于上电前单独验屏，因此和常规最小启动一并保留。
+    # 静态最小闭包保证首次 set-target（尚无 sdkconfig）也不会误拉入旧 S3 UI/SPI 屏/ESP-SR 全量业务。
+    # SPI/TR230S display 与 display_test 已移除；正常联调只用 MIPI-DSI（display_mipi）。
     set(fridge_main_requires
         nvs_flash
         network
         diagnostics
+        diagnostics_log
         usb_protocol
-        display_test
-        display
         display_mipi
         touch
+        sht4x
+        sensors
+        ui_p4
+        font_manager
+        ime
+        camera
+        screenshot
         audio
         asr
         wake_word
         voice_asr
         tfcard
+        agent_storage
+        mqtt_protocol
+        device_binding
+        tool_system
+        agent_runtime
+        trace_service
+        workflow_engine
+        skill_manager
+        glm_realtime
         app_update
         freertos
         heap

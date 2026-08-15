@@ -1,0 +1,65 @@
+/* ==================================================================
+ * 冰箱小精灵 ver2 —— 设计令牌（Design Tokens）
+ * 视觉风格：暖色 + 鼠尾草绿（延续 ver1 调色板，扩展语义色）
+ * 约束：字号仅 18/22/28/36/48/64（对齐固件 font_manager 字库角色），
+ *       圆角 ≤8px，触控目标 ≥48px，设备内纯色平铺（RGB565 友好）。
+ * ================================================================== */
+
+:root {
+  /* ---- 基础色板 ---- */
+  --paper:      #fffdf8;            /* 主背景（米白纸面） */
+  --surface:    #ffffff;            /* 卡片面 */
+  --cream:      #fff5e5;            /* 次级填充（暖奶油） */
+  --sage:       #5f8f72;            /* 主色：鼠尾草绿（按钮/选中） */
+  --sage-dark:  #2f6047;            /* 深主色（强调文字/标题点缀） */
+  --mint:       #dcefdc;            /* 浅绿填充（选中底/提示面） */
+  --tomato:     #d95745;            /* 强调红（临期/危险） */
+  --yolk:       #f6bf4f;            /* 蛋黄（警示） */
+  --ink:        #24342d;            /* 主文字 */
+  --muted:      #758078;            /* 次要文字 */
+  --line:       rgba(47, 96, 71, .18);  /* 分隔线/描边 */
+  --line-strong: rgba(47, 96, 71, .34);
+
+  /* ---- 语义色 ---- */
+  --ok:         var(--sage);
+  --warn:       var(--yolk);
+  --warn-ink:   #6b4e00;            /* 黄底上的深字 */
+  --danger:     var(--tomato);
+  --offline:    #9aa39d;
+  --info:       #4a7fa5;
+
+  /* 语义浅底（chip/pill/banner 背景用，平铺纯色） */
+  --ok-bg:      #dcefdc;
+  --warn-bg:    #fdeecd;
+  --danger-bg:  #f9e2de;
+  --offline-bg: #eceeed;
+  --info-bg:    #e2edf5;
+
+  /* ---- 字号（严格对应固件字库角色，禁止其他值） ---- */
+  --fs-cap:   18px;   /* BODY_SMALL 辅助/说明 */
+  --fs-body:  22px;   /* BODY 正文 */
+  --fs-sub:   28px;   /* TITLE 小标题/大按钮 */
+  --fs-title: 36px;   /* SECTION 区块标题 */
+  --fs-big:   48px;   /* LARGE 大数字 */
+  --fs-hero:  64px;   /* HUGE 计时/颜文字 */
+
+  /* ---- 间距（4 的倍数） ---- */
+  --sp-1: 4px;  --sp-2: 8px;  --sp-3: 12px;
+  --sp-4: 16px; --sp-5: 24px; --sp-6: 32px;
+
+  /* ---- 圆角（≤8px；胶囊用全圆角） ---- */
+  --r-s: 4px;
+  --r-m: 8px;
+  --r-pill: 999px;
+
+  /* ---- 触控尺寸 ---- */
+  --touch: 48px;        /* 最小触控高 */
+  --touch-lg: 64px;     /* 导航/侧舱大按钮 */
+
+  /* ---- 遮罩（LVGL obj + bg_opa 对应） ---- */
+  --scrim: rgba(36, 52, 45, .55);
+
+  /* ---- 字体栈（系统字体，无网络字体） ---- */
+  --font: "Microsoft YaHei", "PingFang SC", "Noto Sans SC", system-ui, sans-serif;
+  --font-mono: Consolas, "Courier New", monospace;
+}

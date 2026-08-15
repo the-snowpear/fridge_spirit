@@ -655,10 +655,71 @@ static cJSON *build_shopping_doc(const cJSON *root, int64_t generated_at)
         }
         const cJSON *checked = cJSON_GetObjectItemCaseSensitive(src_item, "checked");
         cJSON_AddBoolToObject(item, "checked", cJSON_IsBool(checked) ? cJSON_IsTrue(checked) : false);
+        // PLAN-06 兼容 schema v1：AI 未显式分组的条目固定进入“建议购买”，
+        // 不把 AI 输出误当作用户已经确认的待买或已购买项目。
+        char id[24];
+        snprintf(id, sizeof(id), "ai-%lld-%u", (long long)generated_at, (unsigned)(count + 1U));
+        cJSON_AddStringToObject(item, "id", id);
+        cJSON_AddStringToObject(item, "group", "建议购买");
+        cJSON_AddStringToObject(item, "source", "device_ai");
+        cJSON_AddStringToObject(item, "relation", "");
         cJSON_AddItemToArray(items, item);
         count++;
     }
     return doc;
+}
+
+static esp_err_t print_and_store(cJSON *doc, esp_err_t (*store_fn)(const char *));
+
+// AI 只追加或更新建议项，不能覆盖用户手动添加、待购买和已购买记录。
+// 存储层负责对最终文档做原子替换；这里先在内存 DOM 中完成有界合并。
+static esp_err_t merge_and_store_generated_shopping(cJSON *generated)
+{
+    if (!generated) return ESP_ERR_INVALID_ARG;
+    char stored[FRIDGE_STORAGE_MAX_JSON_LEN] = {0};
+    esp_err_t read_err = fridge_storage_get_shopping_list(stored, sizeof(stored));
+    if (read_err != ESP_OK) return read_err;
+    cJSON *current = cJSON_Parse(stored);
+    cJSON *current_items = current ? cJSON_GetObjectItemCaseSensitive(current, "items") : NULL;
+    cJSON *generated_items = cJSON_GetObjectItemCaseSensitive(generated, "items");
+    if (!current || !cJSON_IsObject(current) || !cJSON_IsArray(current_items) ||
+        !cJSON_IsArray(generated_items)) {
+        cJSON_Delete(current);
+        return print_and_store(generated, fridge_storage_set_shopping_list);
+    }
+    cJSON *source = cJSON_GetObjectItemCaseSensitive(current, "source");
+    if (!cJSON_IsString(source)) cJSON_AddStringToObject(current, "source", "local");
+    cJSON *candidate = NULL;
+    cJSON_ArrayForEach(candidate, generated_items) {
+        if (!cJSON_IsObject(candidate) || cJSON_GetArraySize(current_items) >= 8) break;
+        const cJSON *candidate_name = cJSON_GetObjectItemCaseSensitive(candidate, "name");
+        if (!cJSON_IsString(candidate_name) || !candidate_name->valuestring) continue;
+        cJSON *existing = NULL;
+        cJSON *entry = NULL;
+        cJSON_ArrayForEach(entry, current_items) {
+            const cJSON *name = cJSON_GetObjectItemCaseSensitive(entry, "name");
+            if (cJSON_IsString(name) && name->valuestring &&
+                strcmp(name->valuestring, candidate_name->valuestring) == 0) {
+                existing = entry;
+                break;
+            }
+        }
+        if (existing) {
+            const cJSON *group = cJSON_GetObjectItemCaseSensitive(existing, "group");
+            // 用户已经采纳或完成的同名项目不被 AI 重置。
+            if (cJSON_IsString(group) && strcmp(group->valuestring, "建议购买") != 0) continue;
+            cJSON_DeleteItemFromObject(existing, "reason");
+            cJSON_AddItemToObject(existing, "reason", cJSON_Duplicate(
+                cJSON_GetObjectItemCaseSensitive(candidate, "reason"), true));
+            continue;
+        }
+        cJSON *copy = cJSON_Duplicate(candidate, true);
+        if (!copy) { cJSON_Delete(current); return ESP_ERR_NO_MEM; }
+        cJSON_AddItemToArray(current_items, copy);
+    }
+    esp_err_t err = print_and_store(current, fridge_storage_set_shopping_list);
+    cJSON_Delete(current);
+    return err;
 }
 
 static esp_err_t print_and_store(cJSON *doc, esp_err_t (*store_fn)(const char *))
@@ -701,7 +762,7 @@ static esp_err_t store_generated_payload(const char *reply, int64_t generated_at
         err = print_and_store(nutrition_doc, fridge_storage_set_nutrition_cache);
     }
     if (err == ESP_OK) {
-        err = print_and_store(shopping_doc, fridge_storage_set_shopping_list);
+        err = merge_and_store_generated_shopping(shopping_doc);
     }
     cJSON_Delete(recipe_doc);
     cJSON_Delete(nutrition_doc);
@@ -735,7 +796,8 @@ static esp_err_t store_generated_page_payload(const char *reply, int64_t generat
     }
     cJSON_Delete(root);
     ESP_RETURN_ON_FALSE(doc && store_fn, ESP_ERR_NO_MEM, TAG, "build page doc failed");
-    esp_err_t err = print_and_store(doc, store_fn);
+    esp_err_t err = page == FRIDGE_KITCHEN_AI_PAGE_SHOPPING ?
+                        merge_and_store_generated_shopping(doc) : print_and_store(doc, store_fn);
     cJSON_Delete(doc);
     return err;
 }
@@ -792,10 +854,10 @@ static const char *page_prompt(fridge_kitchen_ai_page_t page)
     case FRIDGE_KITCHEN_AI_PAGE_NUTRITION:
         return "只输出营养助手页 JSON，禁止 Markdown/解释/代码块。根对象：{\"schema_version\":1,\"generated_at\":0,\"nutrition\":{\"score\":80,\"summary\":\"库存蔬菜偏少\",\"focus\":[\"补蔬菜\"],\"suggestions\":[\"晚餐加绿叶菜\"],\"restrict_note\":\"仅供日常参考\"}}。summary 32字内；focus 1-3条；suggestions 1-3条；restrict_note 必须说明非医疗建议；只基于库存、偏好、忌口和临期提醒。";
     case FRIDGE_KITCHEN_AI_PAGE_SHOPPING:
-        return "只输出购物清单页 JSON，禁止 Markdown/解释/代码块。根对象：{\"schema_version\":1,\"generated_at\":0,\"items\":[{\"name\":\"青菜\",\"quantity\":\"1把\",\"reason\":\"补充蔬菜\",\"priority\":\"high\",\"checked\":false}]}。items 可以为空数组，最多 5 项；priority 只能 high/normal/low；checked 必须 false；只采购补齐菜谱或营养缺口所需，不重复库存已有且充足的食材。";
+        return "只输出购物清单页 JSON，禁止 Markdown/解释/代码块。根对象：{\"schema_version\":1,\"generated_at\":0,\"items\":[{\"name\":\"青菜\",\"quantity\":\"1把\",\"reason\":\"补充蔬菜\",\"priority\":\"high\",\"checked\":false}]}。items 可以为空数组，最多 8 项；priority 只能 high/normal/low；checked 必须 false；只采购补齐菜谱或营养缺口所需，不重复库存已有且充足的食材。";
     case FRIDGE_KITCHEN_AI_PAGE_ALL:
     default:
-        return "任务：为 ESP32 冰箱屏幕一次性生成菜谱页、营养助手页、购物清单页的缓存内容。只输出 UTF-8 JSON object，禁止 Markdown、解释、代码块、前后缀。必须完全使用这些字段名：schema_version,generated_at,recipes,nutrition,shopping,title,tag,time_minutes,use_inventory,missing,steps,reason,score,summary,focus,suggestions,restrict_note,name,quantity,priority,checked。根对象固定：{\"schema_version\":1,\"generated_at\":0,\"recipes\":[{\"title\":\"番茄蛋汤\",\"tag\":\"快手\",\"time_minutes\":15,\"use_inventory\":[\"番茄\"],\"missing\":[],\"steps\":[\"洗切食材\",\"加热烹饪\"],\"reason\":\"优先消耗库存\"}],\"nutrition\":{\"score\":80,\"summary\":\"库存蔬菜偏少\",\"focus\":[\"补蔬菜\"],\"suggestions\":[\"晚餐加绿叶菜\"],\"restrict_note\":\"仅供日常参考\"},\"shopping\":[{\"name\":\"青菜\",\"quantity\":\"1把\",\"reason\":\"补充蔬菜\",\"priority\":\"high\",\"checked\":false}]}。recipes 必须 1-2 项；steps 至少 2 条；nutrition.focus 和 nutrition.suggestions 各 1-3 条；shopping 可以为空数组，最多 5 项；priority 只能 high、normal 或 low；checked 必须是 JSON boolean。内容必须基于项目上下文里的库存、临期、偏好和记忆；库存缺失时写 missing，不要编造已经有的库存。";
+        return "任务：为 ESP32 冰箱屏幕一次性生成菜谱页、营养助手页、购物清单页的缓存内容。只输出 UTF-8 JSON object，禁止 Markdown、解释、代码块、前后缀。必须完全使用这些字段名：schema_version,generated_at,recipes,nutrition,shopping,title,tag,time_minutes,use_inventory,missing,steps,reason,score,summary,focus,suggestions,restrict_note,name,quantity,priority,checked。根对象固定：{\"schema_version\":1,\"generated_at\":0,\"recipes\":[{\"title\":\"番茄蛋汤\",\"tag\":\"快手\",\"time_minutes\":15,\"use_inventory\":[\"番茄\"],\"missing\":[],\"steps\":[\"洗切食材\",\"加热烹饪\"],\"reason\":\"优先消耗库存\"}],\"nutrition\":{\"score\":80,\"summary\":\"库存蔬菜偏少\",\"focus\":[\"补蔬菜\"],\"suggestions\":[\"晚餐加绿叶菜\"],\"restrict_note\":\"仅供日常参考\"},\"shopping\":[{\"name\":\"青菜\",\"quantity\":\"1把\",\"reason\":\"补充蔬菜\",\"priority\":\"high\",\"checked\":false}]}。recipes 必须 1-2 项；steps 至少 2 条；nutrition.focus 和 nutrition.suggestions 各 1-3 条；shopping 可以为空数组，最多 8 项；priority 只能 high、normal 或 low；checked 必须是 JSON boolean。内容必须基于项目上下文里的库存、临期、偏好和记忆；库存缺失时写 missing，不要编造已经有的库存。";
     }
 }
 
@@ -860,7 +922,6 @@ static esp_err_t generate_now(fridge_kitchen_ai_trigger_t trigger, fridge_kitche
     context_req->include_preferences = true;
     // 单页生成优先保证 JSON 完整性：菜谱/营养/购物按钮只需要库存、提醒和偏好。
     // 记忆摘要里会带会话历史预览，部分兼容 API 容易因此提前截断菜谱 JSON。
-    context_req->include_memory = (page == FRIDGE_KITCHEN_AI_PAGE_ALL);
     err = fridge_ai_context_build_preview(context_req, preview);
     if (err != ESP_OK) {
         set_status_done(false, trigger, page, 0, 0, 0, "构建厨房 AI 上下文失败");

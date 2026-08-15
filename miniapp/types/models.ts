@@ -81,6 +81,11 @@ export interface InventoryItem {
   category?: string;
   quantity: number;
   unit: string;
+  /** P4 三级位置：分区 -> 层 -> 固定九宫格。 */
+  zoneId?: string;
+  layerId?: string;
+  /** 0~8，对应 A1~C3；未定位时为空。 */
+  cell?: number;
   /** "freezer" / "left" / "right" / "door" / "custom_*"；null 表示未分配。 */
   zone?: string;
   /** "A1"~"C3"；null 表示未分配。 */
@@ -113,9 +118,10 @@ export interface HomeOverview {
   lastSyncAt?: string;
 }
 
-/** 设备绑定请求（新版 `BindRequest`）。bindCode 不区分大小写，"DEMO" → 演示设备。 */
+/** P4 屏幕二维码中的一次性绑定凭据。 */
 export interface BindDevicePayload {
-  bindCode: string;
+  sessionId: string;
+  claimToken: string;
 }
 
 /** 提醒类型；与 backend ReminderSchema.reminder_type 透传一致。 */
@@ -127,7 +133,15 @@ export type ReminderType =
   | string;
 
 /** 提醒状态：pending / acked / dismissed。 */
-export type ReminderStatus = "pending" | "acked" | "dismissed" | string;
+export type ReminderStatus =
+  | "pending"
+  | "triggered"
+  | "completed"
+  | "cancelled"
+  | "canceled"
+  | "acked"
+  | "dismissed"
+  | string;
 
 /** 提醒条目（backend `ReminderSchema`）。 */
 export interface ReminderItem {
@@ -148,6 +162,10 @@ export interface ScanCandidate {
   category?: string;
   /** 服务端推荐 zone；null = 全部 zone 已满。 */
   suggestedZone?: string;
+  /** P4 推荐层 ID；与 suggestedZone 共同确定第二级位置。 */
+  suggestedLayerId?: string;
+  /** P4 九宫格索引 0~8。 */
+  suggestedCell?: number;
   /** 服务端推荐 slot；null = 推荐 zone 已满或无 zone。 */
   suggestedSlot?: string;
   /** 推荐原因（"同类食材优先合并" 等）。 */
@@ -206,6 +224,13 @@ export interface AiChatHistoryMessage {
 export interface AiChatHistoryData {
   sessionId: string;
   messages: AiChatHistoryMessage[];
+}
+
+export interface AgentSessionSummary {
+  sessionId: string;
+  title: string;
+  messageCount: number;
+  updatedAt?: string;
 }
 
 /** DELETE /ai/history 响应。 */
@@ -285,6 +310,13 @@ export interface PrivacySettings {
 export interface UserSettingsData {
   privacy: PrivacySettings;
   preferences: Record<string, unknown>;
+  deviceSn?: string;
+  timezone?: string;
+  locale?: string;
+  volumePercent?: number;
+  brightnessPercent?: number;
+  reminderEnabled?: boolean;
+  agentVoiceEnabled?: boolean;
   updatedAt?: string;
 }
 
@@ -300,6 +332,9 @@ export interface InventoryWritePayload {
   category?: string;
   quantity?: number;
   unit?: string;
+  zoneId?: string;
+  layerId?: string;
+  cell?: number;
   zone?: string;
   slot?: string;
   location?: string;
@@ -339,7 +374,7 @@ export interface ShoppingItem {
   id: string;
   name: string;
   quantityText: string;
-  source: "ai" | "manual" | "expire" | "recipe";
+  source: "ai" | "manual" | "expire" | "recipe" | "device";
   sourceText: string;
   checked: boolean;
   createdAt: number;
@@ -407,41 +442,127 @@ export interface FridgeZoneUpdateRequest {
 /** 同步事件域。 */
 export type SyncDomain =
   | "inventory"
-  | "fridge_zones"
   | "ai_config"
-  | "settings"
-  | "reminder"
-  | "shopping_list"
-  | "recipe_cache"
-  | "nutrition_cache"
-  | "ai_history"
+  | "device_settings"
+  | "reminders"
+  | "shopping"
+  | "recipes"
+  | "nutrition"
+  | "timers"
+  | "alarms"
+  | "stopwatch"
+  | "agent_sessions"
+  | "agent_memory"
   | string;
 
 /** 本地或服务端同步事件。 */
 export interface SyncEvent {
-  id?: string;
-  clientEventId: string;
+  eventId: string;
   domain: SyncDomain;
-  op: string;
-  source: "miniapp" | "device" | "server" | string;
+  entityId: string;
+  operation: "upsert" | "delete" | "append";
+  baseEntityRevision: number;
+  data: Record<string, unknown>;
+  entityRevision?: number;
   serverRevision?: number;
-  clientRevision?: number;
-  deviceSn?: string;
-  payload: Record<string, unknown>;
+  source?: "miniapp" | "device" | "server" | string;
   createdAt?: string;
 }
 
-/** POST /sync/push 请求。 */
+/** P4 计时器同步实体；兼容固件现有 durationSeconds/dueAtEpochMs。 */
+export interface TimerItem {
+  id: string;
+  label: string;
+  durationMs: number;
+  accumulatedMs: number;
+  startedAt?: number;
+  dueAt?: number;
+  state: "running" | "paused" | "done" | "cancelled" | string;
+  source?: string;
+}
+
+/** P4 闹钟同步实体。 */
+export interface AlarmItem {
+  id: string;
+  label: string;
+  enabled: boolean;
+  hour: number;
+  minute: number;
+  timezone?: string;
+  weekdayMask: number;
+  onceAt?: number;
+  sound?: string;
+  speechText?: string;
+  source?: string;
+}
+
+/** 家庭唯一秒表同步实体。 */
+export interface StopwatchItem {
+  id: string;
+  state: "idle" | "running" | "paused" | string;
+  accumulatedMs: number;
+  startedAt?: number;
+  lapsMs: number[];
+}
+
+/** Agent 家庭共享记忆；页面默认只读，避免误删家庭偏好。 */
+export interface AgentMemoryItem {
+  id: string;
+  kind: "structured" | "markdown" | string;
+  text: string;
+  tags: string[];
+  source?: string;
+  category?: string;
+  createdAt?: number;
+}
+
+/** 营养域里的逐条饮食记录；与营养建议缓存可并存。 */
+export interface NutritionRecord {
+  id: string;
+  title: string;
+  consumedAt?: number;
+  caloriesKcal?: number;
+  proteinG?: number;
+  fatG?: number;
+  carbohydrateG?: number;
+  sodiumMg?: number;
+  note?: string;
+  source?: string;
+}
+
+/** P4 库存第二级：一个分区下可有多层，每层固定九宫格。 */
+export interface FridgeLayerConfig {
+  id: string;
+  zoneId: string;
+  name: string;
+  order: number;
+}
+
+/** POST /sync/events 请求。 */
 export interface SyncPushRequest {
   events: SyncEvent[];
 }
 
-/** POST /sync/push 响应。 */
+/** POST /sync/events 响应。 */
 export interface SyncPushData {
   serverRevision: number;
-  accepted: number;
-  duplicates: number;
-  events: SyncEvent[];
+  accepted: SyncEvent[];
+  duplicates: string[];
+  conflicts: SyncConflict[];
+}
+
+export interface SyncConflict {
+  eventId: string;
+  domain: SyncDomain;
+  entityId: string;
+  expectedRevision: number;
+  actualRevision: number;
+  serverEntity?: {
+    entityId: string;
+    entityRevision: number;
+    deleted: boolean;
+    data: Record<string, unknown>;
+  };
 }
 
 /** POST /sync/device-push 请求。 */
@@ -481,22 +602,31 @@ export interface SyncStatusData {
 export interface SyncSnapshotData {
   serverRevision: number;
   generatedAt: string;
-  inventory: InventoryItem[];
-  fridgeZones: FridgeZoneConfig[];
+  domains: Record<string, SyncSnapshotEntity[]>;
+  inventory?: InventoryItem[];
+  fridgeZones?: FridgeZoneConfig[];
   aiConfig?: AiConfigData;
-  reminders: ReminderItem[];
-  shoppingList: { items: Record<string, unknown>[]; updatedAt?: string };
-  recipeCache: { items: Record<string, unknown>[]; updatedAt?: string };
+  reminders?: ReminderItem[];
+  shoppingList?: { items: Record<string, unknown>[]; updatedAt?: string };
+  recipeCache?: { items: Record<string, unknown>[]; updatedAt?: string };
   nutritionCache?: NutritionCache;
   settings?: Record<string, unknown>;
   aiHistory?: { sessionId: string; messages: Record<string, unknown>[] };
 }
 
-/** GET /sync/pull 响应。 */
+export interface SyncSnapshotEntity {
+  entityId: string;
+  entityRevision: number;
+  serverRevision: number;
+  data: Record<string, unknown>;
+}
+
+/** GET /sync/events 响应。 */
 export interface SyncPullData {
   serverRevision: number;
+  latestServerRevision: number;
+  hasMore: boolean;
   events: SyncEvent[];
-  snapshot?: SyncSnapshotData;
 }
 
 /** 小程序本地同步状态。 */
@@ -507,6 +637,7 @@ export interface LocalSyncState {
   initialDevicePulledAt?: number;
   lastSyncError?: string;
   dirtyDomains: SyncDomain[];
+  conflicts?: SyncConflict[];
 }
 
 /** 微信订阅/通知登记请求。 */

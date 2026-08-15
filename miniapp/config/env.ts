@@ -15,14 +15,11 @@ export const DEFAULT_API_CONFIG: ApiConfig = {
   mockEnabled: false,
 };
 
-/** API 版本前缀，与 backend `api_router` 挂载在 /api/v1 一致。 */
-export const API_PREFIX = "/api/v1";
+/** P4 Agent 对外接口统一使用 v2；旧 S3 `/api/v1` 不再兼容。 */
+export const API_PREFIX = "/api/v2";
 
 /** AI / Scan 类长接口的临时超时；超过普通 15s，避免设备转发或视觉模型还没回就被掐。 */
 export const LONG_REQUEST_TIMEOUT_MS = 60_000;
 
 /** 默认家庭名（首屏占位用）。 */
 export const DEFAULT_HOME_NAME = "我的冰箱";
-
-/** 演示设备绑定码：与 backend lifespan 种子里 DEMO-FRIDGE-001 配套。 */
-export const DEMO_BIND_CODE = "DEMO";

@@ -5,9 +5,9 @@
  * 生成结果会写入本地缓存并通过三端同步队列推送到云端和设备。
  */
 
-import { getInventory, sendAiChat } from "../../services/api";
+import { getInventory, getNutritionRecords, sendAiChat } from "../../services/api";
 import { enqueueSyncOp, syncNow } from "../../services/sync";
-import type { InventoryItem, NutritionCache } from "../../types/models";
+import type { InventoryItem, NutritionCache, NutritionRecord } from "../../types/models";
 import { getNutritionCache, saveNutritionCache } from "../../utils/localFeatures";
 import { formatInventoryQuantity } from "../../utils/quantity";
 
@@ -20,25 +20,55 @@ type NutritionView = {
   generatedText: string;
 };
 
+type NutritionRecordView = NutritionRecord & {
+  consumedText: string;
+  nutrientText: string;
+};
+
 Page({
   data: {
     loading: false,
     errorText: "",
     view: buildFallbackView(null as NutritionCache | null),
+    records: [] as NutritionRecordView[],
     rawReply: "",
   },
 
   onShow() {
     this.applyCache(getNutritionCache());
+    void this.loadRecords();
   },
 
   onCloudSyncApplied() {
     if (this.data.loading) return;
     this.applyCache(getNutritionCache());
+    void this.loadRecords();
   },
 
   applyCache(cache: NutritionCache | null) {
     this.setData({ view: buildFallbackView(cache) });
+  },
+
+  async loadRecords() {
+    try {
+      const records = await getNutritionRecords();
+      this.setData({
+        records: records.map((record) => ({
+          ...record,
+          consumedText: record.consumedAt
+            ? new Date(record.consumedAt).toLocaleString()
+            : "时间未记录",
+          nutrientText: [
+            record.caloriesKcal != null ? `${record.caloriesKcal} kcal` : "",
+            record.proteinG != null ? `蛋白质 ${record.proteinG}g` : "",
+            record.fatG != null ? `脂肪 ${record.fatG}g` : "",
+            record.carbohydrateG != null ? `碳水 ${record.carbohydrateG}g` : "",
+          ].filter(Boolean).join(" · ") || "营养值未记录",
+        })),
+      });
+    } catch {
+      // 营养建议仍可离线显示；记录同步失败不覆盖已有内容。
+    }
   },
 
   async onTapRefresh() {

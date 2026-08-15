@@ -73,27 +73,49 @@
     </view>
   </block>
 
-  <block wx:elif="{{placeMode === 'slot'}}">
+  <block wx:elif="{{placeMode === 'layer'}}">
     <view class="panel place-select-panel">
-      <view class="place-mode-hint">已选择 {{choosingZoneLabel}}，再点击一个格位</view>
-      <view class="place-grid-board">
+      <view class="place-mode-hint">已选择 {{choosingZoneLabel}}，请选择层</view>
+      <view class="place-layer-list">
         <view
-          wx:for="{{slotOptions}}"
-          wx:key="value"
-          class="place-slot {{item.value === selectedSlotValue && choosingZoneIndex === zoneIndex ? 'is-selected' : ''}}"
-          data-value="{{item.value}}"
-          bindtap="onTapPlaceSlot"
+          wx:for="{{layerOptions}}"
+          wx:key="id"
+          class="place-layer {{item.id === selectedLayerValue && choosingZoneIndex === zoneIndex ? 'is-selected' : ''}}"
+          data-value="{{item.id}}"
+          bindtap="onTapPlaceLayer"
         >
-          <view class="slot-code">{{item.shortLabel}}</view>
-          <view class="slot-main">
-            <view class="slot-food">空位</view>
-            <view class="slot-amount">点击放入</view>
-          </view>
-          <view class="slot-expire">位置 {{item.label}}</view>
+          <view class="slot-food">{{item.name}}</view>
+          <view class="slot-amount">3 × 3 格位</view>
         </view>
       </view>
       <view class="row place-action-row">
         <button class="btn ghost place-action" bindtap="backToPlaceZones">重选空间</button>
+        <button class="btn secondary place-action" bindtap="cancelPlaceSelection">取消</button>
+      </view>
+    </view>
+  </block>
+
+  <block wx:elif="{{placeMode === 'cell'}}">
+    <view class="panel place-select-panel">
+      <view class="place-mode-hint">已选择 {{choosingZoneLabel}} / {{choosingLayerLabel}}，请选择格位</view>
+      <view class="place-grid-board">
+        <view
+          wx:for="{{cellOptions}}"
+          wx:key="value"
+          class="place-slot {{item.value === selectedCellValue && choosingLayerIndex === layerIndex ? 'is-selected' : ''}}"
+          data-value="{{item.value}}"
+          bindtap="onTapPlaceCell"
+        >
+          <view class="slot-code">{{item.label}}</view>
+          <view class="slot-main">
+            <view class="slot-food">空位</view>
+            <view class="slot-amount">点击放入</view>
+          </view>
+          <view class="slot-expire">格位 {{item.label}}</view>
+        </view>
+      </view>
+      <view class="row place-action-row">
+        <button class="btn ghost place-action" bindtap="backToPlaceLayers">重选层</button>
         <button class="btn secondary place-action" bindtap="cancelPlaceSelection">取消</button>
       </view>
     </view>

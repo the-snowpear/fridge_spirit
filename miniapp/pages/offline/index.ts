@@ -7,7 +7,7 @@
 import { getHomeOverview, getInventory, getReminders } from "../../services/api";
 import { getLocalSyncState, getSyncQueue, syncNow } from "../../services/sync";
 import type { InventoryItem, OfflineSnapshot, ReminderItem } from "../../types/models";
-import { displayPlace } from "../../utils/fridgeZones";
+import { displayInventoryPlace } from "../../utils/fridgeZones";
 import { getOfflineSnapshot, updateOfflineSnapshot } from "../../utils/localFeatures";
 import { formatInventoryQuantity } from "../../utils/quantity";
 
@@ -50,7 +50,8 @@ Page({
     const overview = snapshot.overview || null;
     const inventory = (snapshot.inventoryItems || []).slice(0, 8).map((item) => ({
       ...item,
-      placeText: item.location || displayPlace(item.zone, item.slot),
+      placeText:
+        item.location || displayInventoryPlace(item.zoneId, item.layerId, item.cell),
       quantityText: formatInventoryQuantity(item),
       expireText: item.expireDate ? item.expireDate : "未设置到期",
     }));

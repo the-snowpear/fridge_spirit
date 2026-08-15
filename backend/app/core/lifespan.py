@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -29,8 +31,20 @@ from app.models.home import Home, HomeMember
 from app.models.inventory import InventoryItem
 from app.models.user import User
 from app.services.mqtt_client import shutdown_mqtt_client, startup_mqtt_client
+from app.services.p4_binding import cleanup_expired_binding_sessions
 
 logger = logging.getLogger(__name__)
+
+
+async def _binding_cleanup_loop() -> None:
+    """每分钟让过期二维码失效并清掉一次性设备凭据。"""
+    while True:
+        await asyncio.sleep(60)
+        try:
+            async with AsyncSessionLocal() as db:
+                await cleanup_expired_binding_sessions(db)
+        except Exception:  # noqa: BLE001
+            logger.exception("P4 binding session cleanup failed")
 
 
 # 演示用固定标识：在 backend 启动种子里写死，
@@ -166,8 +180,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # ---- 3. 启动 MQTT 客户端 ----
     await startup_mqtt_client(app)
+    cleanup_task = asyncio.create_task(_binding_cleanup_loop())
 
     yield
 
     # ---- 4. 关闭 MQTT 客户端 ----
+    cleanup_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await cleanup_task
     await shutdown_mqtt_client(app)

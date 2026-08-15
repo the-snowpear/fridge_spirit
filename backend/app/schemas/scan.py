@@ -22,6 +22,10 @@ class ScanCandidate(CamelModel):
     category: str | None = None
     # 推荐区域：freezer / left / right / door / custom_*；为 None 表示无法推荐（例如所有区域已满）。
     suggested_zone: str | None = None
+    # P4 三级位置第二级：层 ID，例如 freezer/f1、left/l2。
+    suggested_layer_id: str | None = None
+    # P4 固定九宫格索引 0~8；与 suggested_slot(A1~C3) 等价。
+    suggested_cell: int | None = None
     # 推荐 slot：A1~C3；为 None 表示该 zone 已满或未给出 zone。
     suggested_slot: str | None = None
     # 推荐原因，便于前端展示给用户（例如「同类食材优先合并」/「按类别推荐空位」）。

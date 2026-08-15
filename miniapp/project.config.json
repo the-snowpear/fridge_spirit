@@ -29,7 +29,7 @@
       "outputPath": ""
     }
   },
-  "appid": "wx97f299d3e4e7f8ec",
+  "appid": "touristappid",
   "projectname": "fridge_spirit_miniapp",
   "condition": {},
   "simulatorPluginLibVersion": {},
@@ -37,5 +37,6 @@
     "ignore": [],
     "include": []
   },
-  "editorSetting": {}
+  "editorSetting": {},
+  "libVersion": "3.14.2"
 }

@@ -1,0 +1,393 @@
+/* ==================================================================
+ * 冰箱小精灵 ver2 —— 计划模块独有布局（PLAN-01..06）
+ * 约定：新类统一 plan- 前缀；只用 flex/grid；字号仅用 6 档令牌；
+ *       圆角 ≤8px；触控目标 ≥48px；设备内纯色平铺。
+ * ================================================================== */
+
+/* ---------------- 公共：冲突红点 / 冲突警告行 / 次级说明 ---------------- */
+.plan-dot {
+  display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+  background: var(--tomato); flex: none; margin-left: 4px;
+}
+.plan-conflict {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  background: var(--danger-bg); color: var(--danger);
+  border-radius: var(--r-m); padding: 6px var(--sp-3);
+  font-size: var(--fs-cap); line-height: 1.4;
+}
+.plan-conflict .ic { flex: none; }
+.plan-conflict a { color: var(--danger); font-weight: 600; text-decoration: underline; cursor: pointer; }
+.plan-ok-line {
+  display: flex; align-items: center; gap: 6px;
+  color: var(--sage-dark); font-size: var(--fs-cap);
+  background: var(--ok-bg); border-radius: var(--r-m); padding: 6px var(--sp-3);
+}
+.plan-ok-line .ic { flex: none; }
+.plan-sub-line { font-size: var(--fs-cap); color: var(--muted); line-height: 1.5; }
+
+/* ==================== PLAN-01 计划总览 ==================== */
+
+/* 滚动体：主区内完整浏览，避免竖屏被导航/状态舱裁切 */
+.plan-body { padding-bottom: var(--sp-2); }
+.plan-scroll {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  padding-bottom: var(--sp-3);
+}
+
+/* 上半区：左今日菜单大卡 + 右购物/临期堆叠 */
+.plan-cols-2 { display: grid; grid-template-columns: 1.2fr 1fr; gap: var(--sp-4); align-items: start; }
+.plan-col-side { display: flex; flex-direction: column; gap: var(--sp-4); }
+
+/* 今日菜单：早/午/晚/加餐 纵向列表（餐次左、菜名右，一行一项） */
+.plan-today-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.plan-slot {
+  background: var(--cream);
+  border: 1px solid var(--line);
+  border-radius: var(--r-m);
+  padding: 12px 14px;
+  min-height: 48px;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 12px;
+}
+.plan-slot.empty { opacity: .7; border-style: dashed; }
+.plan-slot-meal {
+  flex: none;
+  min-width: 2.5em;
+  font-size: var(--fs-cap);
+  color: var(--muted);
+  font-weight: 600;
+  line-height: 1.3;
+}
+.plan-slot-dish {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--fs-body);
+  font-weight: 600;
+  color: var(--ink);
+  line-height: 1.35;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.plan-slot-none { color: var(--muted); font-weight: 400; font-size: var(--fs-cap); }
+
+/* 本周菜单：7 天 mini 摘要条 */
+.plan-week-strip { display: grid; grid-template-columns: repeat(7, 1fr); gap: var(--sp-2); }
+.plan-mini-day {
+  position: relative; display: flex; flex-direction: column; align-items: center; gap: 4px;
+  min-height: 64px; padding: var(--sp-2) 4px;
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-m);
+  cursor: pointer;
+}
+.plan-mini-day:hover { background: var(--cream); }
+.plan-mini-day.today { border-color: var(--sage); background: var(--mint); }
+.plan-mini-day.cur { box-shadow: 0 0 0 2px var(--sage); }
+.plan-mini-day .plan-dot { position: absolute; top: 6px; right: 6px; margin: 0; }
+.plan-mini-wd { font-size: var(--fs-cap); color: var(--muted); font-weight: 600; }
+.plan-mini-day.today .plan-mini-wd { color: var(--sage-dark); }
+.plan-mini-dish {
+  font-size: var(--fs-cap); color: var(--ink); text-align: center; line-height: 1.2;
+  overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+}
+
+/* 购物清单摘要（两枚 stat 卡，整卡可点） */
+.plan-shop-sum { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-3); cursor: pointer; }
+
+/* Agent 待采纳计划卡 */
+.plan-agent-card {
+  display: flex; align-items: center; gap: var(--sp-3);
+  background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--r-m);
+  padding: var(--sp-3) var(--sp-4);
+}
+.plan-agent-icon {
+  width: 44px; height: 44px; flex: none; border-radius: 50%;
+  background: var(--mint); color: var(--sage-dark);
+  display: flex; align-items: center; justify-content: center;
+}
+.plan-agent-text { flex: 1; min-width: 0; }
+.plan-agent-title { font-size: var(--fs-body); font-weight: 600; }
+.plan-agent-sub { font-size: var(--fs-cap); color: var(--muted); }
+.plan-agent-btns { display: flex; gap: var(--sp-2); flex: none; }
+
+/* ==================== PLAN-02 日/周菜单 ==================== */
+
+/* 顶部：日/周 seg + 日期 chips */
+.plan-menu-bar { display: flex; align-items: center; gap: var(--sp-4); flex-wrap: wrap; }
+.plan-day-chips { display: flex; gap: var(--sp-2); flex-wrap: wrap; }
+.plan-day-chip {
+  position: relative; min-height: var(--touch); padding: 0 var(--sp-3);
+  border-radius: var(--r-m); background: var(--surface); border: 1px solid var(--line);
+  font-size: var(--fs-cap); color: var(--muted); cursor: pointer;
+  display: inline-flex; align-items: center;
+}
+.plan-day-chip:hover { background: var(--cream); }
+.plan-day-chip.on { background: var(--sage); border-color: var(--sage); color: #fff; font-weight: 600; }
+.plan-day-chip.today:not(.on) { border-color: var(--sage); color: var(--sage-dark); }
+.plan-day-chip .plan-dot { position: absolute; top: 4px; right: 4px; margin: 0; }
+
+/* 日视图：4 个餐次大卡（2×2） */
+.plan-day-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-4); }
+.plan-meal-card {
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-m);
+  padding: var(--sp-4); display: flex; flex-direction: column; gap: var(--sp-2);
+}
+.plan-meal-card.empty { border-style: dashed; justify-content: center; align-items: flex-start; }
+.plan-meal-head { display: flex; align-items: center; gap: var(--sp-2); }
+.plan-meal-name { font-size: var(--fs-body); font-weight: 600; color: var(--sage-dark); }
+.plan-meal-time {
+  margin-left: auto; display: inline-flex; align-items: center; gap: 4px;
+  font-size: var(--fs-cap); color: var(--muted);
+}
+.plan-meal-dish { font-size: var(--fs-sub); font-weight: 600; color: var(--ink); line-height: 1.25; }
+.plan-meal-use { font-size: var(--fs-cap); color: var(--muted); }
+.plan-meal-none { font-size: var(--fs-body); color: var(--muted); }
+.plan-meal-ops { display: flex; gap: var(--sp-2); flex-wrap: wrap; margin-top: auto; }
+
+/* 周视图：7 列 × (表头 + 4 餐次) 紧凑表格 */
+.plan-week-table { display: flex; flex-direction: column; gap: 4px; }
+.plan-wt-row { display: grid; grid-template-columns: 64px repeat(7, 1fr); gap: 4px; }
+.plan-wt-corner,
+.plan-wt-meal {
+  display: flex; align-items: center; justify-content: center;
+  font-size: var(--fs-cap); color: var(--muted); font-weight: 600;
+}
+.plan-wt-dayh {
+  position: relative; display: flex; align-items: center; justify-content: center;
+  min-height: 40px; font-size: var(--fs-cap); font-weight: 600; color: var(--muted);
+  background: var(--cream); border-radius: var(--r-s);
+}
+.plan-wt-dayh.today { background: var(--mint); color: var(--sage-dark); }
+.plan-wt-dayh .plan-dot { position: absolute; top: 3px; right: 3px; margin: 0; }
+.plan-wt-cell {
+  min-height: 52px; padding: 4px; display: flex; align-items: center; justify-content: center;
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-s);
+  font-size: var(--fs-cap); color: var(--ink); text-align: center; line-height: 1.2; cursor: pointer;
+  overflow: hidden;
+}
+.plan-wt-cell:hover { background: var(--cream); border-color: var(--sage); }
+.plan-wt-cell.empty { background: var(--paper); }
+.plan-wt-cell.today-col { background: var(--mint); }
+.plan-wt-none { color: var(--line-strong); }
+.plan-table-hint {
+  display: flex; align-items: center; gap: 6px;
+  font-size: var(--fs-cap); color: var(--muted);
+}
+.plan-table-hint .ic { flex: none; color: var(--sage-dark); }
+
+/* ==================== PLAN-03 菜谱库 ==================== */
+
+.plan-recipe-bar { display: flex; align-items: center; gap: var(--sp-4); flex-wrap: wrap; }
+.plan-search {
+  display: inline-flex; align-items: center; gap: var(--sp-2);
+  min-height: var(--touch); min-width: 220px; padding: 0 var(--sp-3);
+  background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--r-m);
+  font-size: var(--fs-body); color: var(--ink); cursor: pointer;
+}
+.plan-search .ph { color: var(--muted); }
+.plan-recipe-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-4); }
+
+/* ==================== PLAN-04 菜谱详情 ==================== */
+
+.plan-detail-head { display: flex; gap: var(--sp-4); align-items: stretch; }
+.plan-detail-img { width: 200px; height: 200px; flex: none; }
+.plan-detail-meta { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: var(--sp-3); }
+.plan-detail-name { font-size: var(--fs-title); font-weight: 700; color: var(--ink); display: flex; align-items: center; gap: var(--sp-2); }
+.plan-detail-tags { display: flex; gap: var(--sp-2); flex-wrap: wrap; }
+.plan-coverage { display: flex; flex-direction: column; gap: 6px; }
+.plan-coverage-label { font-size: var(--fs-cap); color: var(--muted); }
+
+.plan-detail-cols { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-4); align-items: start; }
+.plan-use .card-body,
+.plan-steps-card .card-body { gap: var(--sp-2); }
+
+/* 步骤摘要：编号列表 */
+.plan-steps { display: flex; flex-direction: column; gap: var(--sp-2); }
+.plan-step-row { display: flex; gap: var(--sp-3); align-items: flex-start; }
+.plan-step-no {
+  width: 32px; height: 32px; flex: none; border-radius: 50%;
+  background: var(--mint); color: var(--sage-dark);
+  display: flex; align-items: center; justify-content: center;
+  font-size: var(--fs-cap); font-weight: 700;
+}
+.plan-step-text { font-size: var(--fs-body); line-height: 1.4; padding-top: 3px; }
+
+/* ==================== PLAN-05 烹饪模式（单步大字） ==================== */
+
+.plan-cook .pg-body { gap: var(--sp-4); }
+.plan-cook-top { display: flex; flex-direction: column; gap: var(--sp-2); }
+.plan-cook-progress-info {
+  display: flex; justify-content: space-between;
+  font-size: var(--fs-body); font-weight: 600; color: var(--sage-dark);
+}
+.plan-cook-stage {
+  flex: 1; min-height: 0; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: var(--sp-4); text-align: center;
+}
+.plan-cook-no { font-size: var(--fs-hero); font-weight: 700; color: var(--sage); line-height: 1; }
+.plan-cook-text { font-size: var(--fs-title); font-weight: 600; color: var(--ink); line-height: 1.3; max-width: 560px; }
+.plan-cook-ings { display: flex; gap: var(--sp-2); flex-wrap: wrap; justify-content: center; }
+.plan-cook-timerbtn {
+  display: inline-flex; align-items: center; gap: var(--sp-2);
+  min-height: var(--touch-lg); padding: 0 var(--sp-6);
+  background: var(--cream); border: 1px solid var(--line-strong); border-radius: var(--r-m);
+  font-size: var(--fs-sub); color: var(--sage-dark); cursor: pointer;
+}
+.plan-cook-timerbtn:hover { background: var(--mint); }
+.plan-cook-hint {
+  display: flex; align-items: center; gap: 6px;
+  font-size: var(--fs-cap); color: var(--muted);
+}
+.plan-cook-hint .ic { flex: none; color: var(--sage-dark); }
+.plan-cook-foot .btn.big { flex: 1; }
+
+/* ==================== PLAN-06 购物清单 ==================== */
+
+.plan-sync-line { display: flex; align-items: center; gap: 4px; padding: 0 4px; }
+.plan-shop-sort { display: flex; align-items: center; gap: var(--sp-3); }
+.plan-sort-label { font-size: var(--fs-cap); color: var(--muted); }
+.plan-shop-group { display: flex; flex-direction: column; gap: var(--sp-2); }
+
+.plan-shop-row {
+  display: flex; align-items: center; gap: var(--sp-3);
+  min-height: 64px; padding: 6px var(--sp-3);
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-m);
+}
+.plan-shop-row.bought { opacity: .75; }
+.plan-check {
+  width: 32px; height: 32px; flex: none; border-radius: 50%;
+  border: 2px solid var(--line-strong); background: var(--surface); color: #fff;
+  display: flex; align-items: center; justify-content: center; cursor: pointer;
+}
+.plan-check.on { background: var(--sage); border-color: var(--sage); }
+.plan-shop-main { flex: 1; min-width: 0; }
+.plan-shop-name { font-size: var(--fs-body); font-weight: 600; }
+.plan-shop-row.bought .plan-shop-name { text-decoration: line-through; color: var(--muted); }
+.plan-shop-sub { font-size: var(--fs-cap); color: var(--muted); margin-top: 1px; }
+.plan-shop-side { flex: none; display: flex; align-items: center; gap: var(--sp-2); }
+
+/* ==================== 竖屏隐私：计划页窄主区适配（600 宽） ====================
+ * 双栏改单列；本周 7 天条可横滑；长文案限行，避免被导航/状态舱「切腰」。
+ * ================================================================== */
+
+#stage.mode-portrait .plan-body {
+  padding: var(--sp-3);
+  gap: var(--sp-3);
+  overflow: hidden;
+}
+
+#stage.mode-portrait .plan-scroll {
+  gap: var(--sp-3);
+  padding-bottom: var(--sp-5);
+}
+
+#stage.mode-portrait .plan-cols-2 {
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--sp-3);
+}
+
+#stage.mode-portrait .plan-col-side {
+  gap: var(--sp-3);
+}
+
+/* 今日菜单纵向列表：竖屏略收内边距，菜名完整换行不裁切 */
+#stage.mode-portrait .plan-today-grid {
+  gap: 6px;
+}
+
+#stage.mode-portrait .plan-slot {
+  min-height: 44px;
+  padding: 10px 12px;
+  gap: 10px;
+}
+
+#stage.mode-portrait .plan-slot-meal {
+  min-width: 2.25em;
+}
+
+#stage.mode-portrait .plan-slot-dish {
+  font-size: var(--fs-body);
+  white-space: normal;
+  overflow: visible;
+  display: block;
+  -webkit-line-clamp: unset;
+}
+
+/* 本周菜单：7 天条允许横向滑动，避免字被压扁 */
+#stage.mode-portrait .plan-week .card-body {
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+#stage.mode-portrait .plan-week-strip {
+  min-width: 520px;
+  gap: 6px;
+}
+
+#stage.mode-portrait .plan-mini-day {
+  min-height: 58px;
+  padding: 6px 2px;
+}
+
+#stage.mode-portrait .plan-mini-dish {
+  -webkit-line-clamp: 1;
+  font-size: 15px;
+}
+
+/* 卡片副标题（全部 › / 优先消耗）不被裁没 */
+#stage.mode-portrait .plan-today .card-side,
+#stage.mode-portrait .plan-shop .card-side,
+#stage.mode-portrait .plan-expire .card-side,
+#stage.mode-portrait .plan-week .card-side {
+  max-width: 48%;
+  flex-shrink: 0;
+}
+
+/* Agent 待采纳：按钮换行 */
+#stage.mode-portrait .plan-agent-card {
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  padding: var(--sp-3);
+}
+
+#stage.mode-portrait .plan-agent-btns {
+  width: 100%;
+  justify-content: flex-end;
+}
+
+/* PLAN-02/03/04 双栏/网格 */
+#stage.mode-portrait .plan-day-grid,
+#stage.mode-portrait .plan-recipe-grid,
+#stage.mode-portrait .plan-detail-cols {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+#stage.mode-portrait .plan-detail-head {
+  flex-direction: column;
+}
+
+#stage.mode-portrait .plan-detail-img {
+  width: 100%;
+  height: 160px;
+}
+
+#stage.mode-portrait .plan-week-table {
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+#stage.mode-portrait .plan-wt-row {
+  min-width: 520px;
+  grid-template-columns: 48px repeat(7, minmax(56px, 1fr));
+}
+
+#stage.mode-portrait .plan-search {
+  min-width: 0;
+  width: 100%;
+}

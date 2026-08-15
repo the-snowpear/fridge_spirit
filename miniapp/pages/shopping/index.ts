@@ -30,6 +30,7 @@ Page({
       { key: "recipe", label: "菜谱" },
       { key: "expire", label: "临期" },
       { key: "ai", label: "AI" },
+      { key: "device", label: "设备" },
     ],
     addOpen: false,
     editingId: "",
@@ -40,6 +41,10 @@ Page({
   },
 
   onShow() {
+    this.load();
+  },
+
+  onCloudSyncApplied() {
     this.load();
   },
 

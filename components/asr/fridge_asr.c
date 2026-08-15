@@ -292,7 +292,7 @@ static void put_le32(uint8_t *p, uint32_t v)
     p[3] = (uint8_t)((v >> 24) & 0xff);
 }
 
-static void write_wav_header(uint8_t *out, size_t pcm_bytes)
+static void write_wav_header(uint8_t *out, size_t pcm_bytes, uint32_t sample_rate)
 {
     memcpy(out, "RIFF", 4);
     put_le32(out + 4, (uint32_t)(36 + pcm_bytes));
@@ -300,8 +300,8 @@ static void write_wav_header(uint8_t *out, size_t pcm_bytes)
     put_le32(out + 16, 16);
     put_le16(out + 20, 1);
     put_le16(out + 22, 1);
-    put_le32(out + 24, FRIDGE_AUDIO_SAMPLE_RATE);
-    put_le32(out + 28, FRIDGE_AUDIO_SAMPLE_RATE * 2);
+    put_le32(out + 24, sample_rate);
+    put_le32(out + 28, sample_rate * 2);
     put_le16(out + 32, 2);
     put_le16(out + 34, 16);
     memcpy(out + 36, "data", 4);
@@ -311,6 +311,7 @@ static void write_wav_header(uint8_t *out, size_t pcm_bytes)
 static char *build_multipart_body(const fridge_asr_config_update_t *config,
                                   const int16_t *pcm,
                                   size_t pcm_bytes,
+                                  uint32_t sample_rate,
                                   size_t *out_len)
 {
     const char *boundary = "----fridge-spirit-asr-boundary";
@@ -348,7 +349,7 @@ static char *build_multipart_body(const fridge_asr_config_update_t *config,
     offset += (size_t)prefix_len;
     memcpy(body + offset, file_header, (size_t)file_header_len);
     offset += (size_t)file_header_len;
-    write_wav_header((uint8_t *)(body + offset), pcm_bytes);
+    write_wav_header((uint8_t *)(body + offset), pcm_bytes, sample_rate);
     offset += WAV_HEADER_BYTES;
     memcpy(body + offset, pcm, pcm_bytes);
     offset += pcm_bytes;
@@ -511,10 +512,58 @@ esp_err_t fridge_asr_transcribe_latest_recording_with_config(const fridge_asr_co
         set_last_error(out->error);
         return ESP_ERR_INVALID_STATE;
     }
-    out->audio_bytes = pcm_bytes + WAV_HEADER_BYTES;
+    fridge_audio_pcm_format_t pcm_format = {0};
+    err = fridge_audio_get_pcm_format(&pcm_format);
+    if (err != ESP_OK) {
+        strlcpy(out->error, "recording format unavailable", sizeof(out->error));
+        set_last_error(out->error);
+        return err;
+    }
+
+    const int16_t *pcm_for_asr = pcm;
+    size_t pcm_for_asr_bytes = pcm_bytes;
+    uint32_t asr_sample_rate = pcm_format.sample_rate;
+    int16_t *resampled_pcm = NULL;
+    // 仅兼容旧 48kHz FY 固件时执行 3:1 抽取；当前 16kHz FY PCM 直接上传，
+    // 禁止重复抽取导致录音时长缩短和音调升高。
+    if (pcm_format.sample_rate == FRIDGE_AUDIO_SAMPLE_RATE * 3) {
+        size_t input_samples = pcm_bytes / sizeof(int16_t);
+        size_t output_capacity = input_samples / 3;
+        size_t output_samples = 0;
+        resampled_pcm = heap_caps_malloc(output_capacity * sizeof(int16_t),
+                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!resampled_pcm) {
+            resampled_pcm = heap_caps_malloc(output_capacity * sizeof(int16_t), MALLOC_CAP_8BIT);
+        }
+        esp_err_t convert_err = resampled_pcm
+                                    ? fridge_audio_downsample_48k_to_16k(pcm,
+                                                                         input_samples,
+                                                                         resampled_pcm,
+                                                                         output_capacity,
+                                                                         &output_samples)
+                                    : ESP_ERR_NO_MEM;
+        if (convert_err != ESP_OK || output_samples == 0) {
+            free(resampled_pcm);
+            snprintf(out->error,
+                     sizeof(out->error),
+                     "FY-SP703 48k-to-16k conversion failed: %s",
+                     esp_err_to_name(convert_err));
+            set_last_error(out->error);
+            return convert_err;
+        }
+        pcm_for_asr = resampled_pcm;
+        pcm_for_asr_bytes = output_samples * sizeof(int16_t);
+        asr_sample_rate = FRIDGE_AUDIO_SAMPLE_RATE;
+    }
+    out->audio_bytes = pcm_for_asr_bytes + WAV_HEADER_BYTES;
 
     size_t body_len = 0;
-    char *body = build_multipart_body(config, pcm, pcm_bytes, &body_len);
+    char *body = build_multipart_body(config,
+                                      pcm_for_asr,
+                                      pcm_for_asr_bytes,
+                                      asr_sample_rate,
+                                      &body_len);
+    free(resampled_pcm);
     if (!body) {
         strlcpy(out->error, "build ASR multipart body failed", sizeof(out->error));
         set_last_error(out->error);

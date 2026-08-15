@@ -1405,6 +1405,14 @@ finish:
     return err;
 }
 
+esp_err_t fridge_camera_take_captured_preview(fridge_camera_preview_frame_t *out)
+{
+    if (out) {
+        memset(out, 0, sizeof(*out));
+    }
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
 esp_err_t fridge_camera_clear_frame(void)
 {
     esp_err_t lock_err = camera_lock(pdMS_TO_TICKS(CAM_LOCK_TIMEOUT_MS));
@@ -1435,4 +1443,26 @@ esp_err_t fridge_camera_reset(void)
     set_last_error("");
     camera_unlock();
     return ESP_OK;
+}
+
+// S3 路径不支持 P4 全屏高清预览 API，保持符号完整以便头文件统一。
+esp_err_t fridge_camera_start_hd_preview(void)
+{
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
+esp_err_t fridge_camera_stop_hd_preview(void)
+{
+    return ESP_OK;
+}
+
+bool fridge_camera_hd_preview_running(void)
+{
+    return false;
+}
+
+bool fridge_camera_is_busy(void)
+{
+    // S3 路径无硬件 JPEG 编码器占用问题；始终返回不忙。
+    return false;
 }

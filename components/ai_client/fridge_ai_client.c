@@ -31,6 +31,7 @@
 #define AI_HTTP_RESPONSE_CAP 12288
 #define AI_TEST_MAX_TOKENS 128
 #define AI_ASSISTANT_MAX_TOKENS 1600
+#define AI_AGENT_MAX_TOKENS 1600
 #define AI_KITCHEN_MAX_TOKENS 1600
 #define AI_IMAGE_MAX_TOKENS 700
 #define AI_COMPLETIONS_PATH "/chat/completions"
@@ -188,7 +189,9 @@ static size_t json_escaped_len(const char *text)
 static char *json_escape_alloc(const char *text)
 {
     size_t len = json_escaped_len(text);
-    char *out = calloc(1, len + 1);
+    // Agent 的工具 Schema 和会话上下文可达数十 KB，转义副本必须优先进入 PSRAM，
+    // 否则一次请求会同时占用原文、转义文和 HTTP body，容易挤碎内部 SRAM。
+    char *out = ai_large_calloc(1, len + 1);
     if (!out) {
         return NULL;
     }
@@ -673,8 +676,8 @@ static esp_err_t load_full_config(fridge_ai_config_update_t *config)
 static esp_err_t compose_chat_url(const char *base_url, char *out, size_t out_size)
 {
     ESP_RETURN_ON_FALSE(base_url && out && out_size > 0, ESP_ERR_INVALID_ARG, TAG, "invalid URL args");
-    ESP_RETURN_ON_FALSE(starts_with(base_url, "https://") || starts_with(base_url, "http://"),
-                        ESP_ERR_INVALID_ARG, TAG, "AI base URL must use http or https");
+    ESP_RETURN_ON_FALSE(starts_with(base_url, "https://"),
+                        ESP_ERR_INVALID_ARG, TAG, "AI base URL must use https");
 
     strlcpy(out, base_url, out_size);
     size_t len = strlen(out);
@@ -693,8 +696,8 @@ static esp_err_t compose_chat_url(const char *base_url, char *out, size_t out_si
 static esp_err_t compose_google_url(const char *base_url, const char *model, char *out, size_t out_size)
 {
     ESP_RETURN_ON_FALSE(base_url && model && model[0] && out && out_size > 0, ESP_ERR_INVALID_ARG, TAG, "invalid Google URL args");
-    ESP_RETURN_ON_FALSE(starts_with(base_url, "https://") || starts_with(base_url, "http://"),
-                        ESP_ERR_INVALID_ARG, TAG, "AI base URL must use http or https");
+    ESP_RETURN_ON_FALSE(starts_with(base_url, "https://"),
+                        ESP_ERR_INVALID_ARG, TAG, "AI base URL must use https");
 
     strlcpy(out, base_url, out_size);
     size_t len = strlen(out);
@@ -812,10 +815,29 @@ static bool is_kitchen_json_task(const char *task_type)
            (strcmp(task_type, "recipe_generate") == 0 ||
             strcmp(task_type, "kitchen_recipe") == 0 ||
             strcmp(task_type, "kitchen_nutrition") == 0 ||
-            strcmp(task_type, "kitchen_shopping") == 0);
+             strcmp(task_type, "kitchen_shopping") == 0);
 }
 
-// 冰箱小精灵 AI 助手策略提示词：约束 AI 优先依据项目上下文、保守处理库存/识别，并定义工具 JSON 与隐藏记忆指令。
+static void ai_secure_zero(void *ptr, size_t size)
+{
+    volatile uint8_t *p = (volatile uint8_t *)ptr;
+    while (p && size--) *p++ = 0;
+}
+
+static bool ai_base_url_is_secure(const char *base_url)
+{
+    return base_url && starts_with(base_url, "https://");
+}
+
+// Agent 文字会话与厨房页面生成一样需要由服务端强制返回 JSON，但两者的系统策略不同。
+// 保持任务判定集中，避免 OpenAI 和 Gemini 请求格式漂移。
+static bool is_agent_structured_task(const char *task_type)
+{
+    return task_type && strcmp(task_type, "agent_structured") == 0;
+}
+
+// 冰箱小精灵旧 AI 助手策略提示词：约束 AI 优先依据项目上下文并保守处理库存/识别。
+// 长期记忆统一由 TF Agent memory 工具维护，不再接受回复尾部隐藏指令。
 // OpenAI 与 Google 两种格式共用同一段策略，避免两边行为漂移。
 static const char *assistant_policy_text(void)
 {
@@ -825,15 +847,16 @@ static const char *assistant_policy_text(void)
         "如果用户明确要求定时器、秒表或闹钟，请优先输出一段可执行紧凑 JSON，例如 {\"tool\":\"timer\",\"action\":\"start\",\"duration_seconds\":480,\"label\":\"煮蛋\"}、{\"tool\":\"stopwatch\",\"action\":\"start\"} 或 {\"tool\":\"alarm\",\"action\":\"set\",\"hour\":7,\"minute\":0,\"label\":\"拿牛奶\"}；不要把缺失的时间或时长编出来。"
         "如果用户明确要求切换屏幕页面，只能输出白名单 UI JSON：{\"tool\":\"ui\",\"action\":\"switch_page\",\"page\":\"home|standby|zone|door|recipe|nutrition|shopping|settings|wifi|more|offline|ai|timer|stopwatch|alarm\"}。"
         "不要输出 camera 或 camera_result 页面指令，因为拍照页会启动摄像头预览，必须由用户手动确认进入；不要尝试控制亮度、音量、Wi-Fi 连接、拍照、库存写入、OTA 或 GPIO。"
-        "你可以自主决定是否更新长期结构化记忆，但只能在用户明确表达稳定偏好、家庭人数、忌口、过敏、常用工具、长期习惯，或用户明确要求记住/忘记时使用；闲聊、单次菜谱、传感器状态、临时库存、未确认识别结果不要写入长期记忆。"
-        "需要写记忆时，在回复最后另起一行输出给固件的隐藏指令：MEMORY_OP:{\"action\":\"append|replace|clear\",\"key\":\"taste|avoid|allergies|family_size|kitchen_tools|recent_summary\",\"value\":\"不超过80字的中文摘要\",\"reason\":\"简短原因\"}。"
-        "如果不需要写记忆，不要输出 MEMORY_OP。用户可见回答不要解释这条隐藏指令。";
+        "长期记忆只能由本地 Agent 的 memory 工具维护；本旧助手链路不得输出或模拟任何记忆写入指令。";
 }
 
 static char *build_assistant_request_openai(const fridge_ai_config_update_t *config, const fridge_ai_assistant_request_t *request)
 {
+    const bool kitchen_json_task = is_kitchen_json_task(request->task_type);
+    const bool agent_structured_task = is_agent_structured_task(request->task_type);
     char *model = json_escape_alloc(config->model);
-    char *system_prompt = json_escape_alloc(config->system_prompt);
+    // P4 Agent 的安全策略由 Runtime 和固定协议共同决定，旧 Assistant 的可编辑提示词不得覆盖它。
+    char *system_prompt = json_escape_alloc(agent_structured_task ? "" : config->system_prompt);
     char *task_type = json_escape_alloc(request->task_type);
     char *context_json = json_escape_alloc(request->context_json);
     char *user_message = json_escape_alloc(request->message);
@@ -881,11 +904,14 @@ static char *build_assistant_request_openai(const fridge_ai_config_update_t *con
         history_len += strlen(history_roles[i]) + strlen(history_contents[i]) + 48;
     }
 
-    bool kitchen_json_task = is_kitchen_json_task(request->task_type);
-    const char *policy_src = kitchen_json_task
-                                 ? "你现在只执行厨房页面内容生成任务。必须严格服从用户消息中的 JSON schema；最终回复只能是一个 JSON object。"
-                                 : assistant_policy_text();
-    int max_tokens = kitchen_json_task ? AI_KITCHEN_MAX_TOKENS : AI_ASSISTANT_MAX_TOKENS;
+    bool structured_json_task = kitchen_json_task || agent_structured_task;
+    const char *policy_src = agent_structured_task
+                                 ? "你是冰箱小精灵本地 Agent。最终回复只能是一个符合请求上下文规定 schema 的 JSON object；不要输出 Markdown，不得声称未执行的工具已完成。"
+                                 : kitchen_json_task
+                                       ? "你现在只执行厨房页面内容生成任务。必须严格服从用户消息中的 JSON schema；最终回复只能是一个 JSON object。"
+                                       : assistant_policy_text();
+    int max_tokens = agent_structured_task ? AI_AGENT_MAX_TOKENS :
+                     kitchen_json_task ? AI_KITCHEN_MAX_TOKENS : AI_ASSISTANT_MAX_TOKENS;
     char *policy = json_escape_alloc(policy_src);
     if (!policy) {
         for (size_t i = 0; i < history_count; i++) {
@@ -944,7 +970,7 @@ static char *build_assistant_request_openai(const fridge_ai_config_update_t *con
                                "\"temperature\":0.1,\"max_tokens\":%d,%s\"stream\":false}",
                                user_message,
                                max_tokens,
-                               kitchen_json_task ? "\"response_format\":{\"type\":\"json_object\"}," : "");
+                               structured_json_task ? "\"response_format\":{\"type\":\"json_object\"}," : "");
             if (written < 0 || (size_t)written >= body_len - used) {
                 free(body);
                 body = NULL;
@@ -971,12 +997,18 @@ static char *build_assistant_request_openai(const fridge_ai_config_update_t *con
 // contents 依次放历史（user/model 交替）和当前 user 提问。模型名在 URL，不入 body。
 static char *build_assistant_request_google(const fridge_ai_config_update_t *config, const fridge_ai_assistant_request_t *request)
 {
-    char *system_prompt = json_escape_alloc(config->system_prompt);
-    bool kitchen_json_task = is_kitchen_json_task(request->task_type);
-    const char *policy_src = kitchen_json_task
-                                 ? "你现在只执行厨房页面内容生成任务。必须严格服从用户消息中的 JSON schema；最终回复只能是一个 JSON object。"
-                                 : assistant_policy_text();
-    int max_tokens = kitchen_json_task ? AI_KITCHEN_MAX_TOKENS : AI_ASSISTANT_MAX_TOKENS;
+    const bool kitchen_json_task = is_kitchen_json_task(request->task_type);
+    const bool agent_structured_task = is_agent_structured_task(request->task_type);
+    // 与 OpenAI 路径保持一致：Agent 请求不读取旧可编辑提示词，避免安全策略被配置覆盖。
+    char *system_prompt = json_escape_alloc(agent_structured_task ? "" : config->system_prompt);
+    bool structured_json_task = kitchen_json_task || agent_structured_task;
+    const char *policy_src = agent_structured_task
+                                 ? "你是冰箱小精灵本地 Agent。最终回复只能是一个符合请求上下文规定 schema 的 JSON object；不要输出 Markdown，不得声称未执行的工具已完成。"
+                                 : kitchen_json_task
+                                       ? "你现在只执行厨房页面内容生成任务。必须严格服从用户消息中的 JSON schema；最终回复只能是一个 JSON object。"
+                                       : assistant_policy_text();
+    int max_tokens = agent_structured_task ? AI_AGENT_MAX_TOKENS :
+                     kitchen_json_task ? AI_KITCHEN_MAX_TOKENS : AI_ASSISTANT_MAX_TOKENS;
     char *policy = json_escape_alloc(policy_src);
     char *task_type = json_escape_alloc(request->task_type);
     char *context_json = json_escape_alloc(request->context_json);
@@ -1067,7 +1099,7 @@ static char *build_assistant_request_google(const fridge_ai_config_update_t *con
                                history_count > 0 ? "," : "",
                                user_message,
                                max_tokens,
-                               kitchen_json_task ? ",\"responseMimeType\":\"application/json\"" : "");
+                               structured_json_task ? ",\"responseMimeType\":\"application/json\"" : "");
             if (written < 0 || (size_t)written >= body_len - used) {
                 free(body);
                 body = NULL;
@@ -1096,6 +1128,259 @@ static char *build_assistant_request(const fridge_ai_config_update_t *config, co
         return build_assistant_request_google(config, request);
     }
     return build_assistant_request_openai(config, request);
+}
+
+// Agent Runtime 的策略与旧助手完全隔离：不允许计时器、页面切换等历史协议混入。
+static const char *agent_policy_text(void)
+{
+    return
+        "你是冰箱小精灵 P4 的本地 Agent 云端推理节点。设备将独立校验并执行工具，模型不能宣称已执行任何工具。\n"
+        "只输出一个合法 UTF-8 JSON object，禁止 Markdown、代码块、前后缀或额外文字。\n"
+        "输出 schema 固定为：{\"reply\":string,\"spoken_summary\"?:string,\"tool_call\"?:{\"name\":string,\"arguments\":object}|null}。\n"
+        "reply 必须是面向用户的非空中文文本；spoken_summary 如提供，必须是适合播报的简短文本；tool_call 至多一个。\n"
+        "只有在可信设备上下文的 available_tools 中存在相同 name 时才可提出 tool_call，arguments 必须是 JSON object。\n"
+        "写入、危险或需要确认的工具只能提出请求，必须在 reply 中说明等待设备和用户确认；不得伪造工具结果、库存、设备状态或 API Key。";
+}
+
+// 为 Agent 请求转义并复制历史，避免复用旧助手的 task_type 和策略字段。
+static bool build_agent_history(const fridge_ai_agent_request_t *request,
+                                char ***roles_out,
+                                char ***contents_out,
+                                size_t *count_out,
+                                size_t *length_out,
+                                bool google_roles)
+{
+    size_t history_count = request->history ? request->history_count : 0;
+    history_count = history_count > FRIDGE_AI_MAX_CHAT_HISTORY ? FRIDGE_AI_MAX_CHAT_HISTORY : history_count;
+    char **roles = ai_large_calloc(history_count ? history_count : 1, sizeof(char *));
+    char **contents = ai_large_calloc(history_count ? history_count : 1, sizeof(char *));
+    if (!roles || !contents) {
+        free(roles);
+        free(contents);
+        return false;
+    }
+    size_t length = 0;
+    for (size_t i = 0; i < history_count; i++) {
+        roles[i] = json_escape_alloc(google_roles ? google_history_role(request->history[i].role)
+                                                   : safe_history_role(request->history[i].role));
+        contents[i] = json_escape_alloc(request->history[i].content);
+        if (!roles[i] || !contents[i]) {
+            for (size_t j = 0; j <= i; j++) {
+                free(roles[j]);
+                free(contents[j]);
+            }
+            free(roles);
+            free(contents);
+            return false;
+        }
+        length += strlen(roles[i]) + strlen(contents[i]) + 48;
+    }
+    *roles_out = roles;
+    *contents_out = contents;
+    *count_out = history_count;
+    *length_out = length;
+    return true;
+}
+
+static void free_agent_history(char **roles, char **contents, size_t count)
+{
+    for (size_t i = 0; i < count; i++) {
+        free(roles[i]);
+        free(contents[i]);
+    }
+    free(roles);
+    free(contents);
+}
+
+// OpenAI-compatible Agent 请求：仅使用 Agent 固定策略、可信上下文、短历史和当前输入。
+static char *build_agent_request_openai(const fridge_ai_config_update_t *config,
+                                        const fridge_ai_agent_request_t *request,
+                                        esp_err_t *error_out)
+{
+    if (error_out) *error_out = ESP_ERR_NO_MEM;
+    char *model = json_escape_alloc(config->model);
+    char *policy = json_escape_alloc(agent_policy_text());
+    char *context_json = json_escape_alloc(request->context_json);
+    char *user_message = json_escape_alloc(request->message);
+    if (!model || !policy || !context_json || !user_message) {
+        free(model);
+        free(policy);
+        free(context_json);
+        free(user_message);
+        return NULL;
+    }
+
+    char **history_roles = NULL;
+    char **history_contents = NULL;
+    size_t history_count = 0;
+    size_t history_len = 0;
+    if (!build_agent_history(request, &history_roles, &history_contents, &history_count, &history_len, false)) {
+        free(model);
+        free(policy);
+        free(context_json);
+        free(user_message);
+        return NULL;
+    }
+
+    size_t body_len = strlen(model) + strlen(policy) + strlen(context_json) + strlen(user_message) + history_len + 512;
+    if (body_len > FRIDGE_AI_AGENT_MAX_REQUEST_LEN) {
+        if (error_out) *error_out = ESP_ERR_INVALID_SIZE;
+        free_agent_history(history_roles, history_contents, history_count);
+        free(model);
+        free(policy);
+        free(context_json);
+        free(user_message);
+        return NULL;
+    }
+    char *body = ai_large_calloc(1, body_len);
+    if (body) {
+        size_t used = 0;
+        int written = snprintf(body,
+                               body_len,
+                               "{\"model\":\"%s\",\"messages\":["
+                               "{\"role\":\"system\",\"content\":\"%s\\n可信设备上下文 JSON：%s\"}",
+                               model,
+                               policy,
+                               context_json);
+        if (written < 0 || (size_t)written >= body_len) {
+            free(body);
+            body = NULL;
+        } else {
+            used = (size_t)written;
+        }
+        for (size_t i = 0; body && i < history_count; i++) {
+            written = snprintf(body + used,
+                               body_len - used,
+                               ",{\"role\":\"%s\",\"content\":\"%s\"}",
+                               history_roles[i],
+                               history_contents[i]);
+            if (written < 0 || (size_t)written >= body_len - used) {
+                free(body);
+                body = NULL;
+                break;
+            }
+            used += (size_t)written;
+        }
+        if (body) {
+            written = snprintf(body + used,
+                               body_len - used,
+                               ",{\"role\":\"user\",\"content\":\"%s\"}],"
+                               "\"temperature\":0.1,\"max_tokens\":%d,\"response_format\":{\"type\":\"json_object\"},\"stream\":false}",
+                               user_message,
+                               AI_AGENT_MAX_TOKENS);
+            if (written < 0 || (size_t)written >= body_len - used) {
+                free(body);
+                body = NULL;
+            }
+        }
+    }
+    free_agent_history(history_roles, history_contents, history_count);
+    free(model);
+    free(policy);
+    free(context_json);
+    free(user_message);
+    return body;
+}
+
+// Gemini Agent 请求：保持相同 Agent schema，使用 Google 原生的 JSON MIME 配置。
+static char *build_agent_request_google(const fridge_ai_config_update_t *config,
+                                        const fridge_ai_agent_request_t *request,
+                                        esp_err_t *error_out)
+{
+    (void)config;
+    if (error_out) *error_out = ESP_ERR_NO_MEM;
+    char *policy = json_escape_alloc(agent_policy_text());
+    char *context_json = json_escape_alloc(request->context_json);
+    char *user_message = json_escape_alloc(request->message);
+    if (!policy || !context_json || !user_message) {
+        free(policy);
+        free(context_json);
+        free(user_message);
+        return NULL;
+    }
+
+    char **history_roles = NULL;
+    char **history_contents = NULL;
+    size_t history_count = 0;
+    size_t history_len = 0;
+    if (!build_agent_history(request, &history_roles, &history_contents, &history_count, &history_len, true)) {
+        free(policy);
+        free(context_json);
+        free(user_message);
+        return NULL;
+    }
+
+    size_t body_len = strlen(policy) + strlen(context_json) + strlen(user_message) + history_len + 512;
+    if (body_len > FRIDGE_AI_AGENT_MAX_REQUEST_LEN) {
+        if (error_out) *error_out = ESP_ERR_INVALID_SIZE;
+        free_agent_history(history_roles, history_contents, history_count);
+        free(policy);
+        free(context_json);
+        free(user_message);
+        return NULL;
+    }
+    char *body = ai_large_calloc(1, body_len);
+    if (body) {
+        size_t used = 0;
+        int written = snprintf(body,
+                               body_len,
+                               "{\"system_instruction\":{\"parts\":[{\"text\":\"%s\\n可信设备上下文 JSON：%s\"}]},\"contents\":[",
+                               policy,
+                               context_json);
+        if (written < 0 || (size_t)written >= body_len) {
+            free(body);
+            body = NULL;
+        } else {
+            used = (size_t)written;
+        }
+        for (size_t i = 0; body && i < history_count; i++) {
+            written = snprintf(body + used,
+                               body_len - used,
+                               "%s{\"role\":\"%s\",\"parts\":[{\"text\":\"%s\"}]}",
+                               i == 0 ? "" : ",",
+                               history_roles[i],
+                               history_contents[i]);
+            if (written < 0 || (size_t)written >= body_len - used) {
+                free(body);
+                body = NULL;
+                break;
+            }
+            used += (size_t)written;
+        }
+        if (body) {
+            written = snprintf(body + used,
+                               body_len - used,
+                               "%s{\"role\":\"user\",\"parts\":[{\"text\":\"%s\"}]}],"
+                               "\"generationConfig\":{\"temperature\":0.1,\"maxOutputTokens\":%d,\"responseMimeType\":\"application/json\"}}",
+                               history_count > 0 ? "," : "",
+                               user_message,
+                               AI_AGENT_MAX_TOKENS);
+            if (written < 0 || (size_t)written >= body_len - used) {
+                free(body);
+                body = NULL;
+            }
+        }
+    }
+    free_agent_history(history_roles, history_contents, history_count);
+    free(policy);
+    free(context_json);
+    free(user_message);
+    return body;
+}
+
+static char *build_agent_request(const fridge_ai_config_update_t *config,
+                                 const fridge_ai_agent_request_t *request,
+                                 esp_err_t *error_out)
+{
+    if (error_out) *error_out = ESP_ERR_INVALID_ARG;
+    if (!request || !request->context_json || request->context_json_len == 0 ||
+        request->context_json_len > FRIDGE_AI_AGENT_MAX_CONTEXT_LEN ||
+        strnlen(request->context_json, request->context_json_len + 1U) != request->context_json_len) {
+        return NULL;
+    }
+    return config->api_format == FRIDGE_AI_API_FORMAT_GOOGLE
+               ? build_agent_request_google(config, request, error_out)
+               : build_agent_request_openai(config, request, error_out);
 }
 
 static char *base64_encode_alloc(const uint8_t *data, size_t len)
@@ -1500,7 +1785,10 @@ esp_err_t fridge_ai_client_get_config(fridge_ai_config_view_t *out)
     out->timeout_ms = clamp_timeout_ms(config->timeout_ms);
     out->api_format = config->api_format;
     out->has_api_key = config->api_key[0] != '\0';
-    out->ready = out->api_base_url[0] != '\0' && out->model[0] != '\0' && out->has_api_key;
+    out->ready = ai_base_url_is_secure(out->api_base_url) && out->model[0] != '\0' && out->has_api_key;
+    if (out->api_base_url[0] && !ai_base_url_is_secure(out->api_base_url)) {
+        strlcpy(out->last_error, "AI Base URL 必须使用 HTTPS", sizeof(out->last_error));
+    }
     make_key_preview(config->api_key, out->api_key_preview, sizeof(out->api_key_preview));
     strlcpy(out->last_error, s_last_error, sizeof(out->last_error));
     free(config);
@@ -1510,6 +1798,8 @@ esp_err_t fridge_ai_client_get_config(fridge_ai_config_view_t *out)
 esp_err_t fridge_ai_client_set_config(const fridge_ai_config_update_t *config)
 {
     ESP_RETURN_ON_FALSE(config, ESP_ERR_INVALID_ARG, TAG, "config is NULL");
+    ESP_RETURN_ON_FALSE(!config->api_base_url[0] || ai_base_url_is_secure(config->api_base_url),
+                        ESP_ERR_INVALID_ARG, TAG, "AI base URL must use HTTPS");
     ESP_RETURN_ON_ERROR(fridge_ai_client_init(), TAG, "AI client init failed");
 
     nvs_handle_t handle;
@@ -1768,7 +2058,10 @@ esp_err_t fridge_ai_client_get_profiles(fridge_ai_profile_list_t *out)
         view->timeout_ms = clamp_timeout_ms(config->timeout_ms);
         view->api_format = config->api_format;
         view->has_api_key = config->api_key[0] != '\0';
-        view->ready = view->api_base_url[0] != '\0' && view->model[0] != '\0' && view->has_api_key;
+        view->ready = ai_base_url_is_secure(view->api_base_url) && view->model[0] != '\0' && view->has_api_key;
+        if (view->api_base_url[0] && !ai_base_url_is_secure(view->api_base_url)) {
+            strlcpy(view->last_error, "AI Base URL 必须使用 HTTPS", sizeof(view->last_error));
+        }
         make_key_preview(config->api_key, view->api_key_preview, sizeof(view->api_key_preview));
         strlcpy(view->last_error, s_last_error, sizeof(view->last_error));
         free(config);
@@ -1892,7 +2185,7 @@ esp_err_t fridge_ai_client_test_chat_with_config(const fridge_ai_config_update_t
                         ? compose_google_url(config->api_base_url, config->model, url, sizeof(url))
                         : compose_chat_url(config->api_base_url, url, sizeof(url));
     if (err != ESP_OK) {
-        strlcpy(out->error, "API Base URL 必须使用 http:// 或 https://，并建议以 /v1 或 /v1beta 结尾", sizeof(out->error));
+        strlcpy(out->error, "API Base URL 必须使用 HTTPS，并建议以 /v1 或 /v1beta 结尾", sizeof(out->error));
         set_last_error(out->error);
         return err;
     }
@@ -2030,7 +2323,7 @@ esp_err_t fridge_ai_client_assistant_chat_with_config(const fridge_ai_config_upd
                         ? compose_google_url(config->api_base_url, config->model, url, sizeof(url))
                         : compose_chat_url(config->api_base_url, url, sizeof(url));
     if (err != ESP_OK) {
-        strlcpy(out->chat.error, "API Base URL 必须使用 http:// 或 https://，并建议以 /v1 或 /v1beta 结尾", sizeof(out->chat.error));
+        strlcpy(out->chat.error, "API Base URL 必须使用 HTTPS，并建议以 /v1 或 /v1beta 结尾", sizeof(out->chat.error));
         set_last_error(out->chat.error);
         return err;
     }
@@ -2148,6 +2441,165 @@ esp_err_t fridge_ai_client_assistant_chat(const fridge_ai_assistant_request_t *r
     return ESP_OK;
 }
 
+esp_err_t fridge_ai_client_agent_chat_with_config(const fridge_ai_config_update_t *config,
+                                                  const fridge_ai_agent_request_t *request,
+                                                  fridge_ai_agent_result_t *out)
+{
+    ESP_RETURN_ON_FALSE(config && request && request->message[0] != '\0' &&
+                            request->context_json && request->context_json_len > 0 && out,
+                        ESP_ERR_INVALID_ARG,
+                        TAG,
+                        "invalid Agent chat args");
+    ESP_RETURN_ON_FALSE(request->context_json_len <= FRIDGE_AI_AGENT_MAX_CONTEXT_LEN,
+                        ESP_ERR_INVALID_SIZE, TAG, "Agent context exceeds PSRAM budget");
+    memset(out, 0, sizeof(*out));
+    int64_t start_us = esp_timer_get_time();
+
+    // Agent Runtime 的网络检查沿用现有 HTTPS 链路，不访问 UI、工具或音频资源。
+    esp_err_t ready_err = check_network_ready(out->chat.error, sizeof(out->chat.error), false);
+    if (ready_err != ESP_OK) {
+        return ready_err;
+    }
+    if (config->api_base_url[0] == '\0') {
+        strlcpy(out->chat.error, "缺少 API Base URL", sizeof(out->chat.error));
+        set_last_error(out->chat.error);
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (config->api_key[0] == '\0') {
+        strlcpy(out->chat.error, "缺少 API Key，请先在 AI 设置中保存", sizeof(out->chat.error));
+        set_last_error(out->chat.error);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    char url[FRIDGE_AI_MAX_BASE_URL_LEN + FRIDGE_AI_MAX_MODEL_LEN + 32] = {0};
+    esp_err_t err = config->api_format == FRIDGE_AI_API_FORMAT_GOOGLE
+                        ? compose_google_url(config->api_base_url, config->model, url, sizeof(url))
+                        : compose_chat_url(config->api_base_url, url, sizeof(url));
+    if (err != ESP_OK) {
+        strlcpy(out->chat.error,
+                "API Base URL 必须使用 HTTPS，并建议以 /v1 或 /v1beta 结尾",
+                sizeof(out->chat.error));
+        set_last_error(out->chat.error);
+        return err;
+    }
+
+    esp_err_t build_error = ESP_OK;
+    char *request_body = build_agent_request(config, request, &build_error);
+    if (!request_body) {
+        strlcpy(out->chat.error,
+                build_error == ESP_ERR_INVALID_SIZE ? "Agent 请求体超过 384KB 上限" :
+                                                      "PSRAM 不足，无法构造完整 Agent JSON 请求",
+                sizeof(out->chat.error));
+        set_last_error(out->chat.error);
+        return build_error == ESP_OK ? ESP_ERR_NO_MEM : build_error;
+    }
+    ESP_LOGI(TAG,
+             "Agent JSON request prepared: history=%u, context=%u bytes, body=%u bytes",
+             (unsigned)(request->history ? request->history_count : 0),
+             (unsigned)request->context_json_len,
+             (unsigned)strlen(request_body));
+
+    char *response_body = ai_large_calloc(1, AI_HTTP_RESPONSE_CAP);
+    if (!response_body) {
+        free(request_body);
+        strlcpy(out->chat.error, "分配 Agent 响应缓冲失败", sizeof(out->chat.error));
+        set_last_error(out->chat.error);
+        return ESP_ERR_NO_MEM;
+    }
+    ai_http_buffer_t rx = {
+        .data = response_body,
+        .len = 0,
+        .cap = AI_HTTP_RESPONSE_CAP,
+        .overflow = false,
+    };
+    esp_http_client_config_t http_config = {
+        .url = url,
+        .method = HTTP_METHOD_POST,
+        .timeout_ms = (int)clamp_timeout_ms(config->timeout_ms),
+        .crt_bundle_attach = esp_crt_bundle_attach,
+        .event_handler = ai_http_event_handler,
+        .user_data = &rx,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&http_config);
+    if (!client) {
+        free(request_body);
+        free(response_body);
+        strlcpy(out->chat.error, "初始化 HTTP 客户端失败", sizeof(out->chat.error));
+        set_last_error(out->chat.error);
+        return ESP_FAIL;
+    }
+
+    char auth_header[FRIDGE_AI_MAX_API_KEY_LEN + 16] = {0};
+    esp_http_client_set_header(client, "Accept", "application/json");
+    esp_http_client_set_header(client, "Accept-Encoding", "identity");
+    esp_http_client_set_header(client, "Content-Type", "application/json");
+    if (config->api_format == FRIDGE_AI_API_FORMAT_GOOGLE) {
+        esp_http_client_set_header(client, "x-goog-api-key", config->api_key);
+    } else {
+        snprintf(auth_header, sizeof(auth_header), "Bearer %s", config->api_key);
+        esp_http_client_set_header(client, "Authorization", auth_header);
+    }
+    esp_http_client_set_post_field(client, request_body, (int)strlen(request_body));
+
+    err = esp_http_client_perform(client);
+    out->chat.http_status = esp_http_client_get_status_code(client);
+    out->chat.latency_ms = (uint32_t)((esp_timer_get_time() - start_us) / 1000);
+    strlcpy(out->chat.model, config->model, sizeof(out->chat.model));
+    esp_http_client_cleanup(client);
+    ai_secure_zero(auth_header, sizeof(auth_header));
+    free(request_body);
+
+    if (err != ESP_OK) {
+        snprintf(out->chat.error, sizeof(out->chat.error), "HTTP 请求失败：%s", esp_err_to_name(err));
+        set_last_error(out->chat.error);
+        free(response_body);
+        return err;
+    }
+    ESP_LOGI(TAG,
+             "Agent JSON HTTP done: status=%d, response=%u bytes, latency=%lu ms",
+             out->chat.http_status,
+             (unsigned)rx.len,
+             (unsigned long)out->chat.latency_ms);
+    if (rx.overflow) {
+        strlcpy(out->chat.error, "Agent 响应过长，缓冲已截断", sizeof(out->chat.error));
+        set_last_error(out->chat.error);
+        free(response_body);
+        return ESP_FAIL;
+    }
+    if (out->chat.http_status < 200 || out->chat.http_status >= 300) {
+        set_http_status_error(response_body, &out->chat);
+        free(response_body);
+        return ESP_FAIL;
+    }
+
+    err = parse_chat_response(response_body, &out->chat);
+    free(response_body);
+    return err;
+}
+
+esp_err_t fridge_ai_client_agent_chat(const fridge_ai_agent_request_t *request,
+                                      fridge_ai_agent_result_t *out)
+{
+    ESP_RETURN_ON_FALSE(request && out, ESP_ERR_INVALID_ARG, TAG, "invalid Agent chat args");
+    if (request->preloaded_config) {
+        return fridge_ai_client_agent_chat_with_config(request->preloaded_config, request, out);
+    }
+
+    fridge_ai_config_update_t *config = ai_large_calloc(1, sizeof(*config));
+    ESP_RETURN_ON_FALSE(config, ESP_ERR_NO_MEM, TAG, "AI config allocation failed");
+    esp_err_t err = fridge_ai_client_load_active_config(config);
+    if (err == ESP_OK) {
+        err = fridge_ai_client_ensure_network_ready(out->chat.error, sizeof(out->chat.error));
+    }
+    if (err == ESP_OK) {
+        err = fridge_ai_client_agent_chat_with_config(config, request, out);
+    }
+    ai_secure_zero(config, sizeof(*config));
+    free(config);
+    ESP_RETURN_ON_ERROR(err, TAG, "Agent JSON request failed");
+    return ESP_OK;
+}
+
 esp_err_t fridge_ai_client_analyze_image_with_config(const fridge_ai_config_update_t *config,
                                                      const fridge_ai_image_request_t *request,
                                                      fridge_ai_image_result_t *out)
@@ -2181,7 +2633,7 @@ esp_err_t fridge_ai_client_analyze_image_with_config(const fridge_ai_config_upda
                         ? compose_google_url(config->api_base_url, config->model, url, sizeof(url))
                         : compose_chat_url(config->api_base_url, url, sizeof(url));
     if (err != ESP_OK) {
-        strlcpy(out->chat.error, "API Base URL 必须使用 http:// 或 https://，并建议以 /v1 或 /v1beta 结尾", sizeof(out->chat.error));
+        strlcpy(out->chat.error, "API Base URL 必须使用 HTTPS，并建议以 /v1 或 /v1beta 结尾", sizeof(out->chat.error));
         set_last_error(out->chat.error);
         return err;
     }

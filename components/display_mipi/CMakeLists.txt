@@ -1,7 +1,7 @@
 idf_component_register(
     SRCS "fridge_display_mipi.c"
     INCLUDE_DIRS "include"
-    REQUIRES board driver esp_hw_support esp_lcd freertos log
+    REQUIRES board esp_driver_gpio esp_driver_ledc esp_hw_support esp_lcd freertos log
 )
 
 # 测试关闭时 Kconfig 不定义 HOLD_MS，且正常固件也不应链接循环测试任务。

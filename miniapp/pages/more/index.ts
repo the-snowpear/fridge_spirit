@@ -22,10 +22,12 @@ Page({
   data: {
     entries: [
       { key: "inventory", title: "食材清单", hint: "按分区查看 / 搜索 / 入库", url: "/pages/inventory/index" },
-      { key: "recipe",    title: "AI 菜谱", hint: "按库存生成今晚菜单",       url: "/pages/recipe/index" },
-      { key: "nutrition", title: "营养助手", hint: "均衡分 / 忌口 / 膳食建议", url: "/pages/nutrition/index" },
-      { key: "shopping",  title: "购物清单", hint: "AI 自动添加 + 手动勾选",  url: "/pages/shopping/index" },
-      { key: "reminders", title: "临期归位", hint: "今日到期 / 待办提醒",     url: "/pages/reminders/index" },
+      { key: "timeTools", title: "计时与闹钟", hint: "计时器 / 闹钟 / 秒表状态", url: "/pages/time-tools/index" },
+      { key: "shopping",  title: "购物清单", hint: "设备、小程序双向同步",      url: "/pages/shopping/index" },
+      { key: "recipe",    title: "AI 菜谱", hint: "同步设备菜谱与缺料",          url: "/pages/recipe/index" },
+      { key: "nutrition", title: "营养助手", hint: "营养建议与饮食记录",          url: "/pages/nutrition/index" },
+      { key: "reminders", title: "提醒", hint: "待办 / 临期 / 设备提醒",          url: "/pages/reminders/index" },
+      { key: "memory",    title: "家庭记忆", hint: "查看小精灵共享偏好",         url: "/pages/memory/index" },
       { key: "offline",   title: "离线模式", hint: "断网时也能看到最新状态",  url: "/pages/offline/index" },
     ] as MoreEntry[],
   },

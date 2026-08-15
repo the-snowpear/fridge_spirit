@@ -1,0 +1,54 @@
+<view class="page time-page rise">
+  <view class="hello-bar">
+    <view>
+      <view class="kicker">设备同步</view>
+      <view class="title">计时与闹钟</view>
+    </view>
+    <view class="sync-note">状态以最近同步为准</view>
+  </view>
+
+  <view class="segment">
+    <view class="{{tab === 'timers' ? 'active' : ''}}" data-tab="timers" bindtap="onTapTab">计时器 {{timers.length}}</view>
+    <view class="{{tab === 'alarms' ? 'active' : ''}}" data-tab="alarms" bindtap="onTapTab">闹钟 {{alarms.length}}</view>
+    <view class="{{tab === 'stopwatch' ? 'active' : ''}}" data-tab="stopwatch" bindtap="onTapTab">秒表</view>
+  </view>
+
+  <view wx:if="{{errorText}}" class="error-line">{{errorText}}</view>
+
+  <view wx:if="{{tab === 'timers'}}" class="data-list">
+    <view wx:for="{{timers}}" wx:key="id" class="data-row">
+      <view>
+        <view class="row-title">{{item.label}}</view>
+        <view class="row-meta">{{item.stateText}} · 总时长 {{item.durationMs / 1000}} 秒</view>
+      </view>
+      <view class="time-value">{{item.remainingText}}</view>
+    </view>
+    <view wx:if="{{!loading && timers.length === 0}}" class="empty">设备还没有同步计时器</view>
+  </view>
+
+  <view wx:elif="{{tab === 'alarms'}}" class="data-list">
+    <view wx:for="{{alarms}}" wx:key="id" class="data-row {{item.enabled ? '' : 'muted'}}">
+      <view class="alarm-time">{{item.timeText}}</view>
+      <view class="row-grow">
+        <view class="row-title">{{item.label}}</view>
+        <view class="row-meta">{{item.repeatText}} · {{item.stateText}}</view>
+        <view wx:if="{{item.speechText}}" class="speech">{{item.speechText}}</view>
+      </view>
+    </view>
+    <view wx:if="{{!loading && alarms.length === 0}}" class="empty">设备还没有同步闹钟</view>
+  </view>
+
+  <view wx:else class="stopwatch-area">
+    <block wx:if="{{stopwatch}}">
+      <view class="stopwatch-state">{{stopwatch.stateText}}</view>
+      <view class="stopwatch-time">{{stopwatch.elapsedText}}</view>
+      <view class="section-label">计次记录</view>
+      <view wx:for="{{stopwatch.lapTexts}}" wx:key="*this" class="lap-row">
+        <text>计次 {{index + 1}}</text>
+        <text>{{item}}</text>
+      </view>
+      <view wx:if="{{stopwatch.lapTexts.length === 0}}" class="empty compact">暂无计次</view>
+    </block>
+    <view wx:else class="empty">设备还没有同步秒表状态</view>
+  </view>
+</view>

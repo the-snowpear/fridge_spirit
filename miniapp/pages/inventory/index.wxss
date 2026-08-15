@@ -1,4 +1,4 @@
-/* inventory 页：zone tab + 九宫格 grid-board + 待归位 list
+/* inventory 页：区域 → 层 → 九宫格 + 待归位 list
  * 与 ui-reference 的 .grid-board 对齐：
  *   - 整体一张大圆角卡片，内部 3×3 单元用 1rpx 内分隔线（不是每个 cell 都自己描边）；
  *   - 单格左对齐，左上角是 slot-code（A1 / B2 …），中间放食材 + 数量；
@@ -10,27 +10,21 @@
 }
 
 /* zone tabs：横向滚动胶囊 */
-.zone-tabs {
-  white-space: nowrap;
-  margin: var(--space-3) 0 var(--space-2);
-  padding-bottom: var(--space-2);
-}
-.zone-tabs .tab {
-  display: inline-block;
-  padding: 12rpx 28rpx;
-  margin-right: var(--space-3);
-  border-radius: var(--radius-pill);
-  background: rgba(255, 255, 255, 0.6);
-  border: 1rpx solid var(--color-line);
-  color: var(--color-text-muted);
-  font-size: var(--text-sm);
-}
-.zone-tabs .tab.active {
-  background: var(--color-sage-dark);
-  color: var(--color-paper);
-  border-color: transparent;
-  font-weight: 700;
-}
+.actions { gap: var(--space-3); }
+.breadcrumb { margin: var(--space-4) 0; color: var(--color-text-soft); }
+.breadcrumb .divider { margin: 0 14rpx; }
+.breadcrumb .current { color: var(--color-sage-dark); font-weight: 800; }
+.summary-list { display: flex; flex-direction: column; gap: var(--space-3); }
+.summary-card { display: flex; justify-content: space-between; align-items: center; padding: var(--space-5); }
+.summary-title, .item-name { color: var(--color-ink); font-size: var(--text-md); font-weight: 800; }
+.summary-meta { display: flex; align-items: center; gap: 14rpx; }
+.count { color: var(--color-sage-dark); font-weight: 700; }
+.warn-dot { padding: 6rpx 12rpx; border-radius: var(--radius-pill); background: var(--color-yolk-soft); color: #8a5d00; font-size: var(--text-xs); }
+.arrow { color: var(--color-text-soft); font-size: 42rpx; line-height: 1; }
+.error-panel { border-color: var(--color-tomato-soft); }
+.error-title { color: var(--color-tomato); }
+.retry { margin-top: var(--space-3); }
+.unplaced-title { margin-top: var(--space-5); }
 
 /* 九宫格：整张卡 + 内部 3 列 3 行；border 用 box-shadow inset 写出最后一列/行不带分隔。 */
 .grid-board {

@@ -102,6 +102,14 @@ esp_err_t fridge_camera_get_frame(fridge_camera_frame_view_t *out)
     return ESP_ERR_NOT_FOUND;
 }
 
+esp_err_t fridge_camera_take_captured_preview(fridge_camera_preview_frame_t *out)
+{
+    if (out) {
+        memset(out, 0, sizeof(*out));
+    }
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
 esp_err_t fridge_camera_clear_frame(void)
 {
     return ESP_OK;

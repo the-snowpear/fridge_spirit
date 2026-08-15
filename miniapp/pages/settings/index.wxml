@@ -21,6 +21,25 @@
     <button class="btn secondary" style="margin-top: var(--space-5);" loading="{{syncBusy}}" bindtap="onTapSyncNow">立即同步</button>
   </view>
 
+  <!-- 0.5 P4 设备同步设置：只读展示最近一次设备状态，避免与设备端权限链并发覆盖。 -->
+  <view class="panel">
+    <view class="row">
+      <view>
+        <view class="kicker">设备同步设置</view>
+        <view class="title" style="font-size: var(--text-md); margin: var(--space-2) 0;">P4 当前配置</view>
+      </view>
+      <view class="tag {{deviceSettingsAvailable ? 'mint' : 'warn'}}">{{deviceSettingsAvailable ? '已同步' : '等待设备'}}</view>
+    </view>
+    <view class="zone-list device-settings-list">
+      <view class="zone-row"><text>设备</text><text class="soft">{{deviceSettingsSn || '未同步'}}</text></view>
+      <view class="zone-row"><text>时区 / 语言</text><text class="soft">{{deviceSettingsTimezone}} · {{deviceSettingsLocale}}</text></view>
+      <view class="zone-row"><text>音量</text><text class="soft">{{deviceSettingsVolume}}</text></view>
+      <view class="zone-row"><text>亮度</text><text class="soft">{{deviceSettingsBrightness}}</text></view>
+      <view class="zone-row"><text>提醒 / 小精灵语音</text><text class="soft">{{deviceSettingsReminder}} · {{deviceSettingsVoice}}</text></view>
+    </view>
+    <view class="soft field-hint">这里只显示设备最近上报值；修改仍由设备端设置页或小精灵确认流程完成。</view>
+  </view>
+
   <!-- 1. 后端 API -->
   <view class="panel">
     <view class="kicker">后端 API</view>
@@ -196,7 +215,7 @@
         </view>
       </view>
     </view>
-    <view class="soft field-hint">当前小程序会把语音配置保存到后端；设备端 ASR/TTS 仍以 Web Serial 的 get/set_asr_config、get/set_tts_config 为准，待 MQTT 应用链路接入后可自动下发。</view>
+    <view class="soft field-hint">语音配置通过 v2 ai_config 同步到设备；设备离线时会保留云端版本，重连后再应用。</view>
 
     <view class="row" style="margin-top: var(--space-5); gap: var(--space-3);">
       <button class="btn ghost" style="flex: 1;" loading="{{aiSaving}}" bindtap="clearAiKey">清除 Key</button>

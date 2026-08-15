@@ -17,6 +17,8 @@ export class WebSerialTransport extends BaseTransport {
   private encoder = new TextEncoder();
   private readBuffer = "";
   private readLoopActive = false;
+  private disconnecting = false;
+  private connectionLostHandled = false;
   private requestQueue: Promise<void> = Promise.resolve();
   private debugTxLogs = window.localStorage.getItem("fridge.debugSerial") === "1";
 
@@ -29,6 +31,10 @@ export class WebSerialTransport extends BaseTransport {
       throw new Error("当前浏览器不支持 Web Serial，请使用 Chrome 或 Edge 的 localhost 页面。");
     }
     this.port = await navigator.serial.requestPort();
+    this.connectionLostHandled = false;
+    this.disconnecting = false;
+    this.readBuffer = "";
+    this.decoder = new TextDecoder();
     this.emitLog("info", `已选择串口设备${this.formatPortInfo()}，正在打开 115200 波特率连接。`, "serial");
     try {
       await this.openPortWithTimeout(10000);
@@ -50,22 +56,29 @@ export class WebSerialTransport extends BaseTransport {
   }
 
   async disconnect() {
+    this.disconnecting = true;
     this.readLoopActive = false;
-    this.pending.forEach((pending) => {
-      window.clearTimeout(pending.timeout);
-      pending.reject(new Error("串口已断开"));
-    });
-    this.pending.clear();
+    this.rejectPending(new Error("串口已断开"));
 
     await this.reader?.cancel().catch(() => undefined);
-    this.reader?.releaseLock();
+    try {
+      this.reader?.releaseLock();
+    } catch {
+      // 设备丢失时浏览器可能已自动释放锁，忽略重复释放。
+    }
     this.reader = null;
 
-    this.writer?.releaseLock();
+    try {
+      this.writer?.releaseLock();
+    } catch {
+      // 同上，断线清理必须保持幂等。
+    }
     this.writer = null;
 
     await this.port?.close().catch(() => undefined);
     this.port = null;
+    this.readBuffer = "";
+    this.disconnecting = false;
     this.emitLog("info", "USB 串口已断开。", "serial");
   }
 
@@ -96,6 +109,16 @@ export class WebSerialTransport extends BaseTransport {
       command,
       payload,
     };
+    // Tool Broker 调试协议要求 tool/arguments 位于顶层，不能包在普通 payload 中。
+    if (command === "tool_call" && payload && typeof payload === "object") {
+      const toolCall = payload as {
+        tool?: string;
+        arguments?: Record<string, unknown>;
+      };
+      request.tool = toolCall.tool;
+      request.arguments = toolCall.arguments;
+      delete request.payload;
+    }
     if (command === "kitchen_ai_generate" && payload && typeof payload === "object" && "page" in payload) {
       Object.assign(request, { page: (payload as { page?: unknown }).page });
     }
@@ -122,6 +145,7 @@ export class WebSerialTransport extends BaseTransport {
         this.pending.delete(request.request_id);
         pending.reject(error);
       }
+      await this.handleUnexpectedDisconnect(error);
       return promise;
     }
     if (this.debugTxLogs) {
@@ -140,14 +164,21 @@ export class WebSerialTransport extends BaseTransport {
     if (command === "tts_play") {
       return Math.max(this.timeoutMs, 120000);
     }
+    if (command === "mic_record_wav") {
+      return Math.max(this.timeoutMs, 120000);
+    }
+    if (command === "test_ai_chat") {
+      return Math.max(this.timeoutMs, 130000);
+    }
+    if (command === "agent_session_read" || command === "agent_session_clear") {
+      return Math.max(this.timeoutMs, 60000);
+    }
     if (command === "format_tfcard" || command === "tf_benchmark" || command === "tf_trash_empty" || command === "tf_text_read") {
       return Math.max(this.timeoutMs, 180000);
     }
     if (
       command === "set_network" ||
-      command === "test_ai_chat" ||
       command === "ai_assistant_chat" ||
-      command === "mic_record_wav" ||
       command === "camera_capture" ||
       command === "camera_jpeg_diag" ||
       command === "camera_rgb565_diag" ||
@@ -211,20 +242,36 @@ export class WebSerialTransport extends BaseTransport {
   }
 
   private async cleanupAfterFailedConnect() {
+    this.disconnecting = true;
     this.readLoopActive = false;
-    this.reader?.releaseLock();
+    this.rejectPending(new Error("串口连接失败"));
+    try {
+      this.reader?.releaseLock();
+    } catch {
+      // 失败路径可能没有取得 reader 锁。
+    }
     this.reader = null;
-    this.writer?.releaseLock();
+    try {
+      this.writer?.releaseLock();
+    } catch {
+      // 失败路径可能没有取得 writer 锁。
+    }
     this.writer = null;
     await this.port?.close().catch(() => undefined);
     this.port = null;
+    this.readBuffer = "";
+    this.disconnecting = false;
   }
 
   private async readLoop() {
+    let disconnectError: unknown = null;
     while (this.readLoopActive && this.reader) {
       try {
         const { value, done } = await this.reader.read();
         if (done) {
+          if (this.readLoopActive) {
+            disconnectError = new Error("串口读取流已结束");
+          }
           break;
         }
         if (value) {
@@ -232,11 +279,53 @@ export class WebSerialTransport extends BaseTransport {
         }
       } catch (error) {
         if (this.readLoopActive) {
-          this.emitLog("error", String(error), "serial");
+          disconnectError = error;
         }
         break;
       }
     }
+    if (disconnectError) {
+      await this.handleUnexpectedDisconnect(disconnectError);
+    }
+  }
+
+  private rejectPending(reason: Error) {
+    this.pending.forEach((pending) => {
+      window.clearTimeout(pending.timeout);
+      pending.reject(reason);
+    });
+    this.pending.clear();
+  }
+
+  private async handleUnexpectedDisconnect(error: unknown) {
+    if (this.disconnecting || this.connectionLostHandled) {
+      return;
+    }
+    this.connectionLostHandled = true;
+    this.readLoopActive = false;
+    const raw = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+    const reason = new Error(`USB 串口连接已丢失：${raw}`);
+    this.rejectPending(reason);
+
+    await this.reader?.cancel().catch(() => undefined);
+    try {
+      this.reader?.releaseLock();
+    } catch {
+      // 浏览器报告 device lost 后可能已自动释放 reader。
+    }
+    this.reader = null;
+    try {
+      this.writer?.releaseLock();
+    } catch {
+      // 浏览器报告 device lost 后可能已自动释放 writer。
+    }
+    this.writer = null;
+    await this.port?.close().catch(() => undefined);
+    this.port = null;
+    this.readBuffer = "";
+
+    this.emitLog("error", reason.message, "serial");
+    this.emitConnectionLost(reason);
   }
 
   private handleChunk(value: Uint8Array) {
@@ -252,7 +341,23 @@ export class WebSerialTransport extends BaseTransport {
 
   private handleLine(line: string) {
     try {
-      const message = JSON.parse(line);
+      let messageLine = line;
+      try {
+        JSON.parse(messageLine);
+      } catch {
+        // 原生 USB 在刚打开时可能先吐出一段未换行的启动日志，再紧接 JSON 响应。
+        // 保留日志前缀，同时提取响应，避免首个 get_status 因无法解析而等待到超时。
+        const jsonStart = line.indexOf('{"type":');
+        if (jsonStart <= 0) {
+          throw new Error("not a JSON protocol line");
+        }
+        const logPrefix = line.slice(0, jsonStart).trim();
+        if (logPrefix) {
+          this.emitLog("info", logPrefix, "serial-log");
+        }
+        messageLine = line.slice(jsonStart);
+      }
+      const message = JSON.parse(messageLine);
       if (message.type === "response" && message.request_id) {
         const pending = this.pending.get(message.request_id);
         if (pending) {

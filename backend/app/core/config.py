@@ -15,6 +15,8 @@ class Settings(BaseSettings):
     app_env: str = "local"
     app_debug: bool = True
     api_v1_prefix: str = "/api/v1"
+    api_v2_prefix: str = "/api/v2"
+    public_api_base_url: str = "http://165.154.23.36:6005"
 
     database_url: str = "postgresql+asyncpg://fridge:fridge_dev_password@localhost:5432/fridge_spirit"
     auto_create_tables: bool = False
@@ -34,6 +36,8 @@ class Settings(BaseSettings):
     mqtt_client_id: str = "fridge-spirit-backend"
     mqtt_topic_prefix: str = "fridge"
     mqtt_keepalive_seconds: int = 60
+    mqtt_public_broker_uri: str = "mqtt://165.154.23.36:1883"
+    p4_binding_ttl_seconds: int = 300
 
     jwt_secret: str = Field(default="change-me-in-local-dev", min_length=8)
     access_token_ttl_seconds: int = 604800

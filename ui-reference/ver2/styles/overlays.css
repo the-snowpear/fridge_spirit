@@ -1,0 +1,265 @@
+/* ==================================================================
+ * 冰箱小精灵 ver2 —— 全局浮层 OV-01..OV-12 样式
+ * 阻塞型铺纯色遮罩（= LVGL obj + bg_opa，无模糊）；阴影仅浮层小阴影，
+ * 固件侧以 1px 描边替代（README 注明）。
+ * ================================================================== */
+
+#ovl-root { position: absolute; inset: 0; pointer-events: none; z-index: 40; }
+#ovl-root > * { pointer-events: auto; }
+
+/* 遮罩：纯色平铺，拦截下层点击 */
+.ovl-scrim { position: absolute; inset: 0; background: var(--scrim); }
+
+/* 各停靠位（主区宽 704；系统页模式主区 776） */
+.ovl-slot { position: absolute; }
+.ovl-slot.dock-toast { left: 0; bottom: 24px; width: 704px; display: flex; justify-content: center; pointer-events: none !important; }
+.ovl-slot.dock-topbar { left: 0; top: 0; width: 704px; }
+.ovl-slot.dock-center { left: 0; top: 0; width: 704px; height: 600px; display: flex; align-items: center; justify-content: center; }
+.ovl-slot.dock-voice { left: 0; bottom: 0; width: 704px; }
+.ovl-slot.dock-agent { left: 16px; top: 76px; width: 360px; }
+.ovl-slot.dock-sheet { left: 0; bottom: 0; width: 704px; }
+.ovl-slot.dock-kb { left: 0; bottom: 0; width: 704px; }
+.ovl-slot.dock-full { inset: 0; }
+#stage.mode-system .ovl-slot.dock-toast,
+#stage.mode-system .ovl-slot.dock-topbar,
+#stage.mode-system .ovl-slot.dock-voice,
+#stage.mode-system .ovl-slot.dock-sheet,
+#stage.mode-system .ovl-slot.dock-kb { width: 776px; }
+#stage.mode-system .ovl-slot.dock-center { width: 776px; }
+
+/* 竖屏隐私：主区 600×672，浮层停靠对齐主区宽度与高度 */
+#stage.mode-portrait .ovl-slot.dock-toast,
+#stage.mode-portrait .ovl-slot.dock-topbar,
+#stage.mode-portrait .ovl-slot.dock-sheet,
+#stage.mode-portrait .ovl-slot.dock-kb { width: 600px; }
+#stage.mode-portrait .ovl-slot.dock-center { width: 600px; height: 672px; }
+#stage.mode-portrait .ovl-slot.dock-agent { width: 320px; left: 12px; }
+
+/* 竖屏语音层：停在导航栏上方（主区底边），不要沉到整屏底部/状态舱上
+ * 外壳：主区 672 + 导航 64 + 状态舱 288 → bottom = 64+288 = 352
+ */
+#stage.mode-portrait .ovl-slot.dock-voice {
+  left: 0;
+  width: 600px;
+  bottom: 352px;
+  top: auto;
+}
+#stage.mode-portrait .ovl-slot.dock-voice .voice-panel {
+  margin: 0 12px 8px;
+  box-shadow: 0 8px 28px rgba(36, 52, 45, .2);
+}
+
+#stage.mode-portrait.mode-system .ovl-slot.dock-toast,
+#stage.mode-portrait.mode-system .ovl-slot.dock-topbar,
+#stage.mode-portrait.mode-system .ovl-slot.dock-sheet,
+#stage.mode-portrait.mode-system .ovl-slot.dock-kb { width: 600px; }
+/* 系统页无导航：贴状态舱上沿 */
+#stage.mode-portrait.mode-system .ovl-slot.dock-voice {
+  width: 600px;
+  bottom: 288px;
+}
+#stage.mode-portrait.mode-system .ovl-slot.dock-center { width: 600px; height: 736px; }
+
+/* ---------------- OV-01 Toast ---------------- */
+.toast {
+  display: inline-flex; align-items: center; gap: 8px;
+  height: 48px; padding: 0 20px;
+  border-radius: var(--r-pill);
+  background: var(--ink); color: #fff;
+  font-size: var(--fs-body);
+  box-shadow: 0 8px 24px rgba(36, 52, 45, .3);
+}
+.toast.ok { background: var(--sage-dark); }
+.toast.warn { background: var(--warn-ink); }
+.toast.danger { background: var(--danger); }
+
+/* ---------------- OV-02/08 通知条 ---------------- */
+.notice-bar {
+  display: flex; align-items: center; gap: var(--sp-2);
+  min-height: 48px; padding: 6px var(--sp-4);
+  font-size: var(--fs-body);
+  border-bottom: 1px solid var(--line);
+}
+.notice-bar.warn { background: var(--warn-bg); color: var(--warn-ink); }
+.notice-bar.offline { background: var(--offline-bg); color: var(--ink); }
+.notice-bar.info { background: var(--info-bg); color: var(--info); }
+.nb-text { flex: 1; }
+.nb-act {
+  min-height: 36px; padding: 0 14px; border-radius: var(--r-m);
+  background: var(--surface); border: 1px solid var(--line-strong);
+  font-size: var(--fs-cap); font-weight: 600;
+}
+.nb-close { width: 36px; height: 36px; border-radius: var(--r-m); display: flex; align-items: center; justify-content: center; color: inherit; }
+
+/* ---------------- OV-03/04 对话框（阻塞） ---------------- */
+.dialog {
+  width: 480px; max-width: 90%;
+  background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--r-m);
+  padding: var(--sp-5);
+  box-shadow: 0 12px 40px rgba(36, 52, 45, .25);
+  display: flex; flex-direction: column; gap: var(--sp-3);
+}
+.dlg-title { font-size: var(--fs-sub); font-weight: 600; }
+.dlg-desc { font-size: var(--fs-body); color: var(--muted); line-height: 1.5; }
+.dlg-btns { display: flex; justify-content: flex-end; gap: var(--sp-3); margin-top: var(--sp-2); }
+.dlg-sub { font-size: var(--fs-cap); color: var(--muted); }
+.dlg-note {
+  display: flex; gap: 8px; align-items: flex-start;
+  background: var(--warn-bg); color: var(--warn-ink);
+  border-radius: var(--r-m); padding: var(--sp-3);
+  font-size: var(--fs-cap); line-height: 1.4;
+}
+.dlg-note .ic { flex: none; margin-top: 2px; }
+.dlg-risk-head { display: flex; gap: var(--sp-3); align-items: flex-start; }
+.dlg-risk-head > .ic { color: var(--danger); flex: none; }
+.dlg-risk-head .chip { margin-left: auto; }
+.dlg-risk-body { background: var(--cream); border-radius: var(--r-m); padding: var(--sp-2) var(--sp-3); }
+
+/* ---------------- OV-05 语音聆听面板 ---------------- */
+.voice-panel {
+  display: flex; align-items: center; gap: var(--sp-4);
+  margin: 0 var(--sp-4) var(--sp-4);
+  background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--r-m);
+  padding: var(--sp-4) var(--sp-5);
+  box-shadow: 0 -6px 32px rgba(36, 52, 45, .18);
+}
+.vp-mic {
+  width: 72px; height: 72px; border-radius: 50%; flex: none;
+  background: var(--sage); color: #fff;
+  display: flex; align-items: center; justify-content: center;
+  position: relative;
+}
+/* 小范围呼吸圈（预览用；固件侧用静态帧，README 注明） */
+.vp-ring { position: absolute; inset: -6px; border-radius: 50%; border: 2px solid var(--sage); opacity: .5; animation: vp-pulse 1.6s ease-out infinite; }
+@keyframes vp-pulse { 0% { transform: scale(.9); opacity: .6; } 100% { transform: scale(1.25); opacity: 0; } }
+.vp-main { flex: 1; min-width: 0; }
+.vp-state { font-size: var(--fs-sub); font-weight: 600; color: var(--sage-dark); }
+.vp-text { font-size: var(--fs-body); color: var(--ink); margin-top: 4px; min-height: 32px; }
+.vp-dots i { display: inline-block; width: 5px; height: 5px; border-radius: 50%; background: currentColor; margin-left: 3px; }
+.vp-btns { display: flex; gap: var(--sp-2); flex: none; }
+
+/* ---------------- OV-06/07 Agent/拍照进度面板 ---------------- */
+.agent-panel {
+  background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--r-m);
+  padding: var(--sp-4);
+  box-shadow: 0 8px 28px rgba(36, 52, 45, .2);
+  display: flex; flex-direction: column; gap: var(--sp-3);
+}
+.ap-head { display: flex; align-items: center; gap: 8px; font-size: var(--fs-body); font-weight: 600; color: var(--sage-dark); }
+.ap-steps { display: flex; flex-direction: column; gap: 8px; }
+.ap-step { display: flex; align-items: center; gap: 8px; font-size: var(--fs-cap); }
+.ap-step.done { color: var(--sage-dark); }
+.ap-step.doing { color: var(--info); font-weight: 600; }
+.ap-step.todo { color: var(--muted); }
+.ap-btns { display: flex; justify-content: flex-end; }
+
+/* ---------------- OV-09 到时面板 ---------------- */
+.ring-panel {
+  width: 420px;
+  background: var(--surface); border: 2px solid var(--yolk); border-radius: var(--r-m);
+  padding: var(--sp-5);
+  display: flex; flex-direction: column; align-items: center; gap: var(--sp-2);
+  box-shadow: 0 12px 40px rgba(36, 52, 45, .25);
+  text-align: center;
+}
+.rp-icon { color: var(--warn-ink); }
+.rp-face { font-size: var(--fs-hero); font-weight: 700; font-family: var(--font-mono); color: var(--ink); line-height: 1.1; }
+.rp-name { font-size: var(--fs-sub); font-weight: 600; }
+.rp-sub { font-size: var(--fs-cap); color: var(--muted); }
+.rp-btns { display: flex; gap: var(--sp-3); margin-top: var(--sp-3); }
+
+/* ---------------- OV-10 关键安全告警（全屏接管，P0） ---------------- */
+.safety-full {
+  position: absolute; inset: 0;
+  background: #3a1512;
+  color: #fff;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: var(--sp-3); text-align: center; padding: var(--sp-6);
+}
+.sf-icon { color: var(--yolk); }
+.sf-icon .ic { width: 72px; height: 72px; }
+.sf-level { font-size: var(--fs-body); color: var(--yolk); letter-spacing: 2px; }
+.sf-title { font-size: var(--fs-big); font-weight: 700; }
+.sf-desc { font-size: var(--fs-body); max-width: 640px; line-height: 1.6; opacity: .92; }
+.sf-btns { display: flex; gap: var(--sp-4); margin-top: var(--sp-4); }
+.sf-btns .btn.ghost { background: transparent; color: #fff; border-color: rgba(255, 255, 255, .5); }
+.sf-hint { font-size: var(--fs-cap); opacity: .7; margin-top: var(--sp-4); }
+
+/* ---------------- OV-11 快速添加底部面板 ---------------- */
+.sheet {
+  margin: 0 var(--sp-4) var(--sp-4);
+  background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--r-m);
+  padding: var(--sp-4);
+  box-shadow: 0 -6px 32px rgba(36, 52, 45, .18);
+}
+.sheet-head { display: flex; align-items: center; margin-bottom: var(--sp-3); }
+.sheet-head .nb-close { margin-left: auto; }
+.sheet-opts { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--sp-3); }
+.sheet-opt {
+  display: flex; flex-direction: column; align-items: center; gap: 4px;
+  padding: var(--sp-4);
+  border: 1px solid var(--line); border-radius: var(--r-m);
+  background: var(--paper);
+}
+.sheet-opt:hover { background: var(--cream); }
+.so-icon { width: 56px; height: 56px; border-radius: 50%; display: flex; align-items: center; justify-content: center; }
+.so-icon.sage { background: var(--mint); color: var(--sage-dark); }
+.so-icon.yolk { background: var(--warn-bg); color: var(--warn-ink); }
+.so-icon.blue { background: var(--info-bg); color: var(--info); }
+.so-label { font-size: var(--fs-body); font-weight: 600; }
+.so-sub { font-size: var(--fs-cap); color: var(--muted); }
+
+/* ---------------- OV-12 软键盘 / 选择器 ---------------- */
+.kb-panel {
+  background: var(--cream); border-top: 1px solid var(--line-strong);
+  padding: var(--sp-3) var(--sp-4) var(--sp-4);
+  display: flex; flex-direction: column; gap: var(--sp-2);
+}
+.kb-tabs { display: flex; gap: var(--sp-2); align-items: center; }
+.kb-tab {
+  min-height: 40px; padding: 0 var(--sp-4);
+  border-radius: var(--r-m); font-size: var(--fs-body); color: var(--muted);
+  background: var(--surface); border: 1px solid var(--line);
+}
+.kb-tab.on { color: var(--sage-dark); font-weight: 600; border-color: var(--sage); }
+.kb-tabs .nb-close { margin-left: auto; }
+.kb-cands { display: flex; gap: var(--sp-2); }
+.kb-cand {
+  min-width: 72px; height: 44px; padding: 0 12px;
+  border-radius: var(--r-m); background: var(--surface); border: 1px solid var(--line);
+  font-size: var(--fs-body);
+}
+.kb-cand.on { background: var(--mint); color: var(--sage-dark); font-weight: 600; }
+.kb-preedit {
+  height: 40px; display: flex; align-items: center; padding: 0 var(--sp-3);
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-m);
+  font-size: var(--fs-body); font-family: var(--font-mono);
+}
+.kb-caret { width: 2px; height: 22px; background: var(--sage); margin-left: 2px; }
+.kb { display: flex; flex-direction: column; gap: 6px; }
+.kb-row { display: flex; gap: 6px; justify-content: center; }
+.kb-key {
+  min-width: 56px; height: 52px; padding: 0 8px;
+  border-radius: var(--r-s); background: var(--surface); border: 1px solid var(--line);
+  font-size: var(--fs-body);
+}
+.kb-key:hover { background: var(--mint); }
+.kb-key.wide { min-width: 88px; }
+.kb-key.space { min-width: 320px; }
+.kb-key.ok { background: var(--sage); color: #fff; border-color: var(--sage); }
+
+/* 滚轮选择器（= lv_roller 对照） */
+.roller-wrap { display: flex; align-items: center; justify-content: center; gap: var(--sp-2); padding: var(--sp-3) 0; }
+.roller {
+  width: 96px; height: 180px; overflow: hidden;
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-m);
+  display: flex; flex-direction: column; justify-content: center;
+}
+.roller-item {
+  height: 44px; flex: none;
+  display: flex; align-items: center; justify-content: center;
+  font-size: var(--fs-body); color: var(--muted);
+}
+.roller-item.cur { color: var(--sage-dark); font-weight: 700; font-size: var(--fs-sub); background: var(--mint); }
+.roller-unit { font-size: var(--fs-body); color: var(--muted); }
+.picker-note { text-align: center; font-size: var(--fs-cap); color: var(--muted); }
