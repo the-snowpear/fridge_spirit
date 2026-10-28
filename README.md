@@ -37,7 +37,7 @@ ESP32-P4 主控 · 7 英寸 MIPI-DSI 触控屏 · 离线语音唤醒 · 拍照�
 
 ## 界面一览
 
-> 全部为真机截屏（1024 × 600），非设计稿。
+> 图为 `ui-reference/ver2` 的 UI 参考预览（1024 × 600 实尺寸）。可交互原型就在仓库里，双击 `ui-reference/ver2/index.html` 即可离线打开，30 个页面模板 + 12 个浮层全部可点。
 
 | 首页 · 一屏看懂冰箱 | 库存 · 空间化分区视图 |
 | --- | --- |
@@ -54,7 +54,12 @@ ESP32-P4 主控 · 7 英寸 MIPI-DSI 触控屏 · 离线语音唤醒 · 拍照�
 | <img src="doc/assets/ui-plan.png" width="100%" /> | <img src="doc/assets/ui-settings.png" width="100%" /> |
 | 早/午/晚/加餐四餐菜单、待购买清单、临期利用计划同屏；购物清单支持按分类和超市动线排序。 | Wi-Fi 扫描连接、AI Provider 与模型、Agent 权限、语音与显示、隐私与家庭五个分区，全部可离线修改。 |
 
-除了横屏主界面，同一套 LVGL 代码还提供 600 × 1024 的竖屏布局（首页、库存、对话、计划、更多），在设备竖装或手持调试时自动切换。
+**同一套页面的竖屏形态**：600 × 1024 外壳把导航压到中部、状态舱移到底部，并强制进入隐私模式——摄像头标记为关闭，拍照入口置灰，页面路由直接拦截取景流程。
+
+| 竖屏首页（隐私模式） | 竖屏库存空间视图 |
+| --- | --- |
+| <img src="doc/assets/ui-portrait-home.png" width="300" /> | <img src="doc/assets/ui-portrait-inventory.png" width="300" /> |
+| 上方主区放四个关键数字与临期列表，中部导航条常驻，底部 288 px 状态舱承载时钟、隐私芯片与语音入口。 | 分区视图在窄栏下按两列重排，右侧「当前位置 / 范围统计 / 操作」压缩到底舱，不再挤占主区。 |
 
 ---
 
@@ -161,6 +166,25 @@ flowchart LR
 
 ---
 
+## 整机结构件与 3D 模型
+
+机械结构也一并开源，放在 [`model/`](model/)：可编辑的 SolidWorks 源文件、整机装配体、可直接切片的 STL，以及紧固件清单。
+
+| 文件 | 说明 |
+| --- | --- |
+| [`model/ver3/装配体2.SLDASM`](model/ver3/装配体2.SLDASM) | 整机装配体，引用同目录四个零件 |
+| [`model/ver3/箱体.SLDPRT`](model/ver3/箱体.SLDPRT) | 主箱体 |
+| [`model/ver3/屏幕件.SLDPRT`](model/ver3/屏幕件.SLDPRT) | 7 英寸屏与触摸组件的固定件 |
+| [`model/ver3/固定板.SLDPRT`](model/ver3/固定板.SLDPRT) | 主板 / 模组固定板 |
+| [`model/ver3/背板.SLDPRT`](model/ver3/背板.SLDPRT) | 背板 |
+| `model/ver3/*.STL` | 上述四个零件的打印网格，可直接拖进切片软件 |
+| [`model/ver3/螺丝.xlsx`](model/ver3/螺丝.xlsx) | 紧固件规格与数量 |
+| [`model/legacy/`](model/legacy/) | S3 阶段旧箱体零件，仅作历史对照，与 P4 板孔位不匹配 |
+
+模型单位为毫米。`.SLDPRT / .SLDASM` 需要 SolidWorks 或免费的 eDrawings 打开（装配体必须与四个零件放在同一目录，否则引用会断）；`.STL` 不限软件，但导出网格不含公差补偿，**打印前请按自己的打印机校准缩放与配合间隙**。
+
+---
+
 ## 技术栈
 
 | 层 | 技术选型 |
@@ -230,6 +254,8 @@ fridge_spirit_p4/
 ├── backend/                 # FastAPI 云端后端（/api/v2 + MQTT v2）
 ├── miniapp/                 # 微信小程序
 ├── web/                     # React 19 USB 运维台
+├── model/                   # 结构件：ver3 整机 SolidWorks + STL + 紧固件清单
+├── ui-reference/            # UI 参考预览：ver2 可交互原型（30 页面 + 12 浮层）
 ├── doc/                     # 设计文档、接线方案、进度与踩坑记录
 ├── tools/                   # idf.ps1、截屏、C6 OTA 等脚本
 └── partitions_recovery_p4.csv
@@ -264,6 +290,10 @@ fridge_spirit_p4/
 - TF 卡工作台：中文长文件名、分块 CRC32 传输、回收站、安全卸载重挂
 - C6 Hosted 2.12.11 握手、Wi-Fi 配网、MQTT v2 与后端的结构化同步
 
+上面这些不是纸面结论，下面这张是设备实际跑起来的样子（LVGL 直接渲染，非设计稿）：
+
+<img src="doc/assets/ui-device-home.png" width="72%" />
+
 仍在推进的部分（不当作已完成）：
 
 - 真人唤醒命中率与长时间误触发统计
@@ -278,9 +308,9 @@ fridge_spirit_p4/
 
 ## 关于
 
-面向全国大学生物联网设计竞赛的本科作品，硬件平台为慧勤智远 ESP32-P4 CB V1.2 小系统板。
+面向全国大学生物联网设计竞赛的本科作品，硬件平台为慧勤智远 ESP32-P4 CB V1.2 小系统板。固件、云端、小程序、UI 原型与整机结构件都在这个仓库里，可以照着做一台。
 
-代码用于学习与竞赛交流，未附加开源许可证，商用请联系作者。欢迎提 Issue 讨论硬件调试、LVGL 布局或 Agent 工具设计。
+代码与结构件用于学习与竞赛交流，未附加开源许可证，商用请联系作者。欢迎提 Issue 讨论硬件调试、LVGL 布局或 Agent 工具设计。
 
 <div align="center">
 <sub>Fridge Spirit · 让冰箱自己记得，你要吃什么</sub>

@@ -1959,3 +1959,4 @@ INV-08 全段重写）、`README.md`（页面清单、验收清单、一致化�
 - 新增 `README.md`（产品级说明：能力介绍、真机界面一览、Mermaid 架构图、硬件与分区规格、技术栈、快速开始、仓库结构、文档索引、当前开发状态）与 `doc/assets/` 真机截图；截图取自 `tmp/cache/screenshot_test` 与 `output/playwright`，均为此前已验收画面，未重新摆拍。
 - 未改动源码、sdkconfig、分区表、GPIO 与任何硬件路径；本次仅涉及文档、`.gitignore` 与 Git 索引。
 - 备份：`tmp/backups/manual/20261028-163904_readme_git_cleanup/.gitignore.orig`。
+- 2026-10-28 追加：README 的界面图整体换成 `ui-reference/ver2` 的 UI 参考预览（横屏 6 张按 1024×600、竖屏 2 张按 600×1024 实尺寸截取，横幅同步重绘），只在「开发状态」保留 1 张真机 LVGL 截屏作为对照；新增 `model/ver3/`（P4 整机装配体 + 4 个零件 + STL + 紧固件清单，共 7.5MB）与 `model/legacy/`（S3 旧箱体 3 个零件归档），结构件随仓库一并开源，并补 `model/README.md` 说明引用关系、单位与打印注意事项。截图为无头 Chromium 按 1:1 舞台渲染后精确裁切，未改 UI 代码。
