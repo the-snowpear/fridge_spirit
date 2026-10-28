@@ -1947,3 +1947,15 @@ INV-08 全段重写）、`README.md`（页面清单、验收清单、一致化�
 - 已知非本功能警告：`ota_1` 小 recovery 分区装不下主固件的既有 warning，与 MQ-5 无关。
 - 下一步真机门槛：断电接线/共地；GPIO20 节点上电前确认 <=3.0V；P6 总峰值 <=1.2A、压降 <=0.15V、30 分钟温升 <=10°C，否则改输入并联支路；60 秒预热；首次/储存后 48/72/168h 人工老化确认；洁净空气基线标定；USB reset 后 0 到 64 样本回归；MQ-5 不可替代认证燃气报警器。
 - 备份：`tmp/backups/manual/20260809-164921_mq5_docs_closeout/`。
+
+----
+完成时间：2026-10-28 16:50 +08:00（仓库整理与 README 发布）
+
+## 仓库规范化、README 与 GitHub 首个公开版本
+
+- 分支规范：本地唯一分支 `recovered-main` 更名为 `main`；新增远端 `origin` 指向 `github.com/the-snowpear/fridge_spirit`，并建立 `main -> origin/main` 上游跟踪。
+- 仓库瘦身：从索引移出 1.8GB 厂商例程包 `doc/野火小智【姿态传感器_MPU6050】模块_20260206/`（含 STM32 工程、上位机 exe、CMSIS 库）和误把工程镜像进 shell 错误路径的 `System.Management.Automation.Internal.Host.InternalHost/`，本地文件全部保留，跟踪文件由 22330 降到 1924。
+- `.gitignore` 修正：`*.exe`、`flasher_args.json`、`*.workspace`、`*.suo`、`*.sln.docstates` 原本把注释写在同一行导致规则失效，改为独立注释行；补充 `*.dll`/`*.lib`/`*.pdb` 与上述两个目录的忽略规则。
+- 新增 `README.md`（产品级说明：能力介绍、真机界面一览、Mermaid 架构图、硬件与分区规格、技术栈、快速开始、仓库结构、文档索引、当前开发状态）与 `doc/assets/` 真机截图；截图取自 `tmp/cache/screenshot_test` 与 `output/playwright`，均为此前已验收画面，未重新摆拍。
+- 未改动源码、sdkconfig、分区表、GPIO 与任何硬件路径；本次仅涉及文档、`.gitignore` 与 Git 索引。
+- 备份：`tmp/backups/manual/20261028-163904_readme_git_cleanup/.gitignore.orig`。

@@ -1,5 +1,0 @@
-dependencies:
-  espressif/esp-sr:
-    version: "2.4.5"
-    rules:
-      - if: "target != esp32p4"

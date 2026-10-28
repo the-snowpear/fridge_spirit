@@ -1,4 +1,0 @@
-dependencies:
-  idf:
-    version: ">=6.0.0,<7.0.0"
-  espressif/esp_codec_dev: "1.5.4"

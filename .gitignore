@@ -31,16 +31,24 @@ example/
 # 厂商大体积资料与演示视频，只保留在本地磁盘，不纳入版本管理（约 2.7GB / 218MB）
 doc/慧勤智远 ESP32-P4 CB V1.2小系统板/
 video/
+# 厂商整包资料：MPU6050 例程包约 1.8GB（含 STM32 工程、上位机 exe、CMSIS 库），只留本地
+doc/野火小智【姿态传感器_MPU6050】模块_20260206/
+# 误把工程目录镜像进 PowerShell 错误路径的残留副本，禁止入库
+System.Management.Automation.Internal.Host.InternalHost/
 *.o
 *.a
 *.out
-*.exe # For any host-side utilities compiled on Windows
+# Windows 主机侧工具产物
+*.exe
+*.dll
+*.lib
+*.pdb
 
 # ESP-IDF specific build outputs
 *.bin
 *.elf
 *.map
-flasher_args.json # Generated in build directory
+flasher_args.json
 sdkconfig.old
 sdkconfig
 
@@ -85,9 +93,10 @@ Desktop.ini
 
 # User-specific configuration files
 *.user
-*.workspace # General workspace files, can be from various tools
-*.suo       # Visual Studio Solution User Options
-*.sln.docstates # Visual Studio
+# 各类编辑器的通用工作区文件
+*.workspace
+*.suo
+*.sln.docstates
 
 # 本地密钥与环境（已跟踪的 backend/.env 仍需用 git update-index --skip-worktree 或提交时手动排除）
 backend/.env

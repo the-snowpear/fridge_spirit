@@ -1,5 +1,0 @@
-dependencies:
-  lvgl/lvgl:
-    version: "9.2.2"
-    rules:
-      - if: "target != esp32p4"
